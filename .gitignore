@@ -1,1 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
 .env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.sqlite3
+
+# Secrets and config
+.env.local
+.env.production
+secrets/
+config/local.py
+config/production.py
+
+# Kubernetes
+*.kubeconfig
+kubeconfig*
+
+# Docker
+.dockerignore
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+# MCP specific
+.mcp_cache/
+mcp_logs/
+
+# Application specific
+app_logs/
+deployment_logs/

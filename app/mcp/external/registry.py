@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from .interfaces import ExternalMCPClient
 from .handlers import MCPHandler, MCPHandlerPool, MCPHandlerConfig
 from .providers.github import GitHubMCPClient
+from .providers.slack import SlackMCPClient
 from .errors import MCPExternalError
 
 
@@ -25,6 +26,7 @@ class MCPProviderRegistry:
     
     _providers: Dict[str, Type[ExternalMCPClient]] = {
         "github": GitHubMCPClient,
+        "slack": SlackMCPClient,
         # Add more providers as they are implemented
     }
     
