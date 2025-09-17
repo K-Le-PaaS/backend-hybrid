@@ -1,3 +1,4 @@
+import json
 from typing import Any, Dict
 
 from fastapi import APIRouter, Header, Request
@@ -17,7 +18,7 @@ async def github_webhook(
 ) -> Dict[str, Any]:
     raw = await request.body()
     verify_github_signature(raw, x_hub_signature_256)
-    event = await request.json()
+    event = json.loads(raw)
 
     if x_github_event == "push":
         return handle_push_event(event)
@@ -33,8 +34,10 @@ async def get_github_app_installations() -> Dict[str, Any]:
     try:
         installations = await github_app_auth.get_app_installations()
         return {"status": "success", "installations": installations}
+    except ValueError as e:
+        return {"status": "error", "message": f"Invalid request: {e}"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Internal error: {e}"}
 
 
 @router.post("/github/app/installations/{installation_id}/token", response_model=dict)
@@ -43,7 +46,9 @@ async def get_installation_token(installation_id: str) -> Dict[str, Any]:
     try:
         token = await github_app_auth.get_installation_token(installation_id)
         return {"status": "success", "token": token}
+    except ValueError as e:
+        return {"status": "error", "message": f"Invalid request: {e}"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Internal error: {e}"}
 
 
