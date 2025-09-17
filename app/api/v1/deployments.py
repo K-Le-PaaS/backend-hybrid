@@ -11,7 +11,7 @@ router = APIRouter()
 
 class RollbackRequest(BaseModel):
     app_name: str = Field(min_length=1)
-    environment: str = Field(min_length=1)
+    environment: Environment
 
 
 @router.post("/deploy", response_model=dict)
