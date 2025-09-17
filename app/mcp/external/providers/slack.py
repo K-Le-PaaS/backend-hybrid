@@ -405,9 +405,9 @@ class SlackMCPClient(ExternalMCPClient):
         }
         
         if blocks:
-            params["blocks"] = json.dumps(blocks)
+            params["blocks"] = blocks
         if attachments:
-            params["attachments"] = json.dumps(attachments)
+            params["attachments"] = attachments
         if thread_ts:
             params["thread_ts"] = thread_ts
 
