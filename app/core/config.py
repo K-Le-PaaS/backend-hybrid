@@ -22,6 +22,16 @@ class Settings(BaseSettings):
 
     # Slack
     slack_webhook_url: str | None = None
+    # Alerting (optional)
+    slack_alert_channel_default: str | None = None
+    slack_alert_channel_rate_limited: str | None = None
+    slack_alert_channel_unauthorized: str | None = None
+    slack_alert_template_error: str | None = Field(
+        default="[MCP][ERROR] {{operation}} failed: code={{code}} msg={{message}}"
+    )
+    slack_alert_template_health_down: str | None = Field(
+        default="[MCP][HEALTH][DOWN] code={{code}} msg={{message}}"
+    )
 
     # GitHub App
     github_app_id: str | None = None
