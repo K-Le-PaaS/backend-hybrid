@@ -58,7 +58,7 @@ def perform_rollback(app_name: str, environment: str) -> Dict[str, Any]:
     # Re-deploy previous image/replicas (still Phase 1: return plan)
     payload = DeployApplicationInput(
         app_name=app_name,
-        environment=environment,  # type: ignore[arg-type]
+        environment=Environment(environment),
         image=prev.image,
         replicas=prev.replicas,
     )

@@ -1,11 +1,17 @@
 from typing import Any, Dict
 
 from fastapi import APIRouter
+from pydantic import BaseModel, Field
 
 from ...services.deployments import DeployApplicationInput, perform_deploy, perform_rollback
 
 
 router = APIRouter()
+
+
+class RollbackRequest(BaseModel):
+    app_name: str = Field(min_length=1)
+    environment: str = Field(min_length=1)
 
 
 @router.post("/deploy", response_model=dict)
@@ -14,7 +20,7 @@ async def deploy_application(body: DeployApplicationInput) -> Dict[str, Any]:
 
 
 @router.post("/deployments/rollback", response_model=dict)
-async def rollback(app_name: str, environment: str) -> Dict[str, Any]:
-    return perform_rollback(app_name=app_name, environment=environment)
+async def rollback(body: RollbackRequest) -> Dict[str, Any]:
+    return perform_rollback(app_name=body.app_name, environment=body.environment)
 
 

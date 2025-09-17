@@ -11,10 +11,16 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
     curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
+# Add a non-root user
+RUN useradd --create-home appuser
+
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app ./app
+COPY --chown=appuser:appuser app ./app
+
+# Switch to the non-root user
+USER appuser
 
 EXPOSE 8080
 

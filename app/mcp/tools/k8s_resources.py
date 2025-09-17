@@ -1,3 +1,4 @@
+from enum import Enum
 from typing import Any, Dict, Optional
 
 try:
@@ -12,8 +13,17 @@ from pydantic import BaseModel, Field
 
 from ...services.k8s_client import get_core_v1_api, get_apps_v1_api
 
+try:
+    from kubernetes.client import ApiException
+except ImportError:
+    # Fallback for when kubernetes client is not available
+    class ApiException(Exception):
+        def __init__(self, status: int, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.status = status
 
-class ResourceKind(str):
+
+class ResourceKind(str, Enum):
     DEPLOYMENT = "Deployment"
     SERVICE = "Service"
     CONFIGMAP = "ConfigMap"
@@ -105,7 +115,9 @@ async def k8s_apply(obj: K8sObject) -> Dict[str, Any]:
             api.read_namespaced_deployment(name=name, namespace=ns)
             api.patch_namespaced_deployment(name=name, namespace=ns, body=body)
             action = "patched"
-        except Exception:
+        except ApiException as e:
+            if e.status != 404:
+                raise
             api.create_namespaced_deployment(namespace=ns, body=body)
             action = "created"
     elif kind == ResourceKind.SERVICE:
@@ -114,7 +126,9 @@ async def k8s_apply(obj: K8sObject) -> Dict[str, Any]:
             api.read_namespaced_service(name=name, namespace=ns)
             api.patch_namespaced_service(name=name, namespace=ns, body=body)
             action = "patched"
-        except Exception:
+        except ApiException as e:
+            if e.status != 404:
+                raise
             api.create_namespaced_service(namespace=ns, body=body)
             action = "created"
     elif kind == ResourceKind.CONFIGMAP:
@@ -123,7 +137,9 @@ async def k8s_apply(obj: K8sObject) -> Dict[str, Any]:
             api.read_namespaced_config_map(name=name, namespace=ns)
             api.patch_namespaced_config_map(name=name, namespace=ns, body=body)
             action = "patched"
-        except Exception:
+        except ApiException as e:
+            if e.status != 404:
+                raise
             api.create_namespaced_config_map(namespace=ns, body=body)
             action = "created"
     elif kind == ResourceKind.SECRET:
@@ -132,7 +148,9 @@ async def k8s_apply(obj: K8sObject) -> Dict[str, Any]:
             api.read_namespaced_secret(name=name, namespace=ns)
             api.patch_namespaced_secret(name=name, namespace=ns, body=body)
             action = "patched"
-        except Exception:
+        except ApiException as e:
+            if e.status != 404:
+                raise
             api.create_namespaced_secret(namespace=ns, body=body)
             action = "created"
     else:

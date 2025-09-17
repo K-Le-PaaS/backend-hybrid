@@ -1,6 +1,7 @@
 import hmac
 import hashlib
 import json
+import logging
 from typing import Any, Dict
 
 from fastapi import HTTPException
@@ -9,6 +10,8 @@ from ..core.config import get_settings
 from .deployments import DeployApplicationInput, perform_deploy
 from .notify import slack_notify
 from .github_app import github_app_auth
+
+logger = logging.getLogger(__name__)
 
 
 def verify_github_signature(payload_bytes: bytes, signature_header: str | None) -> None:
@@ -67,8 +70,8 @@ def handle_push_event(event: Dict[str, Any]) -> Dict[str, Any]:
         # fire-and-forget
         import asyncio
         asyncio.create_task(slack_notify(f"[Staging] Deploy triggered: {repo}:{commit}"))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error("Failed to send Slack notification for staging deploy", extra={"error": str(e), "repo": repo, "commit": commit})
     return {"status": "triggered", "deploy": result}
 
 
@@ -92,8 +95,8 @@ def handle_release_event(event: Dict[str, Any]) -> Dict[str, Any]:
     try:
         import asyncio
         asyncio.create_task(slack_notify(f"[Production] Release deploy triggered: {repo}:{tag}"))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error("Failed to send Slack notification for production release", extra={"error": str(e), "repo": repo, "tag": tag})
     return {"status": "triggered", "environment": "production", "deploy": result}
 
 
