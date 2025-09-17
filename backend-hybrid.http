@@ -1,0 +1,93 @@
+### Local testing (REST)
+
+GET http://localhost:8080/api/v1/health
+
+###
+GET http://localhost:8080/api/v1/version
+
+###
+GET http://localhost:8080/mcp/info
+
+###
+POST http://localhost:8080/api/v1/deploy
+Content-Type: application/json
+
+{
+  "app_name": "sample-app",
+  "environment": "staging",
+  "image": "example/sample-app:1.0.0",
+  "replicas": 2
+}
+
+###
+POST http://localhost:8080/api/v1/nlp/interpret
+Content-Type: application/json
+
+{
+  "prompt": "스테이징에 sample-app 2 레플리카로 배포해줘"
+}
+
+### Command execution
+POST http://localhost:8080/api/v1/commands/execute
+Content-Type: application/json
+
+{
+  "text": "스테이징에 sample-app 3 레플리카로 배포해줘"
+}
+
+### GitHub webhook (push)
+POST http://localhost:8080/api/v1/cicd/webhook
+X-GitHub-Event: push
+X-Hub-Signature-256: sha256=dummy
+Content-Type: application/json
+
+{
+  "ref": "refs/heads/main",
+  "after": "0123456789abcdef",
+  "repository": { "name": "sample-app" }
+}
+
+### GitHub webhook (release published)
+POST http://localhost:8080/api/v1/cicd/webhook
+X-GitHub-Event: release
+X-Hub-Signature-256: sha256=dummy
+Content-Type: application/json
+
+{
+  "action": "published",
+  "release": { "tag_name": "v1.2.3" },
+  "repository": { "name": "sample-app" }
+}
+
+### K8s: list contexts
+GET http://localhost:8080/api/v1/k8s/contexts
+
+### Rollback previous version
+POST http://localhost:8080/api/v1/deployments/rollback?app_name=sample-app&environment=staging
+
+### Metrics
+GET http://localhost:8080/metrics
+
+### Prometheus query
+POST http://localhost:8080/api/v1/monitoring/query
+Content-Type: application/json
+
+{
+  "query": "up"
+}
+
+### Tutorial
+POST http://localhost:8080/api/v1/tutorial/start?session_id=demo
+###
+GET http://localhost:8080/api/v1/tutorial/get?session_id=demo
+###
+POST http://localhost:8080/api/v1/tutorial/next?session_id=demo
+###
+POST http://localhost:8080/api/v1/tutorial/complete?session_id=demo
+
+### GitHub App endpoints
+GET http://localhost:8080/api/v1/github/app/installations
+###
+POST http://localhost:8080/api/v1/github/app/installations/123456/token
+
+
