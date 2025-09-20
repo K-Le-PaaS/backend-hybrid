@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 
@@ -17,6 +18,8 @@ class MCPHandlerConfig:
     timeout: float = 30.0
     max_retries: int = 3
     retry_delay: float = 1.0
+    breaker_failure_threshold: int = 5
+    breaker_reset_timeout_sec: float = 30.0
 
 
 class MCPHandler:
@@ -27,6 +30,9 @@ class MCPHandler:
         self.config = config or MCPHandlerConfig()
         self.converter = MCPMessageConverter()
         self.request_handler = MCPRequestHandler(external_client)
+        # Circuit breaker state
+        self._breaker_failures = 0
+        self._breaker_opened_at: float | None = None
     
     def _select_alert_channel(self, code: str) -> str | None:
         s = get_settings()
@@ -42,6 +48,25 @@ class MCPHandler:
             return s.slack_alert_template_health_down or "[MCP][HEALTH][DOWN] code={{code}} msg={{message}}"
         return s.slack_alert_template_error or "[MCP][ERROR] {{operation}} failed: code={{code}} msg={{message}}"
 
+    def _breaker_is_open(self) -> bool:
+        if self._breaker_opened_at is None:
+            return False
+        # Half-open after reset timeout
+        elapsed = time.time() - self._breaker_opened_at
+        if elapsed >= self.config.breaker_reset_timeout_sec:
+            # allow a trial call (half-open)
+            return False
+        return True
+
+    def _breaker_record_success(self) -> None:
+        self._breaker_failures = 0
+        self._breaker_opened_at = None
+
+    def _breaker_record_failure(self) -> None:
+        self._breaker_failures += 1
+        if self._breaker_failures >= self.config.breaker_failure_threshold:
+            self._breaker_opened_at = time.time()
+
     async def initialize(self) -> None:
         """Initialize the MCP handler."""
         await self.external_client.connect()
@@ -52,9 +77,14 @@ class MCPHandler:
     
     async def list_tools(self) -> List[Dict[str, Any]]:
         """List available tools from external MCP server."""
+        if self._breaker_is_open():
+            raise MCPExternalError(code="circuit_open", message="Circuit breaker is open")
         try:
-            return await self.request_handler.handle_list_tools()
+            result = await self.request_handler.handle_list_tools()
+            self._breaker_record_success()
+            return result
         except MCPExternalError as e:
+            self._breaker_record_failure()
             # Non-blocking Slack alert
             try:
                 await slack_notify(
@@ -66,6 +96,7 @@ class MCPHandler:
                 pass
             raise
         except Exception as e:
+            self._breaker_record_failure()
             try:
                 await slack_notify(
                     template=self._select_template("error"),
@@ -81,9 +112,14 @@ class MCPHandler:
     
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Call a tool on external MCP server."""
+        if self._breaker_is_open():
+            raise MCPExternalError(code="circuit_open", message="Circuit breaker is open")
         try:
-            return await self.request_handler.handle_tool_call(tool_name, arguments)
+            result = await self.request_handler.handle_tool_call(tool_name, arguments)
+            self._breaker_record_success()
+            return result
         except MCPExternalError as e:
+            self._breaker_record_failure()
             try:
                 await slack_notify(
                     template=self._select_template("error"),
@@ -94,6 +130,7 @@ class MCPHandler:
                 pass
             raise
         except Exception as e:
+            self._breaker_record_failure()
             try:
                 await slack_notify(
                     template=self._select_template("error"),
@@ -109,9 +146,14 @@ class MCPHandler:
     
     async def health_check(self) -> Dict[str, Any]:
         """Check health of external MCP server."""
+        if self._breaker_is_open():
+            raise MCPExternalError(code="circuit_open", message="Circuit breaker is open")
         try:
-            return await self.request_handler.handle_health_check()
+            result = await self.request_handler.handle_health_check()
+            self._breaker_record_success()
+            return result
         except MCPExternalError as e:
+            self._breaker_record_failure()
             try:
                 await slack_notify(
                     template=self._select_template("health"),
@@ -122,6 +164,7 @@ class MCPHandler:
                 pass
             raise
         except Exception as e:
+            self._breaker_record_failure()
             try:
                 await slack_notify(
                     template=self._select_template("health"),

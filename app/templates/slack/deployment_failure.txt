@@ -1,0 +1,20 @@
+❌ *배포 실패*
+
+*애플리케이션:* {{ app_name | default('알 수 없음') }}
+*환경:* {{ environment | default('알 수 없음') }}
+*버전:* {{ version | default('N/A') }}
+*배포 ID:* {{ deployment_id | default('N/A') }}
+*시간:* {{ timestamp | default('N/A') }}
+
+*오류 메시지:*
+```
+{{ error_message | default('오류 정보를 가져올 수 없습니다.') }}
+```
+
+{% if logs_url %}
+<{{ logs_url }}|로그 확인하기>
+{% endif %}
+
+{% if retry_url %}
+<{{ retry_url }}|재시도하기>
+{% endif %}

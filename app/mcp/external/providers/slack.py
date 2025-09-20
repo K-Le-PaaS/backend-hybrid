@@ -14,6 +14,8 @@ from ..errors import MCPExternalError
 from ..metrics import MCP_EXTERNAL_LATENCY, MCP_EXTERNAL_REQUESTS
 from ..metrics import MCP_EXTERNAL_ERRORS, MCP_EXTERNAL_HEALTH
 from ..retry import retry_async
+from ...services.slack_notification_service import get_slack_notification_service
+from ...models.slack_events import SlackEventType
 
 
 class SlackMCPClient(ExternalMCPClient):
@@ -37,6 +39,7 @@ class SlackMCPClient(ExternalMCPClient):
         self._connected = False
         self._http_client: httpx.AsyncClient | None = http_client
         self._api_base_url = "https://slack.com/api"
+        self._notification_service = get_slack_notification_service()
 
     async def connect(self) -> None:
         """Establish HTTP client and authenticate if needed."""
@@ -546,16 +549,49 @@ class SlackMCPClient(ExternalMCPClient):
         }
 
     async def _notify_event(self, event: str, arguments: Mapping[str, Any], token: str | None) -> dict[str, Any]:
+        """이벤트 알림을 새로운 알림 서비스를 통해 전송합니다."""
         channel_map = arguments.get("channel_map") or {}
         context = arguments.get("context") or {}
+        
         if not isinstance(channel_map, dict) or event not in channel_map:
             raise MCPExternalError(code="bad_request", message=f"Missing channel mapping for event: {event}")
+        
         channel = channel_map[event]
-        # default template
-        template = "[{{ status|default('unknown')|upper }}] {{ app|default('app') }} {{ version|default('n/a') }}"
-        template = arguments.get("template") or template
-        return await self._send_message({
-            "channel": channel,
-            "template": template,
-            "context": context,
-        }, token)
+        
+        # 이벤트 타입 매핑
+        event_type_map = {
+            "build": SlackEventType.CI_CD_SUCCESS if context.get("status", "").lower() in ["success", "completed", "passed"] else SlackEventType.CI_CD_FAILURE,
+            "deploy": SlackEventType.DEPLOYMENT_SUCCESS if context.get("status", "").lower() in ["success", "completed", "deployed"] else SlackEventType.DEPLOYMENT_FAILURE,
+            "release": SlackEventType.DEPLOYMENT_SUCCESS if context.get("status", "").lower() in ["success", "completed", "released"] else SlackEventType.DEPLOYMENT_FAILURE,
+        }
+        
+        event_type = event_type_map.get(event, SlackEventType.GENERIC_INFO)
+        
+        try:
+            # 새로운 알림 서비스 사용
+            response = await self._notification_service.send_notification(
+                event_type=event_type,
+                context=context,
+                default_channel=channel
+            )
+            
+            return {
+                "ok": True,
+                "content": {
+                    "message": f"Event notification sent via new service",
+                    "event": event,
+                    "channel": channel,
+                    "event_type": event_type.value,
+                    "response": response
+                }
+            }
+            
+        except Exception as e:
+            # 폴백: 기존 방식 사용
+            template = "[{{ status|default('unknown')|upper }}] {{ app|default('app') }} {{ version|default('n/a') }}"
+            template = arguments.get("template") or template
+            return await self._send_message({
+                "channel": channel,
+                "template": template,
+                "context": context,
+            }, token)

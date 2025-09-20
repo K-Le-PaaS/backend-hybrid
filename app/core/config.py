@@ -1,9 +1,11 @@
 from functools import lru_cache
 from pydantic_settings import BaseSettings
 from pydantic import Field
+from pydantic import ConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = ConfigDict(env_prefix="KLEPAAS_", extra="ignore")
     app_name: str = Field(default="K-Le-PaaS Backend Hybrid")
     app_version: str = Field(default="0.1.0")
 
@@ -16,9 +18,20 @@ class Settings(BaseSettings):
     # GitHub Webhook
     github_webhook_secret: str | None = None
     github_branch_main: str | None = "main"
+    # Generic staging webhook secret (HMAC-SHA256)
+    staging_webhook_secret: str | None = None
 
     # Prometheus
     prometheus_base_url: str | None = None
+
+    # K8s Deploy (staging)
+    enable_k8s_deploy: bool = False
+    k8s_staging_namespace: str = "staging"
+    k8s_image_pull_secret: str | None = "ncp-cr"
+
+    # MCP trigger (optional)
+    mcp_trigger_provider: str | None = None
+    mcp_trigger_tool: str | None = "deploy_application"
 
     # Slack
     slack_webhook_url: str | None = None
@@ -37,10 +50,6 @@ class Settings(BaseSettings):
     github_app_id: str | None = None
     github_app_private_key: str | None = None
     github_app_webhook_secret: str | None = None
-
-    class Config:
-        env_prefix = "KLEPAAS_"
-        extra = "ignore"
 
 
 @lru_cache(maxsize=1)

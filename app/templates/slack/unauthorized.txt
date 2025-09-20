@@ -1,0 +1,22 @@
+🔐 *인증 실패*
+
+*서비스:* {{ service_name | default('Slack API') }}
+*사용자:* {{ user | default('알 수 없음') }}
+*시간:* {{ timestamp | default('N/A') }}
+
+*오류 메시지:*
+```
+{{ message | default('인증에 실패했습니다.') }}
+```
+
+{% if token_type %}
+*토큰 타입:* {{ token_type }}
+{% endif %}
+
+{% if scope %}
+*필요한 권한:* {{ scope }}
+{% endif %}
+
+{% if action_required %}
+*필요한 조치:* {{ action_required }}
+{% endif %}

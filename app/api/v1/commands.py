@@ -1,8 +1,9 @@
 from typing import Any, Dict
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from ...services.commands import CommandRequest, plan_command, execute_command
+from ...services.security import require_scopes
 
 
 router = APIRouter()

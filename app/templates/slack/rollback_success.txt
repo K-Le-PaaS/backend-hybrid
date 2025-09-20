@@ -1,0 +1,15 @@
+🔄 *롤백 성공*
+
+*애플리케이션:* {{ app_name | default('알 수 없음') }}
+*환경:* {{ environment | default('알 수 없음') }}
+*이전 버전:* {{ previous_version | default('N/A') }}
+*롤백 ID:* {{ rollback_id | default('N/A') }}
+*시간:* {{ timestamp | default('N/A') }}
+
+{% if reason %}
+*롤백 사유:* {{ reason }}
+{% endif %}
+
+{% if url %}
+<{{ url }}|롤백 상세보기>
+{% endif %}
