@@ -12,6 +12,7 @@ from ..interfaces import ExternalMCPClient
 from ..errors import MCPExternalError
 from ..metrics import MCP_EXTERNAL_LATENCY, MCP_EXTERNAL_REQUESTS
 from ..retry import retry_async
+from ..metrics import MCP_EXTERNAL_ERRORS, MCP_EXTERNAL_HEALTH
 
 
 class GitHubMCPClient(ExternalMCPClient):
@@ -86,12 +87,15 @@ class GitHubMCPClient(ExternalMCPClient):
                 return result
             except MCPExternalError as e:
                 MCP_EXTERNAL_REQUESTS.labels(provider, op, e.code).inc()
+                MCP_EXTERNAL_ERRORS.labels(provider=provider, operation=op, code=e.code).inc()
                 raise
             except asyncio.TimeoutError as e:
                 MCP_EXTERNAL_REQUESTS.labels(provider, op, "timeout").inc()
+                MCP_EXTERNAL_ERRORS.labels(provider=provider, operation=op, code="timeout").inc()
                 raise MCPExternalError(code="timeout", message=str(e))
             except Exception as e:  # noqa: BLE001
                 MCP_EXTERNAL_REQUESTS.labels(provider, op, "internal").inc()
+                MCP_EXTERNAL_ERRORS.labels(provider=provider, operation=op, code="internal").inc()
                 raise MCPExternalError(code="internal", message=str(e))
 
     async def call_tool(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -122,12 +126,15 @@ class GitHubMCPClient(ExternalMCPClient):
                 return result
             except MCPExternalError as e:
                 MCP_EXTERNAL_REQUESTS.labels(provider, op, e.code).inc()
+                MCP_EXTERNAL_ERRORS.labels(provider=provider, operation=op, code=e.code).inc()
                 raise
             except asyncio.TimeoutError as e:
                 MCP_EXTERNAL_REQUESTS.labels(provider, op, "timeout").inc()
+                MCP_EXTERNAL_ERRORS.labels(provider=provider, operation=op, code="timeout").inc()
                 raise MCPExternalError(code="timeout", message=str(e))
             except Exception as e:  # noqa: BLE001
                 MCP_EXTERNAL_REQUESTS.labels(provider, op, "internal").inc()
+                MCP_EXTERNAL_ERRORS.labels(provider=provider, operation=op, code="internal").inc()
                 raise MCPExternalError(code="internal", message=str(e))
 
     async def health(self) -> dict[str, Any]:
@@ -150,12 +157,17 @@ class GitHubMCPClient(ExternalMCPClient):
 
                 result = await retry_async(_run)
                 MCP_EXTERNAL_REQUESTS.labels(provider, op, "ok").inc()
+                MCP_EXTERNAL_HEALTH.labels(provider=provider).set(1)
                 return result
             except MCPExternalError as e:
                 MCP_EXTERNAL_REQUESTS.labels(provider, op, e.code).inc()
+                MCP_EXTERNAL_ERRORS.labels(provider=provider, operation=op, code=e.code).inc()
+                MCP_EXTERNAL_HEALTH.labels(provider=provider).set(0)
                 raise
             except Exception as e:  # noqa: BLE001
                 MCP_EXTERNAL_REQUESTS.labels(provider, op, "internal").inc()
+                MCP_EXTERNAL_ERRORS.labels(provider=provider, operation=op, code="internal").inc()
+                MCP_EXTERNAL_HEALTH.labels(provider=provider).set(0)
                 raise MCPExternalError(code="internal", message=str(e))
 
     async def close(self) -> None:
@@ -239,6 +251,7 @@ class GitHubMCPClient(ExternalMCPClient):
             # Handle rate limiting
             if response.status_code == 429:
                 retry_after = int(response.headers.get("Retry-After", "60"))
+                MCP_EXTERNAL_ERRORS.labels(provider="github", operation=f"{method} {path}", code="rate_limited").inc()
                 raise MCPExternalError(
                     code="rate_limited",
                     message="GitHub API rate limit exceeded",
@@ -249,21 +262,23 @@ class GitHubMCPClient(ExternalMCPClient):
             if response.status_code >= 400:
                 error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
                 error_message = error_data.get("message", f"HTTP {response.status_code}")
-                
+                code = "bad_request"
                 if response.status_code == 401:
-                    raise MCPExternalError(code="unauthorized", message=error_message)
+                    code = "unauthorized"
                 elif response.status_code == 403:
-                    raise MCPExternalError(code="forbidden", message=error_message)
+                    code = "forbidden"
                 elif response.status_code == 404:
-                    raise MCPExternalError(code="not_found", message=error_message)
-                else:
-                    raise MCPExternalError(code="bad_request", message=error_message)
+                    code = "not_found"
+                MCP_EXTERNAL_ERRORS.labels(provider="github", operation=f"{method} {path}", code=code).inc()
+                raise MCPExternalError(code=code, message=error_message)
             
             return response.json() if response.content else {}
             
         except httpx.TimeoutException as e:
+            MCP_EXTERNAL_ERRORS.labels(provider="github", operation=f"{method} {path}", code="timeout").inc()
             raise MCPExternalError(code="timeout", message=str(e))
         except httpx.ConnectError as e:
+            MCP_EXTERNAL_ERRORS.labels(provider="github", operation=f"{method} {path}", code="unavailable").inc()
             raise MCPExternalError(code="unavailable", message=str(e))
 
 

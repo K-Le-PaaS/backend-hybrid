@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from .interfaces import ExternalMCPClient
 from .errors import MCPExternalError
 from .message_converter import MCPMessageConverter, MCPRequestHandler
+from ...services.notify import slack_notify
+from ...core.config import get_settings
 
 
 @dataclass
@@ -26,6 +28,20 @@ class MCPHandler:
         self.converter = MCPMessageConverter()
         self.request_handler = MCPRequestHandler(external_client)
     
+    def _select_alert_channel(self, code: str) -> str | None:
+        s = get_settings()
+        if code == "rate_limited" and s.slack_alert_channel_rate_limited:
+            return s.slack_alert_channel_rate_limited
+        if code == "unauthorized" and s.slack_alert_channel_unauthorized:
+            return s.slack_alert_channel_unauthorized
+        return s.slack_alert_channel_default
+
+    def _select_template(self, kind: str) -> str:
+        s = get_settings()
+        if kind == "health":
+            return s.slack_alert_template_health_down or "[MCP][HEALTH][DOWN] code={{code}} msg={{message}}"
+        return s.slack_alert_template_error or "[MCP][ERROR] {{operation}} failed: code={{code}} msg={{message}}"
+
     async def initialize(self) -> None:
         """Initialize the MCP handler."""
         await self.external_client.connect()
@@ -38,7 +54,26 @@ class MCPHandler:
         """List available tools from external MCP server."""
         try:
             return await self.request_handler.handle_list_tools()
+        except MCPExternalError as e:
+            # Non-blocking Slack alert
+            try:
+                await slack_notify(
+                    template=self._select_template("error"),
+                    context={"operation": "list_tools", "code": e.code, "message": e.message},
+                    channel=self._select_alert_channel(e.code),
+                )
+            except Exception:
+                pass
+            raise
         except Exception as e:
+            try:
+                await slack_notify(
+                    template=self._select_template("error"),
+                    context={"operation": "list_tools", "code": "internal", "message": str(e)},
+                    channel=self._select_alert_channel("internal"),
+                )
+            except Exception:
+                pass
             raise MCPExternalError(
                 code="internal",
                 message=f"Failed to list tools: {e}"
@@ -48,7 +83,25 @@ class MCPHandler:
         """Call a tool on external MCP server."""
         try:
             return await self.request_handler.handle_tool_call(tool_name, arguments)
+        except MCPExternalError as e:
+            try:
+                await slack_notify(
+                    template=self._select_template("error"),
+                    context={"operation": f"call:{tool_name}", "code": e.code, "message": e.message},
+                    channel=self._select_alert_channel(e.code),
+                )
+            except Exception:
+                pass
+            raise
         except Exception as e:
+            try:
+                await slack_notify(
+                    template=self._select_template("error"),
+                    context={"operation": f"call:{tool_name}", "code": "internal", "message": str(e)},
+                    channel=self._select_alert_channel("internal"),
+                )
+            except Exception:
+                pass
             raise MCPExternalError(
                 code="internal",
                 message=f"Failed to call tool {tool_name}: {e}"
@@ -58,7 +111,25 @@ class MCPHandler:
         """Check health of external MCP server."""
         try:
             return await self.request_handler.handle_health_check()
+        except MCPExternalError as e:
+            try:
+                await slack_notify(
+                    template=self._select_template("health"),
+                    context={"code": e.code, "message": e.message},
+                    channel=self._select_alert_channel(e.code),
+                )
+            except Exception:
+                pass
+            raise
         except Exception as e:
+            try:
+                await slack_notify(
+                    template=self._select_template("health"),
+                    context={"code": "internal", "message": str(e)},
+                    channel=self._select_alert_channel("internal"),
+                )
+            except Exception:
+                pass
             raise MCPExternalError(
                 code="internal",
                 message=f"Health check failed: {e}"
@@ -73,6 +144,10 @@ class MCPHandler:
                     return tool.get("inputSchema", {})
             return None
         except Exception as e:
+            try:
+                await slack_notify(f"[MCP][ERROR] get_tool_schema {tool_name} failed: code=internal msg={e}")
+            except Exception:
+                pass
             raise MCPExternalError(
                 code="internal",
                 message=f"Failed to get tool schema for {tool_name}: {e}"

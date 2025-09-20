@@ -12,6 +12,7 @@ from jinja2 import Environment, StrictUndefined
 from ..interfaces import ExternalMCPClient
 from ..errors import MCPExternalError
 from ..metrics import MCP_EXTERNAL_LATENCY, MCP_EXTERNAL_REQUESTS
+from ..metrics import MCP_EXTERNAL_ERRORS, MCP_EXTERNAL_HEALTH
 from ..retry import retry_async
 
 
@@ -77,6 +78,16 @@ class SlackMCPClient(ExternalMCPClient):
                         "channel_map": {"type": "object", "description": "Mapping of event->channel"}
                     },
                     "required": [],
+                    "oneOf": [
+                        {"required": ["channel"]},
+                        {"required": ["event_type", "channel_map"]}
+                    ],
+                    "anyOf": [
+                        {"required": ["text"]},
+                        {"required": ["blocks"]},
+                        {"required": ["attachments"]},
+                        {"required": ["template"]}
+                    ]
                 },
             },
             {
@@ -201,6 +212,7 @@ class SlackMCPClient(ExternalMCPClient):
             token = await self._get_token()
             if token and not self._webhook_url:
                 response = await self._make_api_request("auth.test", {}, token)
+                MCP_EXTERNAL_HEALTH.labels(provider="slack").set(1)
                 return {
                     "ok": True,
                     "connected": True,
@@ -210,6 +222,7 @@ class SlackMCPClient(ExternalMCPClient):
                 }
             else:
                 # For webhook-only, just check if we can connect
+                MCP_EXTERNAL_HEALTH.labels(provider="slack").set(1)
                 return {
                     "ok": True,
                     "connected": True,
@@ -217,6 +230,7 @@ class SlackMCPClient(ExternalMCPClient):
                     "auth_type": "webhook"
                 }
         except Exception as e:
+            MCP_EXTERNAL_HEALTH.labels(provider="slack").set(0)
             return {
                 "ok": False,
                 "connected": False,
@@ -267,6 +281,7 @@ class SlackMCPClient(ExternalMCPClient):
                 if response.status_code == 429:
                     # Rate limited
                     retry_after = int(response.headers.get("Retry-After", "60"))
+                    MCP_EXTERNAL_ERRORS.labels(provider="slack", operation=endpoint, code="rate_limited").inc()
                     raise MCPExternalError(
                         code="rate_limited",
                         message="Slack API rate limit exceeded",
@@ -274,12 +289,14 @@ class SlackMCPClient(ExternalMCPClient):
                     )
                 
                 if response.status_code == 401:
+                    MCP_EXTERNAL_ERRORS.labels(provider="slack", operation=endpoint, code="unauthorized").inc()
                     raise MCPExternalError(
                         code="unauthorized",
                         message="Slack API authentication failed"
                     )
                 
                 if response.status_code != 200:
+                    MCP_EXTERNAL_ERRORS.labels(provider="slack", operation=endpoint, code="bad_request").inc()
                     raise MCPExternalError(
                         code="bad_request",
                         message=f"Slack API error: {response.status_code} - {response.text}"
@@ -289,6 +306,7 @@ class SlackMCPClient(ExternalMCPClient):
                 data = json.loads(data)
                 if not data.get("ok", False):
                     error = data.get("error", "unknown_error")
+                    MCP_EXTERNAL_ERRORS.labels(provider="slack", operation=endpoint, code=error).inc()
                     raise MCPExternalError(
                         code="bad_request",
                         message=f"Slack API error: {error}"
@@ -535,6 +553,7 @@ class SlackMCPClient(ExternalMCPClient):
         channel = channel_map[event]
         # default template
         template = "[{{ status|default('unknown')|upper }}] {{ app|default('app') }} {{ version|default('n/a') }}"
+        template = arguments.get("template") or template
         return await self._send_message({
             "channel": channel,
             "template": template,
