@@ -15,6 +15,7 @@ from .api.v1.cicd import router as cicd_router
 from .api.v1.k8s import router as k8s_router
 from .api.v1.monitoring import router as monitoring_router
 from .api.v1.tutorial import router as tutorial_router
+from .api.v1.websocket import router as websocket_router
 from .mcp.external.api import router as mcp_external_router
 
 
@@ -47,6 +48,7 @@ def create_app() -> FastAPI:
     app.include_router(k8s_router, prefix="/api/v1", tags=["k8s"])
     app.include_router(monitoring_router, prefix="/api/v1", tags=["monitoring"])
     app.include_router(tutorial_router, prefix="/api/v1", tags=["tutorial"])
+    app.include_router(websocket_router, prefix="/api/v1", tags=["websocket"])
     app.include_router(mcp_external_router, tags=["mcp-external"])
 
     @app.get("/metrics")

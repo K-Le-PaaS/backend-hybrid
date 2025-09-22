@@ -162,3 +162,4 @@ class MCPRequestHandler:
         
         # Return health status in internal format
         return health
+

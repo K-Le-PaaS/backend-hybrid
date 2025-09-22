@@ -1,0 +1,18 @@
+🚨 *MCP 서비스 장애*
+
+*서비스:* {{ service_name | default('MCP 서비스') }}
+*상태:* {{ status | default('DOWN') }}
+*시간:* {{ timestamp | default('N/A') }}
+
+*오류 메시지:*
+```
+{{ message | default('서비스 상태를 확인할 수 없습니다.') }}
+```
+
+{% if last_healthy %}
+*마지막 정상 시간:* {{ last_healthy }}
+{% endif %}
+
+{% if recovery_estimate %}
+*예상 복구 시간:* {{ recovery_estimate }}
+{% endif %}

@@ -1,0 +1,22 @@
+❌ *CI/CD 실패*
+
+*파이프라인:* {{ pipeline_name | default('알 수 없음') }}
+*환경:* {{ environment | default('알 수 없음') }}
+*브랜치:* {{ branch | default('N/A') }}
+*커밋:* {{ commit_sha | default('N/A') }}
+*시간:* {{ timestamp | default('N/A') }}
+
+*실패 단계:* {{ failed_stage | default('알 수 없음') }}
+
+*오류 메시지:*
+```
+{{ error_message | default('오류 정보를 가져올 수 없습니다.') }}
+```
+
+{% if url %}
+<{{ url }}|파이프라인 상세보기>
+{% endif %}
+
+{% if retry_url %}
+<{{ retry_url }}|재시도하기>
+{% endif %}

@@ -184,3 +184,4 @@ async def cleanup_all_providers():
         return {"message": "All providers cleaned up successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+

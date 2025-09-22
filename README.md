@@ -111,6 +111,38 @@ docker run --rm -p 8080:8080 klepaas-backend:dev
 - MCP mount falls back to a stub if `fastapi_mcp` is not available.
 - Tighten CORS in production.
 
+## Ops Guide
+
+### Environment Variables (Backend)
+
+| Key | Description | Example |
+|-----|-------------|---------|
+| KLEPAAS_SLACK_WEBHOOK_URL | Slack Webhook URL | https://hooks.slack.com/services/... |
+| KLEPAAS_SLACK_ALERT_CHANNEL_DEFAULT | 기본 알림 채널 | #ops-alerts |
+| KLEPAAS_SLACK_ALERT_CHANNEL_RATE_LIMITED | rate_limited 전용 채널 | #ops-throttle |
+| KLEPAAS_SLACK_ALERT_CHANNEL_UNAUTHORIZED | unauthorized 전용 채널 | #ops-security |
+| KLEPAAS_SLACK_ALERT_TEMPLATE_ERROR | 에러 템플릿(Jinja2) | "[MCP][ERROR] {{operation}} code={{code}} msg={{message}}" |
+| KLEPAAS_SLACK_ALERT_TEMPLATE_HEALTH_DOWN | 헬스다운 템플릿 | "[MCP][HEALTH][DOWN] code={{code}} msg={{message}}" |
+
+### Security (Scopes)
+- 엔드포인트에 필요한 스코프를 `require_scopes(["mcp:execute"])` 형태로 선언
+- 테스트 환경은 `X-Scopes` 헤더 사용, 운영은 JWT/OAuth 토큰에서 스코프 파싱 권장
+
+### Audit Logging
+- 위치: `app/services/audit.py`
+- 포맷: JSON 구조(시간/사용자/IP/액션/리소스/상태/상세)
+- 중앙화: Splunk/Sentry/ELK 핸들러 추가 권장
+
+### Circuit Breaker
+- 위치: `app/mcp/external/handlers.py`
+- 설정: `breaker_failure_threshold`, `breaker_reset_timeout_sec`
+- 상태: closed → (실패 누적) → open → (타임아웃) → half-open → 성공 시 closed 복귀
+
+## Troubleshooting
+- Slack 알림 미수신: Webhook URL/채널 권한 확인, 템플릿 렌더링 에러 로그 확인
+- 403 insufficient_scope: 요청 토큰의 스코프 확인(`mcp:*`), 매핑 테이블 점검
+- MCP 연동 지연/장애: 서킷 브레이커 상태(open) 여부, 외부 MCP 헬스 확인
+
 ## Branch protection & required checks (Guide)
 - Protect `main`: require PR reviews (>=1), block direct pushes, require status checks to pass
 - Required checks: `PR CI` (ruff + build), optional `Dependency Review`

@@ -1,0 +1,18 @@
+⏰ *API Rate Limit 도달*
+
+*서비스:* {{ service_name | default('Slack API') }}
+*재시도 시간:* {{ retry_after | default('60') }}초 후
+*시간:* {{ timestamp | default('N/A') }}
+
+*제한 정보:*
+- *제한 타입:* {{ limit_type | default('API 호출') }}
+- *현재 사용량:* {{ current_usage | default('N/A') }}
+- *제한량:* {{ limit | default('N/A') }}
+
+{% if reset_time %}
+*제한 초기화 시간:* {{ reset_time }}
+{% endif %}
+
+{% if recommendation %}
+*권장사항:* {{ recommendation }}
+{% endif %}
