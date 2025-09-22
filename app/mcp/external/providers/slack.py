@@ -14,8 +14,8 @@ from ..errors import MCPExternalError
 from ..metrics import MCP_EXTERNAL_LATENCY, MCP_EXTERNAL_REQUESTS
 from ..metrics import MCP_EXTERNAL_ERRORS, MCP_EXTERNAL_HEALTH
 from ..retry import retry_async
-from ...services.slack_notification_service import get_slack_notification_service
-from ...models.slack_events import SlackEventType
+from ....services.slack_notification_service import get_slack_notification_service
+from ....models.slack_events import SlackEventType
 
 
 class SlackMCPClient(ExternalMCPClient):

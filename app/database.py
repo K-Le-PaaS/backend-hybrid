@@ -28,13 +28,13 @@ if DATABASE_URL.startswith("sqlite"):
         DATABASE_URL,
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
-        echo=settings.debug
+        echo=False  # 디버그 모드 비활성화
     )
 else:
     # PostgreSQL용 엔진 설정
     engine = create_engine(
         DATABASE_URL,
-        echo=settings.debug,
+        echo=False,  # 디버그 모드 비활성화
         pool_pre_ping=True
     )
 

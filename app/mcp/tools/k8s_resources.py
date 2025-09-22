@@ -1,14 +1,7 @@
 from enum import Enum
 from typing import Any, Dict, Optional
 
-try:
-    from fastapi_mcp import mcp_tool  # type: ignore
-except Exception:  # noqa: BLE001
-    def mcp_tool(*args: Any, **kwargs: Any):  # type: ignore
-        def wrapper(func):
-            return func
-        return wrapper
-
+# from fastmcp.tools import Tool  # Will be registered via @server.tool decorator
 from pydantic import BaseModel, Field
 
 from ...services.k8s_client import get_core_v1_api, get_apps_v1_api
@@ -46,69 +39,96 @@ class K8sRef(BaseModel):
     kube_context: Optional[str] = None
 
 
-@mcp_tool(
-    name="k8s_create",
-    description="Create a Kubernetes resource (Deployment, Service, ConfigMap, Secret)",
-    input_model=K8sObject,
-)
-async def k8s_create(obj: K8sObject) -> Dict[str, Any]:
-    ns = obj.metadata.get("namespace", "default")
-    kind = obj.kind
-    ctx = obj.kube_context
+async def k8s_create(
+    apiVersion: str,
+    kind: str,
+    metadata: Dict[str, Any],
+    spec: Optional[Dict[str, Any]] = None,
+    data: Optional[Dict[str, Any]] = None,
+    kube_context: Optional[str] = None
+) -> Dict[str, Any]:
+    """Create a Kubernetes resource (Deployment, Service, ConfigMap, Secret)"""
+    ns = metadata.get("namespace", "default")
+    ctx = kube_context
+    
+    # Create the object body
+    obj_body = {
+        "apiVersion": apiVersion,
+        "kind": kind,
+        "metadata": metadata,
+    }
+    if spec:
+        obj_body["spec"] = spec
+    if data:
+        obj_body["data"] = data
+    
     if kind == ResourceKind.DEPLOYMENT:
         api = get_apps_v1_api(context=ctx)
-        created = api.create_namespaced_deployment(namespace=ns, body=obj.model_dump())
+        created = api.create_namespaced_deployment(namespace=ns, body=obj_body)
     elif kind == ResourceKind.SERVICE:
         api = get_core_v1_api(context=ctx)
-        created = api.create_namespaced_service(namespace=ns, body=obj.model_dump())
+        created = api.create_namespaced_service(namespace=ns, body=obj_body)
     elif kind == ResourceKind.CONFIGMAP:
         api = get_core_v1_api(context=ctx)
-        created = api.create_namespaced_config_map(namespace=ns, body=obj.model_dump())
+        created = api.create_namespaced_config_map(namespace=ns, body=obj_body)
     elif kind == ResourceKind.SECRET:
         api = get_core_v1_api(context=ctx)
-        created = api.create_namespaced_secret(namespace=ns, body=obj.model_dump())
+        created = api.create_namespaced_secret(namespace=ns, body=obj_body)
     else:
         raise ValueError("Unsupported kind")
     return {"status": "created", "kind": kind, "name": created.metadata.name, "namespace": ns}
 
 
-@mcp_tool(
-    name="k8s_get",
-    description="Get a Kubernetes resource by kind/name/namespace",
-    input_model=K8sRef,
-)
-async def k8s_get(ref: K8sRef) -> Dict[str, Any]:
-    ctx = ref.kube_context
-    if ref.kind == ResourceKind.DEPLOYMENT:
+async def k8s_get(
+    kind: str,
+    name: str,
+    namespace: str = "default",
+    kube_context: Optional[str] = None
+) -> Dict[str, Any]:
+    """Get a Kubernetes resource by kind/name/namespace"""
+    ctx = kube_context
+    if kind == ResourceKind.DEPLOYMENT:
         api = get_apps_v1_api(context=ctx)
-        obj = api.read_namespaced_deployment(name=ref.name, namespace=ref.namespace)
-    elif ref.kind == ResourceKind.SERVICE:
+        obj = api.read_namespaced_deployment(name=name, namespace=namespace)
+    elif kind == ResourceKind.SERVICE:
         api = get_core_v1_api(context=ctx)
-        obj = api.read_namespaced_service(name=ref.name, namespace=ref.namespace)
-    elif ref.kind == ResourceKind.CONFIGMAP:
+        obj = api.read_namespaced_service(name=name, namespace=namespace)
+    elif kind == ResourceKind.CONFIGMAP:
         api = get_core_v1_api(context=ctx)
-        obj = api.read_namespaced_config_map(name=ref.name, namespace=ref.namespace)
-    elif ref.kind == ResourceKind.SECRET:
+        obj = api.read_namespaced_config_map(name=name, namespace=namespace)
+    elif kind == ResourceKind.SECRET:
         api = get_core_v1_api(context=ctx)
-        obj = api.read_namespaced_secret(name=ref.name, namespace=ref.namespace)
+        obj = api.read_namespaced_secret(name=name, namespace=namespace)
     else:
         raise ValueError("Unsupported kind")
     return obj.to_dict()  # type: ignore[no-any-return]
 
 
-@mcp_tool(
-    name="k8s_apply",
-    description="Apply (create or patch) a Kubernetes resource by full manifest",
-    input_model=K8sObject,
-)
-async def k8s_apply(obj: K8sObject) -> Dict[str, Any]:
-    ns = obj.metadata.get("namespace", "default")
-    name = obj.metadata.get("name")
+async def k8s_apply(
+    apiVersion: str,
+    kind: str,
+    metadata: Dict[str, Any],
+    spec: Optional[Dict[str, Any]] = None,
+    data: Optional[Dict[str, Any]] = None,
+    kube_context: Optional[str] = None
+) -> Dict[str, Any]:
+    """Apply (create or patch) a Kubernetes resource by full manifest"""
+    ns = metadata.get("namespace", "default")
+    name = metadata.get("name")
     if not name:
         raise ValueError("metadata.name is required for apply")
-    kind = obj.kind
-    body = obj.model_dump()
-    ctx = obj.kube_context
+    ctx = kube_context
+    
+    # Create the object body
+    body = {
+        "apiVersion": apiVersion,
+        "kind": kind,
+        "metadata": metadata,
+    }
+    if spec:
+        body["spec"] = spec
+    if data:
+        body["data"] = data
     if kind == ResourceKind.DEPLOYMENT:
         api = get_apps_v1_api(context=ctx)
         try:
@@ -158,27 +178,28 @@ async def k8s_apply(obj: K8sObject) -> Dict[str, Any]:
     return {"status": action, "kind": kind, "name": name, "namespace": ns}
 
 
-@mcp_tool(
-    name="k8s_delete",
-    description="Delete a Kubernetes resource by kind/name/namespace",
-    input_model=K8sRef,
-)
-async def k8s_delete(ref: K8sRef) -> Dict[str, Any]:
-    ctx = ref.kube_context
-    if ref.kind == ResourceKind.DEPLOYMENT:
+async def k8s_delete(
+    kind: str,
+    name: str,
+    namespace: str = "default",
+    kube_context: Optional[str] = None
+) -> Dict[str, Any]:
+    """Delete a Kubernetes resource by kind/name/namespace"""
+    ctx = kube_context
+    if kind == ResourceKind.DEPLOYMENT:
         api = get_apps_v1_api(context=ctx)
-        api.delete_namespaced_deployment(name=ref.name, namespace=ref.namespace)
-    elif ref.kind == ResourceKind.SERVICE:
+        api.delete_namespaced_deployment(name=name, namespace=namespace)
+    elif kind == ResourceKind.SERVICE:
         api = get_core_v1_api(context=ctx)
-        api.delete_namespaced_service(name=ref.name, namespace=ref.namespace)
-    elif ref.kind == ResourceKind.CONFIGMAP:
+        api.delete_namespaced_service(name=name, namespace=namespace)
+    elif kind == ResourceKind.CONFIGMAP:
         api = get_core_v1_api(context=ctx)
-        api.delete_namespaced_config_map(name=ref.name, namespace=ref.namespace)
-    elif ref.kind == ResourceKind.SECRET:
+        api.delete_namespaced_config_map(name=name, namespace=namespace)
+    elif kind == ResourceKind.SECRET:
         api = get_core_v1_api(context=ctx)
-        api.delete_namespaced_secret(name=ref.name, namespace=ref.namespace)
+        api.delete_namespaced_secret(name=name, namespace=namespace)
     else:
         raise ValueError("Unsupported kind")
-    return {"status": "deleted", "kind": ref.kind, "name": ref.name, "namespace": ref.namespace}
+    return {"status": "deleted", "kind": kind, "name": name, "namespace": namespace}
 
 

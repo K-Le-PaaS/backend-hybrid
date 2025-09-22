@@ -11,7 +11,7 @@ import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from fastapi.websockets import WebSocketState
 
-from ..websocket.deployment_monitor import (
+from ...websocket.deployment_monitor import (
     get_deployment_monitor_manager,
     DeploymentMonitorManager
 )
@@ -19,6 +19,86 @@ from ..websocket.deployment_monitor import (
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+
+@router.websocket("/ws/kubernetes")
+async def websocket_kubernetes_monitor(websocket: WebSocket):
+    """
+    Kubernetes 리소스 모니터링 WebSocket 엔드포인트
+    
+    클라이언트는 이 엔드포인트에 연결하여 실시간 Kubernetes 리소스 상태를 받을 수 있습니다.
+    """
+    connection_id = str(uuid.uuid4())
+    
+    try:
+        # WebSocket 연결 수락
+        await websocket.accept()
+        
+        logger.info("kubernetes_websocket_connected", connection_id=connection_id)
+        
+        # 연결 확인 메시지 전송
+        await websocket.send_json({
+            "type": "connection",
+            "data": {
+                "status": "connected",
+                "connection_id": connection_id,
+                "message": "Kubernetes WebSocket 연결이 성공적으로 설정되었습니다."
+            }
+        })
+        
+        # 메시지 루프
+        while True:
+            try:
+                # 메시지 수신
+                data = await websocket.receive_json()
+                
+                # 핑/퐁 처리
+                if data.get("type") == "ping":
+                    await websocket.send_json({
+                        "type": "pong",
+                        "data": {"timestamp": str(uuid.uuid4())}
+                    })
+                elif data.get("type") == "subscribe":
+                    # 구독 처리
+                    namespace = data.get("data", {}).get("namespace", "default")
+                    await websocket.send_json({
+                        "type": "subscribed",
+                        "data": {"namespace": namespace, "message": f"구독됨: {namespace}"}
+                    })
+                elif data.get("type") == "unsubscribe":
+                    # 구독 해제 처리
+                    namespace = data.get("data", {}).get("namespace", "default")
+                    await websocket.send_json({
+                        "type": "unsubscribed",
+                        "data": {"namespace": namespace, "message": f"구독 해제됨: {namespace}"}
+                    })
+                else:
+                    # 다른 메시지 처리
+                    await websocket.send_json({
+                        "type": "response",
+                        "data": {"message": "메시지를 받았습니다.", "received": data}
+                    })
+                
+            except WebSocketDisconnect:
+                logger.info("kubernetes_websocket_disconnected", connection_id=connection_id)
+                break
+            except Exception as e:
+                logger.error(
+                    "kubernetes_websocket_error",
+                    error=str(e),
+                    connection_id=connection_id
+                )
+                break
+    
+    except Exception as e:
+        logger.error(
+            "kubernetes_websocket_connection_failed",
+            error=str(e),
+            connection_id=connection_id
+        )
+    
+    finally:
+        logger.info("kubernetes_websocket_cleanup", connection_id=connection_id)
 
 
 @router.websocket("/ws/deployments")

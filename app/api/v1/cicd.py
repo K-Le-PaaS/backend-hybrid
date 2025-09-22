@@ -23,9 +23,9 @@ async def github_webhook(
     event = json.loads(raw)
 
     if x_github_event == "push":
-        return handle_push_event(event)
+        return await handle_push_event(event)
     if x_github_event == "release":
-        return handle_release_event(event)
+        return await handle_release_event(event)
 
     return {"status": "ignored", "reason": f"unsupported event {x_github_event}"}
 @router.post("/cicd/staging-webhook", response_model=dict)

@@ -37,7 +37,7 @@ def _parse_replicas(text: str) -> Optional[int]:
 
 def _parse_app_name(text: str) -> Optional[str]:
     # naive: word before '배포' or explicit quotes
-    q = re.search(r"["'`](.+?)["'`].*배포", text)
+    q = re.search(r"[\"'`](.+?)[\"'`].*배포", text)
     if q:
         return q.group(1)
     m = re.search(r"([a-z0-9-_.]+)\s*(앱|app)?\s*.*배포", text, re.I)

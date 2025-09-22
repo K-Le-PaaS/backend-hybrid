@@ -1,23 +1,29 @@
 from typing import Any, Dict
 
-try:
-    from fastapi_mcp import mcp_tool  # type: ignore
-except Exception:  # noqa: BLE001
-    # Define a no-op decorator so imports don't fail when MCP not installed
-    def mcp_tool(*args: Any, **kwargs: Any):  # type: ignore
-        def wrapper(func):
-            return func
-        return wrapper
-
 from ...services.deployments import DeployApplicationInput, perform_deploy
 
 
-@mcp_tool(
-    name="deploy_application",
-    description="Deploy application to Kubernetes cluster",
-    input_model=DeployApplicationInput,
-)
-async def deploy_application_tool(input_data: DeployApplicationInput) -> Dict[str, Any]:
+async def deploy_application_tool(
+    app_name: str,
+    environment: str,
+    image: str,
+    replicas: int = 2,
+    namespace: str = "default",
+    port: int = 8080,
+    env_vars: Dict[str, str] = None,
+    resources: Dict[str, Any] = None
+) -> Dict[str, Any]:
+    """Deploy application to Kubernetes cluster"""
+    input_data = DeployApplicationInput(
+        app_name=app_name,
+        environment=environment,
+        image=image,
+        replicas=replicas,
+        namespace=namespace,
+        port=port,
+        env_vars=env_vars or {},
+        resources=resources or {}
+    )
     return perform_deploy(input_data)
 
 
