@@ -15,6 +15,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError, SlackClientError
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.webhook import WebhookClient
+from slack_sdk.webhook.async_client import AsyncWebhookClient
 
 from ..core.config import get_settings
 from ..models.slack_events import (
@@ -23,7 +24,8 @@ from ..models.slack_events import (
     SlackNotificationRequest,
     SlackNotificationResponse,
     SlackChannelMapping,
-    SlackRoutingConfig
+    SlackRoutingConfig,
+    SlackTemplate
 )
 
 logger = structlog.get_logger(__name__)
@@ -130,18 +132,20 @@ class SlackClientWrapper:
             # 기본 템플릿 설정
             templates = {}
             if self.settings.slack_alert_template_error:
-                templates[SlackEventType.API_ERROR] = {
-                    "template_name": "error",
-                    "template_content": self.settings.slack_alert_template_error,
-                    "variables": ["operation", "code", "message"]
-                }
+                templates[SlackEventType.API_ERROR] = SlackTemplate(
+                    event_type=SlackEventType.API_ERROR,
+                    template_name="error",
+                    template_content=self.settings.slack_alert_template_error,
+                    variables=["operation", "code", "message"]
+                )
             
             if self.settings.slack_alert_template_health_down:
-                templates[SlackEventType.HEALTH_DOWN] = {
-                    "template_name": "health_down",
-                    "template_content": self.settings.slack_alert_template_health_down,
-                    "variables": ["code", "message"]
-                }
+                templates[SlackEventType.HEALTH_DOWN] = SlackTemplate(
+                    event_type=SlackEventType.HEALTH_DOWN,
+                    template_name="health_down",
+                    template_content=self.settings.slack_alert_template_health_down,
+                    variables=["code", "message"]
+                )
             
             self._routing_config = SlackRoutingConfig(
                 default_channel=self.settings.slack_alert_channel_default or "#general",
@@ -270,7 +274,7 @@ class SlackClientWrapper:
                 # Jinja2 템플릿 렌더링
                 from jinja2 import Environment, StrictUndefined
                 env = Environment(undefined=StrictUndefined, autoescape=False)
-                template = env.from_string(template_info["template_content"])
+                template = env.from_string(template_info.template_content)
                 
                 # 컨텍스트 병합
                 context = {**request.context, "title": request.title, "message": request.message}

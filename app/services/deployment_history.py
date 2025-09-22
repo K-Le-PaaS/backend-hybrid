@@ -614,6 +614,19 @@ class DeploymentHistoryService:
             logger.error("deployment_stats_failed", error=str(e))
             raise
 
+    async def get_all_deployments(self) -> List[DeploymentHistoryModel]:
+        """모든 배포 기록을 조회합니다."""
+        try:
+            deployments = (
+                self.db.query(DeploymentHistoryModel)
+                .order_by(desc(DeploymentHistoryModel.deployed_at))
+                .all()
+            )
+            return deployments
+        except Exception as e:
+            logger.error("get_all_deployments_failed", error=str(e))
+            raise
+
 
 # 전역 서비스 인스턴스 (의존성 주입용)
 deployment_history_service: Optional[DeploymentHistoryService] = None

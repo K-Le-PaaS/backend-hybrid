@@ -1,62 +1,269 @@
-from __future__ import annotations
-
-import json
-from typing import Tuple, Set
+"""
+Slack OAuth 2.0 서비스
+사용자 친화적인 Slack 연동을 위한 OAuth 처리
+"""
 
 import httpx
+import structlog
+from typing import Dict, Any, List, Optional
+from pydantic import BaseModel
 
-from ..mcp.external.errors import MCPExternalError
-from ..mcp.external.retry import retry_async
+from ..core.config import get_settings
+
+logger = structlog.get_logger(__name__)
+
+
+class SlackTokenResponse(BaseModel):
+    """Slack 토큰 응답 모델"""
+    success: bool
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    team_id: Optional[str] = None
+    user_id: Optional[str] = None
+    error: Optional[str] = None
+
+
+class SlackMessageResponse(BaseModel):
+    """Slack 메시지 응답 모델"""
+    success: bool
+    message_ts: Optional[str] = None
+    channel: Optional[str] = None
+    error: Optional[str] = None
+
+
+class SlackChannel(BaseModel):
+    """Slack 채널 모델"""
+    id: str
+    name: str
+    is_private: bool
+    is_member: bool
 
 
 class SlackOAuthService:
-    def __init__(self, client_id: str, client_secret: str, http_client: httpx.AsyncClient | None = None) -> None:
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self._http = http_client
-        self._token_url = "https://slack.com/api/oauth.v2.access"
-
-    async def _client(self) -> httpx.AsyncClient:
-        if self._http is None:
-            self._http = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
-        return self._http
-
-    async def exchange_code(self, *, code: str, redirect_uri: str) -> Tuple[str, Set[str]]:
-        async def op():
-            client = await self._client()
-            resp = await client.post(
-                self._token_url,
-                data={
-                    "client_id": self.client_id,
-                    "client_secret": self.client_secret,
-                    "code": code,
-                    "redirect_uri": redirect_uri,
-                },
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
+    """Slack OAuth 2.0 서비스"""
+    
+    def __init__(self):
+        self.settings = get_settings()
+        self.client_id = self.settings.slack_client_id
+        self.client_secret = self.settings.slack_client_secret
+        self.redirect_uri = self.settings.slack_redirect_uri
+    
+    async def exchange_code_for_token(self, code: str) -> SlackTokenResponse:
+        """인증 코드를 액세스 토큰으로 교환"""
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    "https://slack.com/api/oauth.v2.access",
+                    data={
+                        "client_id": self.client_id,
+                        "client_secret": self.client_secret,
+                        "code": code,
+                        "redirect_uri": self.redirect_uri
+                    }
+                )
+                
+                data = response.json()
+                
+                if data.get("ok"):
+                    logger.info("slack_token_exchange_success")
+                    return SlackTokenResponse(
+                        success=True,
+                        access_token=data.get("access_token"),
+                        refresh_token=data.get("refresh_token"),
+                        team_id=data.get("team", {}).get("id"),
+                        user_id=data.get("authed_user", {}).get("id")
+                    )
+                else:
+                    error = data.get("error", "Unknown error")
+                    logger.error("slack_token_exchange_failed", error=error)
+                    return SlackTokenResponse(
+                        success=False,
+                        error=error
+                    )
+                    
+        except Exception as e:
+            logger.error("slack_token_exchange_error", error=str(e))
+            return SlackTokenResponse(
+                success=False,
+                error=f"Token exchange failed: {str(e)}"
             )
-
-            if resp.status_code == 429:
-                raise MCPExternalError(code="rate_limited", message="Slack OAuth rate limit", retry_after_seconds=int(resp.headers.get("Retry-After", "1")))
-            if resp.status_code != 200:
-                raise MCPExternalError(code="bad_request", message=f"Slack OAuth error: {resp.status_code}")
-
-            data = json.loads(await resp.aread())
-            if not data.get("ok", False):
-                raise MCPExternalError(code="unauthorized", message=f"Slack OAuth failed: {data.get('error','unknown')}")
-
-            token = data.get("access_token")
-            scope_str = data.get("scope", "")
-            scopes = {s.strip() for s in scope_str.split(",") if s.strip()}
-            return token, scopes
-
-        token, scopes = await retry_async(op, attempts=3, base_delay=1.0)
-        if not token:
-            raise MCPExternalError(code="unauthorized", message="Slack OAuth did not return token")
-        return token, scopes
-
-    async def verify_scopes(self, granted: Set[str], *, required: Set[str]) -> None:
-        missing = required - granted
-        if missing:
-            raise MCPExternalError(code="forbidden", message=f"missing scopes: {', '.join(sorted(missing))}")
-
-
+    
+    async def get_user_info(self, access_token: str) -> Dict[str, Any]:
+        """사용자 정보 조회"""
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(
+                    "https://slack.com/api/auth.test",
+                    headers={"Authorization": f"Bearer {access_token}"}
+                )
+                
+                data = response.json()
+                
+                if data.get("ok"):
+                    return {
+                        "user_id": data.get("user_id"),
+                        "team_id": data.get("team_id"),
+                        "team_name": data.get("team"),
+                        "bot_id": data.get("bot_id")
+                    }
+                else:
+                    logger.error("slack_user_info_failed", error=data.get("error"))
+                    return {}
+                    
+        except Exception as e:
+            logger.error("slack_user_info_error", error=str(e))
+            return {}
+    
+    async def get_available_channels(self, access_token: str) -> List[SlackChannel]:
+        """사용자가 접근 가능한 채널 목록 조회"""
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(
+                    "https://slack.com/api/conversations.list",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    params={
+                        "types": "public_channel,private_channel",
+                        "exclude_archived": "true",
+                        "limit": 100
+                    }
+                )
+                
+                data = response.json()
+                
+                if data.get("ok"):
+                    channels = []
+                    for channel_data in data.get("channels", []):
+                        channels.append(SlackChannel(
+                            id=channel_data.get("id"),
+                            name=channel_data.get("name"),
+                            is_private=channel_data.get("is_private", False),
+                            is_member=channel_data.get("is_member", False)
+                        ))
+                    
+                    logger.info("slack_channels_retrieved", count=len(channels))
+                    return channels
+                else:
+                    logger.error("slack_channels_failed", error=data.get("error"))
+                    return []
+                    
+        except Exception as e:
+            logger.error("slack_channels_error", error=str(e))
+            return []
+    
+    async def send_test_message(
+        self, 
+        access_token: str, 
+        channel: str = "#general"
+    ) -> SlackMessageResponse:
+        """테스트 메시지 전송"""
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    "https://slack.com/api/chat.postMessage",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    json={
+                        "channel": channel,
+                        "text": "🎉 K-Le-PaaS Slack 연동 테스트 성공!\n\n이 메시지가 보이면 Slack 연동이 완료된 것입니다!",
+                        "blocks": [
+                            {
+                                "type": "header",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "🎉 K-Le-PaaS 연동 성공!"
+                                }
+                            },
+                            {
+                                "type": "section",
+                                "text": {
+                                    "type": "mrkdwn",
+                                    "text": "Slack 연동이 성공적으로 완료되었습니다!\n이제 K-Le-PaaS에서 배포 알림을 받을 수 있습니다."
+                                }
+                            },
+                            {
+                                "type": "divider"
+                            },
+                            {
+                                "type": "context",
+                                "elements": [
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": "K-Le-PaaS MCP를 통해 전송된 메시지입니다."
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                )
+                
+                data = response.json()
+                
+                if data.get("ok"):
+                    logger.info("slack_test_message_sent", channel=channel)
+                    return SlackMessageResponse(
+                        success=True,
+                        message_ts=data.get("ts"),
+                        channel=data.get("channel")
+                    )
+                else:
+                    error = data.get("error", "Unknown error")
+                    logger.error("slack_test_message_failed", error=error)
+                    return SlackMessageResponse(
+                        success=False,
+                        error=error
+                    )
+                    
+        except Exception as e:
+            logger.error("slack_test_message_error", error=str(e))
+            return SlackMessageResponse(
+                success=False,
+                error=f"Test message failed: {str(e)}"
+            )
+    
+    async def send_notification(
+        self,
+        access_token: str,
+        channel: str,
+        title: str,
+        message: str,
+        blocks: Optional[List[Dict[str, Any]]] = None
+    ) -> SlackMessageResponse:
+        """알림 메시지 전송"""
+        try:
+            payload = {
+                "channel": channel,
+                "text": f"*{title}*\n\n{message}"
+            }
+            
+            if blocks:
+                payload["blocks"] = blocks
+            
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    "https://slack.com/api/chat.postMessage",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    json=payload
+                )
+                
+                data = response.json()
+                
+                if data.get("ok"):
+                    logger.info("slack_notification_sent", channel=channel, title=title)
+                    return SlackMessageResponse(
+                        success=True,
+                        message_ts=data.get("ts"),
+                        channel=data.get("channel")
+                    )
+                else:
+                    error = data.get("error", "Unknown error")
+                    logger.error("slack_notification_failed", error=error)
+                    return SlackMessageResponse(
+                        success=False,
+                        error=error
+                    )
+                    
+        except Exception as e:
+            logger.error("slack_notification_error", error=str(e))
+            return SlackMessageResponse(
+                success=False,
+                error=f"Notification failed: {str(e)}"
+            )

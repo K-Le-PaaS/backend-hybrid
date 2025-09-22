@@ -84,6 +84,18 @@ async def perform_deploy(payload: DeployApplicationInput) -> Dict[str, Any]:
         
         plan["history"] = get_history(payload.app_name, payload.environment.value)
 
+    except Exception as e:
+        # 에러 발생 시 기본 플랜 반환
+        return {
+            "action": "deploy",
+            "app_name": payload.app_name,
+            "environment": payload.environment.value,
+            "image": payload.image,
+            "replicas": payload.replicas,
+            "status": "error",
+            "error": str(e)
+        }
+
     # Optional real deploy (guarded by settings to keep tests intact)
     settings = get_settings()
     if not settings.enable_k8s_deploy:

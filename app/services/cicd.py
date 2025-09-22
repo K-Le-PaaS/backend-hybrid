@@ -66,7 +66,7 @@ def verify_staging_signature(payload_bytes: bytes, signature: str | None, timest
         raise HTTPException(status_code=401, detail="signature mismatch")
 
 
-def handle_push_event(event: Dict[str, Any]) -> Dict[str, Any]:
+async def handle_push_event(event: Dict[str, Any]) -> Dict[str, Any]:
     settings = get_settings()
     ref = event.get("ref", "")
     branch = ref.split("/")[-1] if ref else ""
@@ -91,9 +91,38 @@ def handle_push_event(event: Dict[str, Any]) -> Dict[str, Any]:
         image=image,
         replicas=2,
     )
-    # Option A: direct deploy (default)
-    result = perform_deploy(payload)
-    # Option B: forward to MCP provider if configured
+    # MCP 네이티브 Git 에이전트를 통한 배포 (우선순위)
+    try:
+        if settings.mcp_git_agent_enabled:
+            from ..mcp.tools.git_deployment import git_deployment_tools
+            # 클라우드 프로바이더 자동 감지 또는 설정에서 가져오기
+            cloud_provider = getattr(settings, 'mcp_default_cloud_provider', 'gcp')
+            
+            mcp_result = await git_deployment_tools._deploy_application_mcp({
+                "app_name": payload.app_name,
+                "environment": payload.environment,
+                "image": payload.image,
+                "replicas": payload.replicas,
+                "cloud_provider": cloud_provider
+            })
+            
+            if mcp_result.get("status") == "success":
+                result = mcp_result
+                log.info("mcp_git_agent_deploy_success", result=mcp_result)
+            else:
+                # MCP 실패 시 기존 방식으로 폴백
+                result = perform_deploy(payload)
+                log.warning("mcp_git_agent_deploy_failed_fallback", 
+                           mcp_error=mcp_result.get("error"), fallback_result=result)
+        else:
+            # 기존 직접 배포 방식
+            result = perform_deploy(payload)
+    except Exception as e:
+        log.warning("mcp_git_agent_deploy_error_fallback", error=str(e))
+        # MCP 에이전트 실패 시 기존 방식으로 폴백
+        result = perform_deploy(payload)
+    
+    # 레거시 MCP 트리거 (호환성)
     try:
         if settings.mcp_trigger_provider:
             from ..mcp.external.registry import mcp_registry
@@ -119,7 +148,7 @@ def handle_push_event(event: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": "triggered", "deploy": result}
 
 
-def handle_release_event(event: Dict[str, Any]) -> Dict[str, Any]:
+async def handle_release_event(event: Dict[str, Any]) -> Dict[str, Any]:
     settings = get_settings()
     action = event.get("action")
     if action != "published":

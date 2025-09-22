@@ -2,6 +2,43 @@
 
 FastAPI + MCP hybrid backend service. This app exposes REST endpoints under `/api/v1` and mounts an MCP server or a stub at `/mcp`.
 
+## 🧠 고급 자연어 처리 시스템 (Advanced NLP)
+
+K-Le-PaaS v6의 핵심 기능인 고급 자연어 처리 시스템이 통합되어 있습니다.
+
+### 주요 기능
+- **다중 AI 모델 통합**: Claude, GPT-4, Gemini 동시 활용
+- **컨텍스트 인식 처리**: 대화 히스토리 및 프로젝트 상태 추적
+- **지능적 명령 해석**: 모호함 감지 및 자동 개선 제안
+- **학습 기반 개선**: 사용자 피드백을 통한 지속적 성능 향상
+
+### 빠른 시작
+```python
+from app.llm.advanced_nlp_service import AdvancedNLPService
+
+# 서비스 초기화
+service = AdvancedNLPService()
+await service.initialize()
+
+# 자연어 명령 처리
+result = await service.process_command(
+    user_id="user123",
+    project_name="my-project",
+    command="web-app을 staging에 3개 복제본으로 배포해줘"
+)
+```
+
+### 테스트 실행
+```bash
+# 통합 테스트
+python -m pytest tests/test_advanced_nlp_integration.py -v
+
+# 개발용 테스트 스크립트
+python scripts/test_advanced_nlp.py
+```
+
+자세한 내용은 [고급 NLP 문서](docs/ADVANCED_NLP.md)를 참조하세요.
+
 ### External MCP Connectors (Architecture)
 
 외부 MCP 서버(GitHub, Claude, OpenAI) 연동을 위한 공통 추상화를 추가했습니다.
