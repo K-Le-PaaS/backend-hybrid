@@ -1,12 +1,17 @@
 from functools import lru_cache
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
-from pydantic import ConfigDict
 from typing import Dict
 
 
 class Settings(BaseSettings):
-    model_config = ConfigDict(env_prefix="KLEPAAS_", extra="ignore")
+    # Load from .env by default, with prefix KLEPAAS_
+    model_config = SettingsConfigDict(
+        env_prefix="KLEPAAS_",
+        extra="ignore",
+        env_file=".env",
+        env_file_encoding="utf-8",
+    )
     app_name: str = Field(default="K-Le-PaaS Backend Hybrid")
     app_version: str = Field(default="0.1.0")
 
@@ -19,6 +24,7 @@ class Settings(BaseSettings):
     # GitHub Webhook
     github_webhook_secret: str | None = None
     github_branch_main: str | None = "main"
+    require_pr_merge: bool = False
     # Generic staging webhook secret (HMAC-SHA256)
     staging_webhook_secret: str | None = None
 
@@ -81,6 +87,11 @@ class Settings(BaseSettings):
     github_app_id: str | None = None
     github_app_private_key: str | None = None
     github_app_webhook_secret: str | None = None
+
+    # Deployment-config repo access (for webhook-based updates)
+    deployment_config_repo: str | None = Field(default="K-Le-PaaS/deployment-config")
+    deployment_config_token: str | None = None
+    deployment_config_installation_id: str | None = None
 
     # Advanced NLP Settings
     advanced_nlp_enabled: bool = Field(default=True, description="고급 NLP 기능 활성화 여부")

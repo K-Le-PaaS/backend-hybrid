@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 import jwt
 import httpx
@@ -11,102 +11,102 @@ from ..core.config import get_settings
 
 class GitHubAppAuth:
     """GitHub App 인증을 위한 JWT 생성 및 설치 토큰 관리"""
-    
-    def __init__(self):
+
+    def __init__(self) -> None:
         self.settings = get_settings()
         self._installation_tokens: Dict[str, Dict[str, Any]] = {}
-    
+
+    def _load_private_key_text(self) -> str:
+        """환경변수/파일/B64에서 PEM 텍스트를 로드한다."""
+        # 1) 직접 값
+        if self.settings.github_app_private_key:
+            return self.settings.github_app_private_key
+
+        # 2) 파일 경로
+        import os
+        pk_file = os.environ.get("KLEPAAS_GITHUB_APP_PRIVATE_KEY_FILE")
+        if pk_file and os.path.exists(pk_file):
+            with open(pk_file, "r", encoding="utf-8") as f:
+                return f.read()
+
+        # 3) Base64 값
+        pk_b64 = os.environ.get("KLEPAAS_GITHUB_APP_PRIVATE_KEY_B64")
+        if pk_b64:
+            import base64
+            return base64.b64decode(pk_b64).decode("utf-8")
+
+        raise ValueError("GitHub App Private Key가 설정되지 않았습니다")
+
     def generate_jwt(self) -> str:
-        """GitHub App JWT 생성 (RS256 알고리즘)"""
-        if not self.settings.github_app_id or not self.settings.github_app_private_key:
+        """GitHub App JWT 생성 (RS256)"""
+        if not self.settings.github_app_id:
             raise ValueError("GitHub App ID와 Private Key가 설정되지 않았습니다")
-        
+
         now = int(time.time())
-        payload = {
-            "iat": now - 60,  # 60초 전에 발급 (클럭 드리프트 허용)
-            "exp": now + (10 * 60),  # 10분 후 만료
-            "iss": self.settings.github_app_id
-        }
-        
+        payload = {"iat": now - 60, "exp": now + (10 * 60), "iss": self.settings.github_app_id}
+
+        private_key_text = self._load_private_key_text()
         try:
-            # Private Key를 PEM 형식으로 파싱
-            private_key = self.settings.github_app_private_key.encode('utf-8')
-            token = jwt.encode(payload, private_key, algorithm="RS256")
+            token = jwt.encode(payload, private_key_text, algorithm="RS256")
             return token
         except Exception as e:
             raise ValueError(f"JWT 생성 실패: {e}")
-    
-    async def get_installation_token(self, installation_id: str) -> str:
-        """설치 토큰 가져오기 (캐시된 토큰이 유효하면 재사용)"""
-        # 캐시된 토큰 확인
-        if installation_id in self._installation_tokens:
+
+    async def get_installation_token(self, installation_id: str, *, force_refresh: bool = False) -> str:
+        """설치 토큰 가져오기 (캐시 고려)"""
+        if not force_refresh and installation_id in self._installation_tokens:
             token_data = self._installation_tokens[installation_id]
-            if token_data["expires_at"] > time.time() + 60:  # 1분 여유
+            if token_data.get("expires_at", 0) > time.time() + 60:
                 return token_data["token"]
-        
-        # 새 토큰 요청
+
         jwt_token = self.generate_jwt()
-        
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.post(
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
                 f"https://api.github.com/app/installations/{installation_id}/access_tokens",
                 headers={
                     "Authorization": f"Bearer {jwt_token}",
                     "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28"
-                }
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
             )
-            
-            if response.status_code != 201:
-                raise ValueError(f"설치 토큰 요청 실패: {response.status_code} - {response.text}")
-            
-            token_data = response.json()
-            
-            # 토큰 캐시
+            if resp.status_code != 201:
+                raise ValueError(f"설치 토큰 요청 실패: {resp.status_code} - {resp.text}")
+            data = resp.json()
+            token = data.get("token")
             self._installation_tokens[installation_id] = {
-                "token": token_data["token"],
-                "expires_at": time.time() + 3600  # 1시간 후 만료
+                "token": token,
+                "expires_at": time.time() + 3600,
             }
-            
-            return token_data["token"]
-    
-    async def get_app_installations(self) -> list[Dict[str, Any]]:
-        """GitHub App 설치 목록 조회"""
+            return token
+
+    async def get_app_installations(self) -> List[Dict[str, Any]]:
+        """GitHub App 설치 목록 조회 (API가 리스트 또는 객체를 반환해도 안전하게 처리)"""
         jwt_token = self.generate_jwt()
-        
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
                 "https://api.github.com/app/installations",
                 headers={
                     "Authorization": f"Bearer {jwt_token}",
                     "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28"
-                }
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
             )
-            
-            if response.status_code != 200:
-                raise ValueError(f"설치 목록 조회 실패: {response.status_code} - {response.text}")
-            
-            return response.json()["installations"]
-    
-    async def verify_webhook_signature(self, payload: bytes, signature: str) -> bool:
+            if resp.status_code != 200:
+                raise ValueError(f"설치 목록 조회 실패: {resp.status_code} - {resp.text}")
+            body = resp.json()
+            if isinstance(body, list):
+                return body
+            if isinstance(body, dict):
+                return body.get("installations", [])
+            return []
+
+    def verify_webhook_signature(self, payload: bytes, signature: str | None) -> bool:
         """GitHub App 웹훅 서명 검증"""
-        if not self.settings.github_app_webhook_secret:
+        if not self.settings.github_app_webhook_secret or not signature:
             return False
-        
-        import hmac
-        import hashlib
-        
-        expected_signature = hmac.new(
-            self.settings.github_app_webhook_secret.encode('utf-8'),
-            payload,
-            hashlib.sha256
-        ).hexdigest()
-        
-        # GitHub는 "sha256=" 접두사를 사용
-        expected_signature = f"sha256={expected_signature}"
-        
-        return hmac.compare_digest(signature, expected_signature)
+        import hmac, hashlib
+        expected = hmac.new(self.settings.github_app_webhook_secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(signature, f"sha256={expected}")
 
 
 # 전역 인스턴스

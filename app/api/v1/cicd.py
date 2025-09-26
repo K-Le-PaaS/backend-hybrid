@@ -4,7 +4,8 @@ from typing import Any, Dict
 from fastapi import APIRouter, Header, Request
 import structlog
 
-from ...services.cicd import verify_github_signature, handle_push_event, handle_release_event
+from ...services.cicd import verify_github_signature, handle_push_event, handle_release_event, handle_workflow_run_event
+from ...services.workflow_templates import get_ci_template
 from ...services.github_app import github_app_auth
 
 
@@ -26,8 +27,16 @@ async def github_webhook(
         return await handle_push_event(event)
     if x_github_event == "release":
         return await handle_release_event(event)
+    if x_github_event == "workflow_run":
+        return await handle_workflow_run_event(event)
 
     return {"status": "ignored", "reason": f"unsupported event {x_github_event}"}
+
+
+@router.get("/cicd/workflows/template", response_model=dict)
+async def get_workflow_template() -> dict:
+    """Return a minimal CI template that builds and pushes image; backend will update deployment-config via webhook."""
+    return {"template": get_ci_template()}
 @router.post("/cicd/staging-webhook", response_model=dict)
 async def staging_webhook(
     request: Request,
