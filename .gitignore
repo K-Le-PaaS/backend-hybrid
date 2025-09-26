@@ -76,3 +76,4 @@ mcp_logs/
 # Application specific
 app_logs/
 deployment_logs/
+.pem
