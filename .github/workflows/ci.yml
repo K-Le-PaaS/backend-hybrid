@@ -57,12 +57,12 @@ jobs:
           token: ${{ secrets.DEPLOYMENT_CONFIG_TOKEN }}
           path: deploy-repo
 
-      - name: Update image tag in deployment-config (values/backend-hybrid-values.yaml)
+      - name: Update image tag in deployment-config (/charts/common-chart/values/backend-hybrid-values.yaml)
         working-directory: deploy-repo
         run: |
           TAG=${{ steps.vars.outputs.tag }}
           IMAGE=${{ env.IMAGE_REPO }}
-          TARGET_FILE="values/backend-hybrid-values.yaml"
+          TARGET_FILE="/charts/common-chart/values/backend-hybrid-values.yaml"
           if [ ! -f "$TARGET_FILE" ]; then echo "Missing $TARGET_FILE" && ls -la && exit 1; fi
           # Helm values: image.tag만 업데이트
           sed -i -E "s|tag:\s*\"?.*\"?|tag: \"sha-${TAG}\"|" "$TARGET_FILE"
