@@ -1,85 +1,19 @@
-name: Backend CI/CD (service repo)
+name: CI
 
 on:
   push:
     branches: [ "main" ]
-    paths: [ "**" ]
-  workflow_dispatch:
-
-permissions:
-  contents: read
+  pull_request:
+    branches: [ "main" ]
 
 jobs:
-  build-and-push:
+  build:
     runs-on: ubuntu-latest
-    env:
-      IMAGE_REPO: docker.io/${{ secrets.DOCKER_ID }}/backend-hybrid
-      DEPLOYMENT_CONFIG_REPO: K-Le-PaaS/deployment-config
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          registry: docker.io
-          username: ${{ secrets.DOCKER_ID }}
-          password: ${{ secrets.DOCKER_PASSWD }}
-
-      - name: Compute tag
-        id: vars
-        run: |
-          SHORT_SHA=${GITHUB_SHA::7}
-          echo "tag=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          push: true
-          tags: |
-            ${{ env.IMAGE_REPO }}:${{ steps.vars.outputs.tag }}
-            ${{ env.IMAGE_REPO }}:latest
-
-      - name: Prepare Git author
-        run: |
-          git config --global user.email "actions@github.com"
-          git config --global user.name "GitHub Actions"
-
-      - name: Checkout deployment-config repository
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.DEPLOYMENT_CONFIG_REPO }}
-          token: ${{ secrets.DEPLOYMENT_CONFIG_TOKEN }}
-          path: deploy-repo
-
-      - name: Update image tag in deployment-config (charts/common-chart/values/backend-hybrid-values.yaml)
-        working-directory: deploy-repo
-        run: |
-          TAG=${{ steps.vars.outputs.tag }}
-          IMAGE=${{ env.IMAGE_REPO }}
-          TARGET_FILE="charts/common-chart/values/backend-hybrid-values.yaml"
-          if [ ! -f "$TARGET_FILE" ]; then echo "Missing $TARGET_FILE" && ls -la && exit 1; fi
-          # Helm values: image.tag만 업데이트
-          sed -i -E "s|tag:\s*\"?.*\"?|tag: \"${TAG}\"|" "$TARGET_FILE"
-          git add "$TARGET_FILE"
-
-      - name: Commit and push to deployment-config
-        working-directory: deploy-repo
-        env:
-          GH_TOKEN: ${{ secrets.DEPLOYMENT_CONFIG_TOKEN }}
-        run: |
-          TAG=${{ steps.vars.outputs.tag }}
-          git checkout -B main
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No changes"; exit 0
-          fi
-          git commit -m "chore(backend-hybrid): set image to ${{ env.IMAGE_REPO }}:${TAG}"
-          git push https://x-access-token:${GH_TOKEN}@github.com/${{ env.DEPLOYMENT_CONFIG_REPO }} HEAD:main
-
-
+          node-version: '20'
+      - run: npm ci
+      - run: npm run build --if-present
+      - run: npm test --if-present
