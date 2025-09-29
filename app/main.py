@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI
+from fastapi.openapi.utils import get_openapi
 from starlette.middleware.cors import CORSMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from fastapi import Response
@@ -53,6 +54,25 @@ def create_app() -> FastAPI:
     # Note: FastAPI defaults to OpenAPI 3.1.0, but we set it explicitly to avoid
     # any tooling that requires a concrete version field in the schema output.
     app = FastAPI(title=APP_NAME, version=APP_VERSION, openapi_version="3.1.0")
+
+    # Harden schema generation: always include a valid OpenAPI version header
+    def custom_openapi() -> Dict[str, Any]:
+        if app.openapi_schema:
+            # Ensure version field remains present and correct
+            app.openapi_schema["openapi"] = "3.1.0"
+            return app.openapi_schema
+        openapi_schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=f"API documentation for {app.title}",
+            routes=app.routes,
+        )
+        # Explicitly set the spec version key
+        openapi_schema["openapi"] = "3.1.0"
+        app.openapi_schema = openapi_schema
+        return app.openapi_schema
+
+    app.openapi = custom_openapi  # type: ignore[method-assign]
 
     # App state
     app.state.started_at = datetime.now(timezone.utc)
