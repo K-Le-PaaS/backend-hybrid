@@ -49,7 +49,10 @@ def create_app() -> FastAPI:
     # 로깅 설정
     setup_logging(level="INFO", enable_colors=True)
     
-    app = FastAPI(title=APP_NAME, version=APP_VERSION)
+    # Explicitly set OpenAPI version so Swagger UI can render without errors
+    # Note: FastAPI defaults to OpenAPI 3.1.0, but we set it explicitly to avoid
+    # any tooling that requires a concrete version field in the schema output.
+    app = FastAPI(title=APP_NAME, version=APP_VERSION, openapi_version="3.1.0")
 
     # App state
     app.state.started_at = datetime.now(timezone.utc)
