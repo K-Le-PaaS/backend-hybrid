@@ -82,7 +82,7 @@ def plan_command(req: CommandRequest) -> CommandPlan:
 async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
     if plan.tool == "deploy_application":
         payload = DeployApplicationInput(**plan.args)
-        return perform_deploy(payload)
+        return await perform_deploy(payload)
 
     if plan.tool == "k8s_scale_deployment":
         apps = get_apps_v1_api()

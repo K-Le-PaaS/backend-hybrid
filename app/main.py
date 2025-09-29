@@ -12,6 +12,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from fastapi import Response
 
 from .api.v1.system import router as system_router
+from .api.v1.dashboard import router as dashboard_router
 from .api.v1.deployments import router as deployments_router
 from .api.v1.nlp import router as nlp_router
 from .api.v1.commands import router as commands_router
@@ -22,10 +23,18 @@ from .api.v1.tutorial import router as tutorial_router
 from .api.v1.websocket import router as websocket_router
 from .api.v1.slack_auth import router as slack_auth_router
 from .api.v1.oauth2 import router as oauth2_router
+from .api.v1.auth_verify import router as auth_verify_router
+from .api.v1.github_workflows import router as github_workflows_router
 from .mcp.external.api import router as mcp_external_router
 from .core.error_handler import setup_error_handlers
 from .core.logging_config import setup_logging
 from .database import init_database, init_services, get_db
+
+# 모든 모델을 import하여 테이블이 생성되도록 함
+from .models.user_repository import UserRepository
+from .models.command_history import CommandHistory
+from .models.deployment_history import DeploymentHistoryModel
+from .models.audit_log import AuditLogModel
 import structlog
 
 
@@ -59,6 +68,7 @@ def create_app() -> FastAPI:
 
     # Routers
     app.include_router(system_router, prefix="/api/v1", tags=["system"])
+    app.include_router(dashboard_router, prefix="/api/v1", tags=["dashboard"])
     app.include_router(deployments_router, prefix="/api/v1", tags=["deployments"])
     app.include_router(nlp_router, prefix="/api/v1", tags=["nlp"])
     app.include_router(commands_router, prefix="/api/v1", tags=["commands"])
@@ -69,6 +79,8 @@ def create_app() -> FastAPI:
     app.include_router(websocket_router, prefix="/api/v1", tags=["websocket"])
     app.include_router(slack_auth_router, prefix="/api/v1", tags=["slack-auth"])
     app.include_router(oauth2_router, prefix="/api/v1", tags=["oauth2"])
+    app.include_router(auth_verify_router, prefix="/api/v1", tags=["auth"])
+    app.include_router(github_workflows_router, prefix="/api/v1", tags=["github"])
     app.include_router(mcp_external_router, tags=["mcp-external"])
 
     @app.get("/")

@@ -140,6 +140,9 @@ class OAuth2Manager:
     
     def get_authorization_url(self, provider: str, redirect_uri: str) -> str:
         """OAuth2 인증 URL 생성"""
+        # state 파라미터에 provider 정보 포함
+        state = f"provider={provider}"
+        
         if provider == "google":
             return (
                 f"https://accounts.google.com/o/oauth2/v2/auth"
@@ -148,6 +151,7 @@ class OAuth2Manager:
                 f"&scope=openid email profile"
                 f"&response_type=code"
                 f"&access_type=offline"
+                f"&state={state}"
             )
         elif provider == "github":
             return (
@@ -156,6 +160,7 @@ class OAuth2Manager:
                 f"&redirect_uri={redirect_uri}"
                 f"&scope=user:email"
                 f"&response_type=code"
+                f"&state={state}"
             )
         else:
             raise HTTPException(
