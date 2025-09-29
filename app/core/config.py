@@ -80,7 +80,14 @@ class Settings(BaseSettings):
     # GitHub App
     github_app_id: str | None = None
     github_app_private_key: str | None = None
+    github_app_private_key_file: str | None = None
     github_app_webhook_secret: str | None = None
+    github_app_install_url: str | None = None
+
+    # Deployment-config repo access (for webhook-based updates)
+    deployment_config_repo: str | None = Field(default="K-Le-PaaS/deployment-config")
+    deployment_config_token: str | None = None
+    deployment_config_installation_id: str | None = None
 
     # Advanced NLP Settings
     advanced_nlp_enabled: bool = Field(default=True, description="고급 NLP 기능 활성화 여부")
