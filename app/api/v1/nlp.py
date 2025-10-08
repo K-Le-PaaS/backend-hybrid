@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import logging
@@ -55,22 +55,56 @@ async def process_command(command_data: NaturalLanguageCommand):
         if any(keyword in command.lower() for keyword in dangerous_keywords):
             raise HTTPException(status_code=400, detail="위험한 명령어가 포함되어 있습니다.")
         
-        # 명령 파싱 및 처리
-        parsed_command = parse_natural_language_command(command)
-        logger.info(f"파싱된 명령: {parsed_command}")
-        
-        # 명령 히스토리에 추가
-        command_id = str(uuid.uuid4())
-        history_entry = CommandHistory(
-            id=command_id,
-            command=command,
-            timestamp=datetime.now(),
-            status="processing"
-        )
-        command_history.insert(0, history_entry)
-        
-        # 명령 실행 (실제 구현에서는 Kubernetes API 호출)
-        result = await execute_kubernetes_command(parsed_command)
+        # Gemini API를 통한 고급 명령 처리
+        try:
+            from ...llm.gemini import GeminiClient
+            gemini_client = GeminiClient()
+            
+            # Gemini로 명령 해석
+            gemini_result = await gemini_client.interpret(
+                prompt=command,
+                user_id="api_user",
+                project_name=command_data.context.get("project_name", "default") if command_data.context else "default"
+            )
+            
+            logger.info(f"Gemini 해석 결과: {gemini_result}")
+            
+            # 명령 히스토리에 추가
+            command_id = str(uuid.uuid4())
+            history_entry = CommandHistory(
+                id=command_id,
+                command=command,
+                timestamp=datetime.now(),
+                status="processing"
+            )
+            command_history.insert(0, history_entry)
+            
+            # Gemini 결과를 간소화된 형식으로 변환
+            if gemini_result.get("intent") != "unknown":
+                result = {
+                    "message": gemini_result.get("message", "명령이 성공적으로 처리되었습니다."),
+                    "action": gemini_result.get("intent", "unknown"),
+                    "entities": gemini_result.get("entities", {}),
+                    "result": gemini_result.get("result", {})
+                }
+            else:
+                # Gemini가 해석하지 못한 경우 에러 응답
+                result = {
+                    "message": "명령을 해석할 수 없습니다. 다시 시도해주세요.",
+                    "action": "unknown",
+                    "entities": {},
+                    "result": {"error": "Command not recognized"}
+                }
+                
+        except Exception as e:
+            logger.error(f"Gemini API 호출 실패: {e}")
+            # Gemini 실패 시 에러 응답
+            result = {
+                "message": f"명령 처리 중 오류가 발생했습니다: {str(e)}",
+                "action": "error",
+                "entities": {},
+                "result": {"error": str(e)}
+            }
         
         # 히스토리 업데이트
         history_entry.status = "completed"
@@ -138,183 +172,6 @@ async def get_command_suggestions(context: Optional[str] = None):
         logger.error(f"명령 제안 조회 실패: {str(e)}")
         raise HTTPException(status_code=500, detail="명령 제안 조회에 실패했습니다.")
 
-def parse_natural_language_command(command: str) -> Dict[str, Any]:
-    """
-    자연어 명령을 파싱합니다.
-    """
-    command_lower = command.lower()
-    
-    # 액션 감지
-    action = "unknown"
-    if any(keyword in command_lower for keyword in ["생성", "만들", "추가", "create"]):
-        action = "create"
-    elif any(keyword in command_lower for keyword in ["확인", "보여", "조회", "get", "list"]):
-        action = "get"
-    elif any(keyword in command_lower for keyword in ["수정", "변경", "업데이트", "update"]):
-        action = "update"
-    elif any(keyword in command_lower for keyword in ["삭제", "제거", "delete"]):
-        action = "delete"
-    
-    # 리소스 타입 감지
-    resource_type = "unknown"
-    resource_keywords = {
-        "deployment": ["deployment", "배포"],
-        "service": ["service", "서비스"],
-        "pod": ["pod", "파드"],
-        "configmap": ["configmap", "설정"],
-        "secret": ["secret", "시크릿"],
-        "namespace": ["namespace", "네임스페이스"]
-    }
-    
-    for resource, keywords in resource_keywords.items():
-        if any(keyword in command_lower for keyword in keywords):
-            resource_type = resource
-            break
-    
-    # 숫자 추출 (replicas 등)
-    import re
-    numbers = re.findall(r'\d+', command)
-    replicas = int(numbers[0]) if numbers else None
-    
-    return {
-        "action": action,
-        "resource_type": resource_type,
-        "replicas": replicas,
-        "original_command": command,
-        "parsed_at": datetime.now().isoformat()
-    }
 
-async def execute_kubernetes_command(parsed_command: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    파싱된 명령을 실행합니다.
-    """
-    from ...mcp.tools.k8s_resources import k8s_create, k8s_get, k8s_apply, k8s_delete, ResourceKind
-    
-    action = parsed_command["action"]
-    resource_type = parsed_command["resource_type"]
-    original_command = parsed_command["original_command"]
-    
-    try:
-        if action == "create":
-            # 실제 Kubernetes 리소스 생성
-            if resource_type == "deployment":
-                # nginx deployment 생성 예시
-                result = await k8s_create(
-                    apiVersion="apps/v1",
-                    kind="Deployment",
-                    metadata={
-                        "name": "nginx-deployment",
-                        "namespace": "default",
-                        "labels": {"app": "nginx"}
-                    },
-                    spec={
-                        "replicas": parsed_command.get("replicas", 2),
-                        "selector": {"matchLabels": {"app": "nginx"}},
-                        "template": {
-                            "metadata": {"labels": {"app": "nginx"}},
-                            "spec": {
-                                "containers": [{
-                                    "name": "nginx",
-                                    "image": "nginx:latest",
-                                    "ports": [{"containerPort": 80}]
-                                }]
-                            }
-                        }
-                    }
-                )
-                return {
-                    "message": f"Deployment '{result['name']}'이 성공적으로 생성되었습니다.",
-                    "resource_type": resource_type,
-                    "action": "created",
-                    "result": result
-                }
-            elif resource_type == "service":
-                result = await k8s_create(
-                    apiVersion="v1",
-                    kind="Service",
-                    metadata={
-                        "name": "nginx-service",
-                        "namespace": "default",
-                        "labels": {"app": "nginx"}
-                    },
-                    spec={
-                        "selector": {"app": "nginx"},
-                        "ports": [{"port": 80, "targetPort": 80}],
-                        "type": "ClusterIP"
-                    }
-                )
-                return {
-                    "message": f"Service '{result['name']}'이 성공적으로 생성되었습니다.",
-                    "resource_type": resource_type,
-                    "action": "created",
-                    "result": result
-                }
-            else:
-                return {
-                    "message": f"{resource_type} 리소스 생성은 아직 지원되지 않습니다.",
-                    "resource_type": resource_type,
-                    "action": "not_supported"
-                }
-                
-        elif action == "get":
-            # 실제 Kubernetes 리소스 조회
-            if resource_type == "pod":
-                # Pod 목록 조회 (Deployment를 통해)
-                result = await k8s_get(
-                    kind="Deployment",
-                    name="nginx-deployment",
-                    namespace="default"
-                )
-                return {
-                    "message": f"Pod 상태를 확인했습니다. Deployment '{result.get('metadata', {}).get('name', 'unknown')}' 상태: {result.get('status', {}).get('phase', 'unknown')}",
-                    "resource_type": resource_type,
-                    "action": "listed",
-                    "result": result
-                }
-            else:
-                return {
-                    "message": f"{resource_type} 리소스 조회는 아직 지원되지 않습니다.",
-                    "resource_type": resource_type,
-                    "action": "not_supported"
-                }
-                
-        elif action == "update":
-            return {
-                "message": f"{resource_type} 리소스 업데이트는 아직 지원되지 않습니다.",
-                "resource_type": resource_type,
-                "action": "not_supported"
-            }
-        elif action == "delete":
-            # 실제 Kubernetes 리소스 삭제
-            if resource_type == "deployment":
-                # nginx-deployment 삭제
-                result = await k8s_delete(
-                    kind="Deployment",
-                    name="nginx-deployment",
-                    namespace="default"
-                )
-                return {
-                    "message": f"Deployment 'nginx-deployment'이 성공적으로 삭제되었습니다.",
-                    "resource_type": resource_type,
-                    "action": "deleted",
-                    "result": result
-                }
-            else:
-                return {
-                    "message": f"{resource_type} 리소스 삭제는 아직 지원되지 않습니다.",
-                    "resource_type": resource_type,
-                    "action": "not_supported"
-                }
-        else:
-            return {
-                "message": "명령을 인식할 수 없습니다.",
-                "action": "unknown"
-            }
-            
-    except Exception as e:
-        logger.error(f"Kubernetes 명령 실행 실패: {str(e)}")
-        return {
-            "message": f"명령 실행 중 오류가 발생했습니다: {str(e)}",
-            "action": "error",
-            "error": str(e)
-        }
+# REMOVED: execute_kubernetes_command() - 레거시 코드
+# 현재는 POST 방식으로 /api/v1/commands/execute를 통해 백엔드에서 처리

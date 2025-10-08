@@ -10,11 +10,8 @@ class Settings(BaseSettings):
     app_name: str = Field(default="K-Le-PaaS Backend Hybrid")
     app_version: str = Field(default="0.1.0")
 
-    # Vertex AI / Gemini
-    gcp_project: str | None = None
-    gcp_location: str | None = "europe-west4"
+    # Gemini API
     gemini_model: str | None = "gemini-2.0-flash"
-    # Authentication expects ADC or service account via env; optional here
 
     # GitHub Webhook
     github_webhook_secret: str | None = None
@@ -45,13 +42,9 @@ class Settings(BaseSettings):
     
     # MCP Git Agent 설정
     mcp_git_agent_enabled: bool = Field(default=True, description="MCP 네이티브 Git 에이전트 사용 여부")
-    mcp_default_cloud_provider: str = Field(default="gcp", description="기본 클라우드 프로바이더 (gcp/ncp)")
+    mcp_default_cloud_provider: str = Field(default="ncp", description="기본 클라우드 프로바이더 (gcp/ncp)")
     mcp_git_agent_timeout: int = Field(default=300, description="MCP Git 에이전트 타임아웃 (초)")
     
-    # GCP Git Agent 설정
-    gcp_git_agent_url: str | None = Field(default="http://gcp-git-agent:8001", description="GCP Git Agent URL")
-    gcp_project_id: str | None = None
-    gcp_gcr_region: str = Field(default="asia-northeast3", description="GCP Container Registry 지역")
     
     # NCP Git Agent 설정
     ncp_git_agent_url: str | None = Field(default="http://ncp-git-agent:8001", description="NCP Git Agent URL")
