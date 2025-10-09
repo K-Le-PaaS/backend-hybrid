@@ -91,7 +91,7 @@ class Settings(BaseSettings):
     learning_ttl: int = Field(default=2592000, description="학습 데이터 TTL (초)")
     
     # Model Performance Tracking
-    model_performance_tracking: bool = Field(default=True, description="모델 성능 추적 활성화")
+    llm_performance_tracking: bool = Field(default=True, description="모델 성능 추적 활성화")
     performance_tracking_ttl: int = Field(default=7776000, description="성능 추적 데이터 TTL (초)")
     
     # Learning Weights
@@ -112,7 +112,7 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     
     # Model Selection Strategy
-    model_selection_strategy: str = Field(default="confidence_based", description="모델 선택 전략 (confidence_based, performance_based, hybrid)")
+    llm_selection_strategy: str = Field(default="confidence_based", description="모델 선택 전략 (confidence_based, performance_based, hybrid)")
     confidence_threshold: float = Field(default=0.7, description="신뢰도 임계값")
     performance_weight: float = Field(default=0.3, description="성능 가중치")
     
