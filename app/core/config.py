@@ -6,7 +6,7 @@ from typing import Dict
 
 
 class Settings(BaseSettings):
-    model_config = ConfigDict(env_prefix="KLEPAAS_", extra="ignore")
+    model_config = ConfigDict(env_prefix="KLEPAAS_", extra="ignore", protected_namespaces=('settings_',))
     app_name: str = Field(default="K-Le-PaaS Backend Hybrid")
     app_version: str = Field(default="0.1.0")
 
