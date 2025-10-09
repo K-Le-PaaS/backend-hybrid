@@ -19,8 +19,9 @@ settings = get_settings()
 if settings.database_url:
     DATABASE_URL = settings.database_url
 else:
-    # 기본값: SQLite 인메모리 데이터베이스 (테스트용)
-    DATABASE_URL = "sqlite:///./test.db"
+    # 기본값: SQLite 파일 데이터베이스 (NFS 호환)
+    # /data 디렉터리는 PVC로 마운트된 영구 저장소
+    DATABASE_URL = "sqlite:////data/klepaas.db"
 
 # SQLite용 엔진 설정
 if DATABASE_URL.startswith("sqlite"):
@@ -53,12 +54,32 @@ def get_db() -> Generator[Session, None, None]:
 
 def init_database():
     """데이터베이스 테이블을 생성합니다."""
+    import os
+    import structlog
     from .models.base import Base
     from .models.audit_log import AuditLogModel
     from .models.deployment_history import DeploymentHistoryModel
     
-    # 모든 모델을 임포트하여 메타데이터에 등록
-    Base.metadata.create_all(bind=engine)
+    logger = structlog.get_logger(__name__)
+    
+    try:
+        # SQLite 파일의 디렉터리가 존재하는지 확인하고 생성
+        if DATABASE_URL.startswith("sqlite:///"):
+            db_path = DATABASE_URL.replace("sqlite:///", "")
+            if db_path.startswith("/"):  # 절대 경로인 경우
+                db_dir = os.path.dirname(db_path)
+                if db_dir and not os.path.exists(db_dir):
+                    logger.info(f"Creating database directory: {db_dir}")
+                    os.makedirs(db_dir, exist_ok=True)
+        
+        # 모든 모델을 임포트하여 메타데이터에 등록
+        logger.info(f"Initializing database: {DATABASE_URL}")
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database tables created successfully")
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        raise
 
 
 def init_services(db_session: Session):
