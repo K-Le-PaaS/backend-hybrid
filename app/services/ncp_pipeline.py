@@ -79,16 +79,64 @@ def _dbg(tag: str, **kw: object) -> None:
         pass
 
 
-def get_sourcecommit_repo_public_url(project_id: str, repo_name: str) -> str | None:
-    """Best-effort: try to resolve public clone URL for a SourceCommit repo.
-    If SDK/API not available, return None and caller will fallback.
+def _generate_ncr_image_name(owner: str, repo: str) -> str:
+    """Generate NCR-compliant image name from owner and repo.
+
+    NCR naming rules:
+    - Use lower case
+
+    Format: {owner}-{repo} with all hyphens replaced by underscores
+
+    Examples:
+        _generate_ncr_image_name("K-Le-PaaS", "test-01") -> "k-le-paas-test-01"
+        _generate_ncr_image_name("myorg", "myrepo") -> "myorg-myrepo"
     """
-    endpoint = getattr(settings, "ncp_sourcecommit_public_base", None) or "https://devtools.ncloud.com"
+    safe_owner = owner.lower()
+    safe_repo = repo.lower()
+    return f"{safe_owner}-{safe_repo}"
+
+
+def get_sourcecommit_repo_public_url(project_id: str, repo_name: str) -> str | None:
+    """Get the actual clone URL from SourceCommit API.
+
+    This is critical for authentication to work properly.
+    """
     try:
-        # Some SDKs may have an API, but we keep a safe fallback path pattern
+        # Use synchronous version of _call_ncp_rest_api
+        import requests
+        sc_base = getattr(settings, 'ncp_sourcecommit_endpoint', 'https://sourcecommit.apigw.ntruss.com')
+
+        # Get headers with authentication
+        headers = _get_ncp_api_headers('GET', f'/api/v1/repository/{repo_name}')
+
+        response = requests.get(
+            f"{sc_base}/api/v1/repository/{repo_name}",
+            headers=headers,
+            timeout=30
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            result = data.get('result', {})
+
+            # Get clone URLs
+            clone_url_http = result.get('cloneUrlHttp') or result.get('clone_url_http')
+
+            if clone_url_http:
+                _dbg("SC-URL-RESOLVED", repo=repo_name, url=clone_url_http)
+                return clone_url_http
+
+        # Fallback to devtools pattern
+        endpoint = getattr(settings, "ncp_sourcecommit_public_base", None) or "https://devtools.ncloud.com"
+        fallback_url = f"{endpoint}/{project_id}/{repo_name}.git"
+        _dbg("SC-URL-FALLBACK", repo=repo_name, url=fallback_url)
+        return fallback_url
+
+    except Exception as e:
+        _dbg("SC-URL-ERROR", error=str(e)[:200])
+        # Fallback
+        endpoint = getattr(settings, "ncp_sourcecommit_public_base", None) or "https://devtools.ncloud.com"
         return f"{endpoint}/{project_id}/{repo_name}.git"
-    except Exception:
-        return None
 
 # --- NCP REST Signing helpers (Signature v2) ---
 import asyncio
@@ -142,6 +190,169 @@ async def _call_ncp_rest_api(method: str, base_url: str, path: str | list[str], 
             except Exception:
                 pass
     raise HTTPException(status_code=last_status or 500, detail=f"NCP REST error {last_status}: {last_text}")
+
+
+async def update_sourcecommit_manifest(
+    repo_name: str,
+    image_url: str,
+    branch: str = "main",
+    manifest_path: str = "k8s/deployment.yaml",
+    app_name: str | None = None,
+    port: int = 8080,
+    sc_project_id: str | None = None,
+
+) -> dict:
+    """
+    Update SourceCommit repository's Kubernetes deployment manifest.
+
+    Uses the full image URL (including tag) directly in the manifest.
+
+    Args:
+        repo_name: SourceCommit repository name
+        image_url: Full container image URL with tag (e.g., "registry.com/owner/repo:v1.0.0")
+        branch: Git branch to update (default: main)
+        manifest_path: Path to deployment manifest (default: k8s/deployment.yaml)
+        app_name: Application name for deployment (default: derived from repo_name)
+        port: Container port (default: 8080)
+        sc_project_id: SourceCommit project ID (not used with Git approach)
+
+    Returns:
+        Response indicating manifest was updated with specific image tag
+    """
+    import yaml
+
+    # Derive app name from repo if not provided
+    if not app_name:
+        app_name = repo_name.lower()
+
+    _dbg("SC-MANIFEST-UPDATE", repo=repo_name, image=image_url, app=app_name)
+
+    # Generate manifest with full image URL (including tag)
+    manifest_content = _generate_default_manifest(app_name, image_url, port)
+
+    _dbg("SC-MANIFEST-DIRECT", repo=repo_name, image_url=image_url)
+
+    return {
+        "status": "manifest_ready",
+        "repository": repo_name,
+        "branch": branch,
+        "manifest_path": manifest_path,
+        "image_url": image_url,
+        "manifest_content": manifest_content,
+        "commit": {"note": f"Update manifest with image {image_url}"}
+    }
+
+
+def _generate_manifest_with_env_var(app_name: str, image_template: str, port: int) -> str:
+    """Generate Kubernetes deployment manifest with environment variable for image tag."""
+    return f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {app_name}
+  labels:
+    app: {app_name}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {app_name}
+  template:
+    metadata:
+      labels:
+        app: {app_name}
+    spec:
+      containers:
+      - name: {app_name}
+        image: {image_template}
+        ports:
+        - containerPort: {port}
+        env:
+        - name: PORT
+          value: "{port}"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+"""
+
+
+def _generate_default_manifest(app_name: str, image_url: str, port: int) -> str:
+    """Generate default Kubernetes deployment manifest."""
+    return f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {app_name}
+  labels:
+    app: {app_name}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {app_name}
+  template:
+    metadata:
+      labels:
+        app: {app_name}
+    spec:
+      imagePullSecrets:
+      - name: ncp-cr
+      containers:
+      - name: {app_name}
+        image: {image_url}
+        ports:
+        - containerPort: {port}
+        env:
+        - name: PORT
+          value: "{port}"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+"""
+
+
+def _generate_default_manifest(app_name: str, image_url: str, port: int) -> str:
+    """Generate default Kubernetes deployment manifest."""
+    return f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {app_name}
+  labels:
+    app: {app_name}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {app_name}
+  template:
+    metadata:
+      labels:
+        app: {app_name}
+    spec:
+      imagePullSecrets:
+      - name: ncp-cr
+      containers:
+      - name: {app_name}
+        image: {image_url}
+        ports:
+        - containerPort: {port}
+        env:
+        - name: PORT
+          value: "{port}"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+"""
 
 # --- NCR manifest verification (short backoff, bearer auth if required) ---
 async def _verify_ncr_manifest_exists(image_with_tag: str) -> dict:
@@ -273,15 +484,23 @@ async def create_sourcebuild_project_rest(owner: str, repo: str, branch: str, im
         # fallback: some tenants allow repository name only (may fail with 320610)
         source_config.update({"repository": repo})
 
-    # Derive NCR project name and image name from full registry URL
+    # Generate NCR-compliant image name: {owner}_{repo}
+    # Example: K-Le-PaaS/test-01 -> k_le_paas_test_01
+    ncr_image_name = _generate_ncr_image_name(owner, repo)
+
+    # Derive registry project from image_repo
     # image_repo example: "klepaas-test.kr.ncr.ntruss.com/owner-repo"
     try:
-        registry_host, image_name = (image_repo or "").split("/", 1)
+        registry_host, _ = (image_repo or "").split("/", 1)
     except ValueError:
-        registry_host, image_name = image_repo, f"{owner}-{repo}"
-    registry_project = (registry_host or "").split(".")[0] or ""
+        registry_host = image_repo or ""
+    registry_project = (registry_host or "").split(".")[0] or "klepaas-test"
+
+    _dbg("SB-PROJECT-CREATE", owner=owner, repo=repo,
+         image_name=ncr_image_name, registry=registry_project)
 
     # Dockerfile-based schema for apigw REST (guarantees container build & push)
+    # Use cache (not artifact) for NCR push - matches NCP Console behavior
     body = {
         "name": f"build-{owner}-{repo}",
         "source": {
@@ -292,9 +511,13 @@ async def create_sourcebuild_project_rest(owner: str, repo: str, branch: str, im
             "compute": {"id": 1},
             "platform": {"type": "SourceBuild", "config": {"os": {"id": 1}, "runtime": {"id": 5, "version": {"id": 27}}}}
         },
-        "artifact": {
-            "type": "ContainerRegistry",
-            "config": {"registry": image_repo, "tag": "latest"}
+        "cache": {
+            "use": True,
+            "registry": registry_project,
+            "image": ncr_image_name,  # e.g., k_le_paas_test_01
+            "tag": "latest",
+            "latest": True,
+            "region": 1
         },
         "builder": {"type": "Dockerfile", "config": {"path": "Dockerfile"}}
     }
@@ -511,6 +734,7 @@ async def create_sourcedeploy_project_sdk(name: str, manifest_text: str, nks_clu
         await asyncio.sleep(3)
 
         # 4. Create scenario with inline manifest
+        # Manifest should use a tag placeholder (${TAG}) so deploy can switch versions without new commits
         manifest_req = SourceDeployManifestRequest(
             type="Inline",
             files=[{
@@ -936,7 +1160,17 @@ def mirror_to_sourcecommit(
                 manifest_path = k8s_dir / "deployment.yaml"
                 service_path = k8s_dir / "service.yaml"
                 if not manifest_path.exists() or not service_path.exists():
-                    repo_part = Path(sc_full_url).stem if sc_full_url else (sc_repo_name or "app")
+                    repo_part_raw = Path(sc_full_url).stem if sc_full_url else (sc_repo_name or "app")
+                    # Convert to lowercase for Kubernetes naming requirements
+                    repo_part = repo_part_raw.lower()
+                    # Build image name using lowercase only (no hyphen replacement)
+                    try:
+                        registry = getattr(settings, "ncp_container_registry_url", None)
+                    except Exception:
+                        registry = None
+                    image_name_unified = repo_part
+                    # Use 'latest' tag by default instead of ${TAG} variable
+                    image_full = f"{registry}/{image_name_unified}:latest" if registry else f"{image_name_unified}:latest"
                     manifest = f"""
 apiVersion: apps/v1
 kind: Deployment
@@ -953,11 +1187,13 @@ spec:
       labels:
         app: {repo_part}
     spec:
+      imagePullSecrets:
+      - name: ncp-cr
       containers:
       - name: {repo_part}
-        image: {repo_part}:latest
+        image: {image_full}
         ports:
-        - containerPort: 80
+        - containerPort: 8080
 """.strip()
                     service = f"""
 apiVersion: v1
@@ -971,7 +1207,7 @@ spec:
   ports:
   - name: http
     port: 80
-    targetPort: 80
+    targetPort: 8080
 """.strip()
 
                     # Write missing files only (idempotent)
@@ -1000,6 +1236,189 @@ spec:
     finally:
         try:
             shutil.rmtree(work_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+
+def mirror_and_update_manifest(
+    github_repo_url: str,
+    installation_or_access_token: str,
+    sc_project_id: str,
+    sc_repo_name: str,
+    image_repo: str,
+    image_tag: str,
+    sc_username: str | None = None,
+    sc_password: str | None = None,
+    sc_endpoint: str | None = None,
+    sc_full_url: str | None = None,
+) -> dict:
+    """Mirror GitHub to SourceCommit, then update manifest with specific image tag.
+
+    This function uses the existing mirror_to_sourcecommit to do the heavy lifting,
+    then clones SourceCommit to update the manifest with actual image tag.
+
+    Parameters:
+    - github_repo_url: https URL of GitHub repo
+    - installation_or_access_token: GitHub App installation token (preferred) or PAT
+    - sc_project_id: SourceCommit project id
+    - sc_repo_name: Target repository name to push to
+    - image_repo: Container image repository (without tag) e.g., "kr.ncr.ntruss.com/owner_repo"
+    - image_tag: Specific image tag to deploy e.g., "latest", "v1.2.3", commit SHA
+    - sc_username/password: SourceCommit basic auth
+    - sc_endpoint: e.g., https://sourcecommit.apigw.ntruss.com
+    - sc_full_url: Full SourceCommit git URL (optional)
+
+    Returns:
+    - dict with status, manifest_updated flag, and deployed image
+    """
+
+    # Step 1: Use existing mirror function to sync GitHub → SourceCommit with ${TAG}
+    _dbg("MM-STEP1-MIRROR", github=github_repo_url, sc_repo=sc_repo_name)
+    mirror_result = mirror_to_sourcecommit(
+        github_repo_url=github_repo_url,
+        installation_or_access_token=installation_or_access_token,
+        sc_project_id=sc_project_id,
+        sc_repo_name=sc_repo_name,
+        sc_username=sc_username,
+        sc_password=sc_password,
+        sc_endpoint=sc_endpoint,
+        sc_full_url=sc_full_url
+    )
+    _dbg("MM-STEP1-SUCCESS", result=mirror_result)
+
+    # Step 2: Clone SourceCommit, update manifest with actual tag, push back
+    work_dir = Path("/tmp") / f"manifest-update-{uuid.uuid4().hex[:8]}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    sc_dir = work_dir / "sc_repo"
+
+    try:
+        # Compose SourceCommit URL with auth
+        if sc_full_url:
+            sc_url = sc_full_url
+        else:
+            try:
+                resolved = get_sourcecommit_repo_public_url(sc_project_id, sc_repo_name)  # type: ignore
+            except Exception:
+                resolved = None
+            sc_url = resolved or f"https://devtools.ncloud.com/{sc_project_id}/{sc_repo_name}.git"
+
+        u_raw = (sc_username or "").strip()
+        p_raw = (sc_password or "").strip()
+        if u_raw or p_raw:
+            user = quote(u_raw or "token", safe="")
+            pwd = quote(p_raw or "x", safe="")
+            sc_url = sc_url.replace("https://", f"https://{user}:{pwd}@", 1)
+
+        _dbg("MM-STEP2-CLONE-SC", sc_url_masked=sc_url.replace(f"{user}:{pwd}@", "***@") if (u_raw or p_raw) else sc_url)
+
+        # Clone SourceCommit
+        subprocess.run(
+            ["git", "clone", sc_url, str(sc_dir)],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+
+        _dbg("MM-STEP2-CLONE-SUCCESS", dir=str(sc_dir))
+
+        # Update manifest
+        manifest_path = sc_dir / "k8s" / "deployment.yaml"
+        manifest_updated = False
+
+        if manifest_path.exists():
+            import yaml
+
+            _dbg("MM-MANIFEST-FOUND", path=str(manifest_path))
+
+            # Read original content for debugging
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                original_content = f.read()
+                _dbg("MM-MANIFEST-ORIGINAL", content_preview=original_content[:200])
+
+            # Parse YAML
+            manifest = yaml.safe_load(original_content)
+            _dbg("MM-MANIFEST-PARSED", has_spec='spec' in manifest)
+
+            # Update image in all containers
+            if 'spec' in manifest and 'template' in manifest['spec']:
+                spec_template = manifest['spec'].get('template', {})
+                spec_spec = spec_template.get('spec', {})
+                containers = spec_spec.get('containers', [])
+                _dbg("MM-CONTAINERS-FOUND", count=len(containers))
+
+                for idx, container in enumerate(containers):
+                    if 'image' in container:
+                        old_image = container['image']
+                        new_image = f"{image_repo}:{image_tag}"
+                        container['image'] = new_image
+                        _dbg("MM-IMAGE-UPDATE",
+                             container_idx=idx,
+                             old=old_image,
+                             new=new_image,
+                             image_repo=image_repo,
+                             image_tag=image_tag)
+                        manifest_updated = True
+            else:
+                _dbg("MM-MANIFEST-STRUCTURE-ERROR",
+                     has_spec='spec' in manifest,
+                     has_template='template' in manifest.get('spec', {}))
+
+            if manifest_updated:
+                # Write updated manifest (preserve formatting)
+                with open(manifest_path, 'w', encoding='utf-8') as f:
+                    yaml.dump(manifest, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+                # Verify the change was written
+                with open(manifest_path, 'r', encoding='utf-8') as f:
+                    updated_content = f.read()
+                    _dbg("MM-MANIFEST-UPDATED", content_preview=updated_content[:200])
+
+                # Git commit and push
+                subprocess.run(
+                    ["git", "-C", str(sc_dir), "config", "user.email", "bot@k-le-paas.local"],
+                    check=True, capture_output=True, text=True
+                )
+                subprocess.run(
+                    ["git", "-C", str(sc_dir), "config", "user.name", "K-Le-PaaS Bot"],
+                    check=True, capture_output=True, text=True
+                )
+                subprocess.run(
+                    ["git", "-C", str(sc_dir), "add", "k8s/deployment.yaml"],
+                    check=True, capture_output=True, text=True
+                )
+                subprocess.run(
+                    ["git", "-C", str(sc_dir), "commit", "-m", f"chore: update image tag to {image_tag}"],
+                    check=True, capture_output=True, text=True
+                )
+                subprocess.run(
+                    ["git", "-C", str(sc_dir), "push", "origin", "main"],
+                    check=True, capture_output=True, text=True
+                )
+
+                _dbg("MM-STEP2-PUSH-SUCCESS", image_tag=image_tag)
+        else:
+            _dbg("MM-MANIFEST-NOT-FOUND", path=str(manifest_path), warning="manifest should exist after mirror")
+
+        return {
+            "status": "success",
+            "source": github_repo_url,
+            "target": sc_url.replace(f"{user}:{pwd}@", "") if (sc_username or sc_password) else sc_url,
+            "manifest_updated": manifest_updated,
+            "image": f"{image_repo}:{image_tag}"
+        }
+
+    except subprocess.CalledProcessError as e:
+        error_detail = e.stderr if hasattr(e, 'stderr') else str(e)
+        _dbg("MM-ERROR", error=error_detail[:500])
+        raise HTTPException(status_code=400, detail=f"git error during manifest update: {error_detail}")
+    except Exception as e:
+        _dbg("MM-UNEXPECTED-ERROR", error=str(e)[:500])
+        raise HTTPException(status_code=500, detail=f"Unexpected error during manifest update: {str(e)}")
+    finally:
+        try:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            _dbg("MM-CLEANUP", work_dir=str(work_dir))
         except Exception:
             pass
 
@@ -1161,12 +1580,12 @@ async def create_split_build_deploy_pipeline(
     registry = getattr(settings, "ncp_container_registry_url", None)
     if not registry:
         raise HTTPException(status_code=400, detail="레지스트리 URL이 설정되지 않았습니다 (KLEPAAS_NCP_CONTAINER_REGISTRY_URL)")
-    # Use unified owner_repo (hyphen→underscore, lowercased) image name
+    # Use lowercase only image name (no hyphen replacement)
     def _norm_part(s: str | None) -> str:
-        raw = (s or "").replace("-", "_")
-        # Only allow [a-z0-9_], lowercased for registry compatibility
-        return "".join(ch if (ch.isalnum() or ch == "_") else "_" for ch in raw.lower()) or "app"
-    image_name_unified = f"{_norm_part(owner)}_{_norm_part(repo)}"
+        raw = (s or "").lower()
+        # Only allow [a-z0-9-], lowercased for registry compatibility
+        return "".join(ch if (ch.isalnum() or ch == "-") else "-" for ch in raw) or "app"
+    image_name_unified = f"{_norm_part(owner)}-{_norm_part(repo)}"
     image_repo = f"{registry}/{image_name_unified}"
 
     # Resolve SourceBuild project ID: DB first → lookup → create if missing
@@ -1232,7 +1651,7 @@ spec:
     spec:
       containers:
       - name: {repo}
-        image: {image_repo}:${{GIT_COMMIT}}
+        image: {image_repo}:${{TAG}}
         ports:
         - containerPort: 80
 ---
@@ -1343,81 +1762,115 @@ spec:
     return {"status": "created", "build_project_id": build_project_id, "deploy_project_id": deploy_project_id, "pipeline_id": pipeline_id, "image_repo": image_repo}
 
 
-async def run_sourcebuild(build_project_id: str, image_repo: str | None = None) -> dict:
+async def run_sourcebuild(
+    build_project_id: str,
+    image_repo: str | None = None,
+    commit_sha: str | None = None,  # For rollback: specify exact commit to build
+    sc_project_id: str | None = None,
+    sc_repo_name: str | None = None,
+    branch: str | None = None
+) -> dict:
     """Run SourceBuild project and wait for completion.
 
     If image_repo is provided, include artifact+builder in trigger body so apigw
     executes a real Dockerfile build and pushes to NCR.
+
+    If commit_sha is provided, builds that specific commit (for rollback scenarios).
+    Otherwise, builds the latest commit from the branch.
     """
     base = getattr(settings, 'ncp_sourcebuild_endpoint', 'https://sourcebuild.apigw.ntruss.com')
-    
-    # 0. 프로젝트 상세 조회하여 artifact 구성(레지스트리/태그) 확보
-    registry_url: str | None = None
-    image_tag: str = 'latest'
+
+    # 0. 프로젝트 상세 조회하여 cache 구성(레지스트리/이미지/태그) 확보
+    registry_project: str | None = None
+    image_name_from_project: str | None = None
+    image_tag: str = commit_sha if commit_sha else 'latest'  # Use commit SHA as tag for rollback
     try:
         proj_detail = await _call_ncp_rest_api('GET', base, f"/api/v1/project/{build_project_id}")
         proj_result = proj_detail.get('result', {}) if isinstance(proj_detail, dict) else {}
-        artifact_cfg = (proj_result.get('artifact') or {}).get('config', {}) if isinstance(proj_result, dict) else {}
-        registry_url = artifact_cfg.get('registry') or None
-        image_tag = artifact_cfg.get('tag') or image_tag
-        _dbg("SB-PROJECT-ARTIFACT", registry=registry_url, image_tag=image_tag)
+        cache_cfg = (proj_result.get('cache') or {}) if isinstance(proj_result, dict) else {}
+        registry_project = cache_cfg.get('registry') or None
+        image_name_from_project = cache_cfg.get('image') or None
+        image_tag = cache_cfg.get('tag') or image_tag
+        _dbg("SB-PROJECT-CACHE", registry=registry_project, image=image_name_from_project, image_tag=image_tag)
     except Exception as e:
-        _dbg("SB-PROJECT-ARTIFACT-ERR", error=str(e)[:200])
+        _dbg("SB-PROJECT-CACHE-ERR", error=str(e)[:200])
 
     # 1. 빌드 시작
     _dbg("SB-BUILD-TRIGGER", project_id=build_project_id)
-    trigger_body = {}
-    if image_repo:
-        # Derive registry project (host prefix) and image name from full repo
-        # image_repo example: klepaas-test.kr.ncr.ntruss.com/klepaas-test/test01<digits>
+
+    # Use image name directly from project cache config (already has timestamp for uniqueness)
+    if image_name_from_project:
+        # Project cache config has image name with timestamp (created at project creation time)
+        # No need to append anything - the timestamp already ensures uniqueness
+        final_image_name = image_name_from_project
+        final_registry_project = registry_project or "klepaas-test"
+        _dbg("SB-IMAGE-SOURCE", source="project_cache_config",
+             image=final_image_name,
+             registry=final_registry_project)
+    elif image_repo:
+        # Fallback: derive from image_repo if cache config is missing
         try:
             registry_host, image_path = image_repo.split("/", 1)
         except ValueError:
             registry_host, image_path = image_repo, image_repo
-        # image name must be last path segment only
-        image_name_last = image_path.rsplit("/", 1)[-1]
-        registry_project = (registry_host or "").split(".")[0] or ""
-        # Console-compatible trigger body (cmd.dockerbuild) + explicit artifact push
-        trigger_body = {
-            "env": {
-                "docker": {"use": True, "id": 1}
-            },
-            "cmd": {
-                "pre": [],
-                "build": [],
-                "post": [],
-                "dockerbuild": {
-                    "use": True,
-                    "dockerfile": "Dockerfile",
-                    "region": 1,
-                    "registry": registry_project,
-                    "image": image_name_last,
-                    "tag": image_tag,
-                    "latest": (image_tag == "latest")
-                }
-            },
-            # Explicit artifact push to Container Registry
-            "artifact": {
-                "use": True,
-                "type": "ContainerRegistry",
-                "config": {
-                    "registry": f"{registry_host}/{image_name_last}",
-                    "tag": image_tag
-                }
-            },
-            # Ensure image push is retained via cache block on tenants that require it
-            "cache": {
-                "use": True,
-                "registry": registry_project,
-                "image": image_name_last,
-                "tag": image_tag,
-                "latest": (image_tag == "latest"),
-                "region": 1
-            }
-        }
+        final_image_name = image_path.rsplit("/", 1)[-1]
+        final_registry_project = (registry_host or "").split(".")[0] or "klepaas-test"
+        _dbg("SB-IMAGE-SOURCE", source="fallback_image_repo",
+             image=final_image_name,
+             registry=final_registry_project)
     else:
-        # image_repo는 필수. 누락 시 빌드 실행 자체를 중단
-        raise HTTPException(status_code=400, detail="빌드 실행 실패: image_repo가 비어 있습니다 (<host>/<imageName> 형식 필요)")
+        raise HTTPException(status_code=400, detail="빌드 실행 실패: 이미지 이름을 결정할 수 없습니다")
+
+    # Console-compatible trigger body (cmd.dockerbuild) + cache push
+    trigger_body = {
+        "env": {
+            "docker": {"use": True, "id": 1}
+        },
+        "cmd": {
+            "pre": [],
+            "build": [],
+            "post": [],
+            "dockerbuild": {
+                "use": True,
+                "dockerfile": "Dockerfile",
+                "region": 1,
+                "registry": final_registry_project,
+                "image": final_image_name,
+                "tag": image_tag,
+                "latest": (image_tag == "latest")
+            }
+        },
+        # Explicit artifact push to Container Registry
+        "artifact": {
+            "use": True,
+            "type": "ContainerRegistry",
+            "config": {
+                "registry": f"{final_registry_project}.kr.ncr.ntruss.com/{final_image_name}",
+                "tag": image_tag
+            }
+        },
+        # Ensure image push is retained via cache block
+        "cache": {
+            "use": True,
+            "registry": final_registry_project,
+            "image": final_image_name,
+            "tag": image_tag,
+            "latest": (image_tag == "latest"),
+            "region": 1
+        }
+    }
+
+    # If commit_sha is specified (for rollback), add it to trigger body
+    # NCP SourceBuild may support building specific commits via 'ref' or 'commit' field
+    if commit_sha:
+        # Try adding commit reference to env or sourcecommit section
+        # Note: This may need adjustment based on actual NCP API behavior
+        trigger_body["sourcecommit"] = {
+            "commit": commit_sha,
+            "ref": commit_sha
+        }
+        _dbg("SB-TRIGGER-COMMIT", commit_sha=commit_sha)
+
     _dbg("SB-TRIGGER-BODY", body=trigger_body)
     build_data = await _call_ncp_rest_api('POST', base, f"/api/v1/project/{build_project_id}/build", trigger_body)
     # Accept multiple response shapes
@@ -1432,12 +1885,12 @@ async def run_sourcebuild(build_project_id: str, image_repo: str | None = None) 
     
     _dbg("SB-BUILD-STARTED", build_id=build_id)
     
-    # 2. 빌드 완료까지 폴링 (history 목록 기반, 최대 ~2분)
+    # 2. 빌드 완료까지 폴링 (history 목록 기반, 최대 ~5분)
     # 초기 대기 (빌드 시작 여유)
     await asyncio.sleep(5)
-    for attempt in range(12):  # 12번 × 5~10초 <~ 2분
+    for attempt in range(30):  # 30번 × 10초 = 5분 (이미지 push 시간 고려)
         if attempt > 0:
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)
         try:
             # Use history list instead of detail endpoint (detail returns 404)
             list_path = f"/api/v1/project/{build_project_id}/history"
@@ -1467,10 +1920,14 @@ async def run_sourcebuild(build_project_id: str, image_repo: str | None = None) 
             st = str(status).lower() if status is not None else None
             if st in ("success", "succeeded", "completed"):
                 container_image = current.get('containerImageUrl') or current.get('image')
-                if not container_image and image_repo:
-                    container_image = f"{image_repo}:{image_tag}"
-                elif not container_image and registry_url:
-                    container_image = f"{registry_url}:{image_tag}"
+                if not container_image:
+                    # Fallback: construct from project cache config
+                    if final_registry_project and final_image_name:
+                        container_image = f"{final_registry_project}.kr.ncr.ntruss.com/{final_image_name}:{image_tag}"
+                        _dbg("SB-IMAGE-FALLBACK", source="cache_config", image=container_image)
+                    elif image_repo:
+                        container_image = f"{image_repo}:{image_tag}"
+                        _dbg("SB-IMAGE-FALLBACK", source="image_repo", image=container_image)
 
                 if not container_image:
                     # 상세 응답에도 이미지 경로가 없으면 이미지 푸시가 수행되지 않은 것으로 판단
@@ -1570,6 +2027,7 @@ async def run_sourcedeploy(
     user_id: str | None = None,
     owner: str | None = None,
     repo: str | None = None,
+    tag: str | None = None,
 ) -> dict:
     """Run SourceDeploy project via REST only using scenario deploy endpoint.
 
@@ -1754,9 +2212,12 @@ async def run_sourcedeploy(
                             "k8s/deployment.yaml",
                             "k8s/service.yaml"
                         ]
+                    },
+                    "env": {  # Environment variables for image tag injection
+                        "IMAGE_TAG": "latest"  # Will be overridden during deploy
                     }
                 },
-                "description": "Auto-generated Kubernetes deployment"
+                "description": "Auto-generated Kubernetes deployment with dynamic image tag"
             }
             _dbg("SD-SCENARIO-BODY", variant="consolePayload", body=body_sc)
             
@@ -1777,12 +2238,13 @@ async def run_sourcedeploy(
                     # Continue retrying with backoff
                     continue
 
-        if not scenario_created and last_error:
-            _dbg("SD-SCENARIO-ALL-FAILED", last_error=str(getattr(last_error, 'detail', ''))[:500])
-            # Don't raise, just log - scenario might be created manually
+        # Poll scenario list to get scenario_id (regardless of creation success/failure)
+        # NCP API may not immediately return the created scenario, so always poll
+        if scenario_id is None:
+            if not scenario_created and last_error:
+                _dbg("SD-SCENARIO-ALL-FAILED", last_error=str(getattr(last_error, 'detail', ''))[:500])
 
-            # Poll scenario list until created scenario appears (even if creation failed, check if it exists)
-            _dbg("SD-SCENARIO-POLL-START", project_id=deploy_project_id, stage_id=stage_id)
+            _dbg("SD-SCENARIO-POLL-START", project_id=deploy_project_id, stage_id=stage_id, created=scenario_created)
             for poll_attempt in range(20):
                 await asyncio.sleep(2.0)
                 try:
@@ -1798,6 +2260,40 @@ async def run_sourcedeploy(
                         break
                 except HTTPException as e:
                     _dbg("SD-SCENARIO-POLL-ERR", poll_attempt=poll_attempt, code=getattr(e, 'status_code', None))
+
+    # Image tag verification and environment variable preparation
+    effective_tag = tag or "latest"
+    if not (owner and repo and sc_repo_name):
+        _dbg("SD-DEPLOY-MISSING-PARAMS", owner=owner, repo=repo, sc_repo_name=sc_repo_name)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required parameters for deployment: owner={owner}, repo={repo}, sc_repo_name={sc_repo_name}"
+        )
+
+    registry = getattr(settings, "ncp_container_registry_url", None)
+    if not registry:
+        _dbg("SD-MANIFEST-NO-REGISTRY")
+        raise HTTPException(status_code=500, detail="Container registry URL not configured (KLEPAAS_NCP_CONTAINER_REGISTRY_URL)")
+
+    image_repo, _ = _compose_image_repo(registry, owner, repo, build_project_id=None)
+    desired_image = f"{image_repo}:{effective_tag}"
+
+    # Verify image exists in registry before deployment
+    _dbg("SD-IMAGE-VERIFY-START", image=desired_image)
+    verification = await _verify_ncr_manifest_exists(desired_image)
+    if not verification.get("exists"):
+        error_code = verification.get("code")
+        _dbg("SD-IMAGE-NOT-FOUND", image=desired_image, code=error_code)
+        raise HTTPException(
+            status_code=404,
+            detail=f"Container image not found in registry: {desired_image} (HTTP {error_code}). Ensure SourceBuild completed successfully."
+        )
+
+    _dbg("SD-IMAGE-VERIFIED", image=desired_image, code=verification.get("code"))
+
+    # Manifest uses ${IMAGE_TAG} environment variable - no file update needed
+    # The tag will be injected at deployment time via SourceDeploy env config
+    _dbg("SD-ENV-VAR-APPROACH", image_tag=effective_tag, template=f"{image_repo}:${{IMAGE_TAG}}")
 
     # Use the IDs we already have (polling already confirmed they exist)
     if not stage_id or not scenario_id:
@@ -1815,6 +2311,67 @@ async def run_sourcedeploy(
         error_detail += f"\n   - Path: k8s/deployment.yaml"
         error_detail += f"\n\nSee NCP_SCENARIO_DEBUG.md for more details."
         raise HTTPException(status_code=400, detail=error_detail)
+
+    # Step 0: Mirror GitHub code to SourceCommit with manifest update (필수)
+    # SourceBuild는 SourceCommit의 코드를 사용하므로, 먼저 최신 코드를 미러링해야 함
+    # 이 단계에서 k8s/deployment.yaml의 이미지 태그도 함께 업데이트
+    manifest_updated = False
+    if owner and repo and sc_repo_name:
+        _dbg("SC-MIRROR-START", owner=owner, repo=repo, sc_repo=sc_repo_name, image_tag=effective_tag)
+        try:
+            # Get GitHub Installation Token from DB
+            github_token = None
+            installation_id = None
+
+            if db is not None and user_id is not None:
+                try:
+                    integ = get_integration(db, user_id=user_id, owner=owner, repo=repo)
+                    if integ:
+                        installation_id = getattr(integ, "github_installation_id", None)
+                        _dbg("SC-MIRROR-INSTALLATION", installation_id=installation_id)
+                except Exception as e:
+                    _dbg("SC-MIRROR-INTEG-ERR", error=str(e)[:200])
+
+            # Generate GitHub App Installation Token
+            if installation_id:
+                try:
+                    from .github_app import github_app_auth
+                    github_token = await github_app_auth.get_installation_token(installation_id)
+                    _dbg("SC-MIRROR-TOKEN", token_prefix=github_token[:10] if github_token else None)
+                except Exception as e:
+                    _dbg("SC-MIRROR-TOKEN-ERR", error=str(e)[:200])
+
+            if not github_token:
+                # Fallback to environment variable
+                github_token = os.environ.get("KLEPAAS_GITHUB_TOKEN") or getattr(settings, "github_token", None)
+                _dbg("SC-MIRROR-FALLBACK", has_token=github_token is not None)
+
+            if github_token and sc_project_id:
+                github_repo_url = f"https://github.com/{owner}/{repo}.git"
+
+                # Use new mirror function that updates manifest with actual image tag
+                # Note: Do NOT pass sc_username/sc_password (NCP API keys are not Git credentials)
+                mirror_result = mirror_and_update_manifest(
+                    github_repo_url=github_repo_url,
+                    installation_or_access_token=github_token,
+                    sc_project_id=sc_project_id,
+                    sc_repo_name=sc_repo_name,
+                    image_repo=image_repo,
+                    image_tag=effective_tag,
+                    sc_endpoint=getattr(settings, "ncp_sourcecommit_endpoint", None)
+                )
+                _dbg("SC-MIRROR-SUCCESS", result=mirror_result)
+                manifest_updated = mirror_result.get("manifest_updated", False)
+            else:
+                _dbg("SC-MIRROR-SKIP", reason="missing_github_token_or_project_id")
+        except Exception as e:
+            _dbg("SC-MIRROR-ERROR", error=str(e)[:500])
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to mirror and update manifest: {str(e)}"
+            )
+    else:
+        _dbg("SC-MIRROR-SKIP", reason="missing_params", owner=owner, repo=repo, sc_repo_name=sc_repo_name)
 
     # Step 1: SourceBuild (Container Image 생성 및 Registry 푸시)
     _dbg("SB-BUILD-START", owner=owner, repo=repo)
@@ -1842,26 +2399,38 @@ async def run_sourcedeploy(
     if (not build_result.get("image")) and owner and repo:
         registry = getattr(settings, "ncp_container_registry_url", None)
         if registry:
-            # Fallback uses unified owner_repo (hyphen→underscore, lowercased)
+            # Fallback uses lowercase only (no hyphen replacement)
             def _norm_part_fb(s: str | None) -> str:
-                raw = (s or "").replace("-", "_")
-                return "".join(ch if (ch.isalnum() or ch == "_") else "_" for ch in raw.lower()) or "app"
-            image_name_fb = f"{_norm_part_fb(owner)}_{_norm_part_fb(repo)}"
+                raw = (s or "").lower()
+                return "".join(ch if (ch.isalnum() or ch == "-") else "-" for ch in raw) or "app"
+            image_name_fb = f"{_norm_part_fb(owner)}-{_norm_part_fb(repo)}"
             build_result["image"] = f"{registry}/{image_name_fb}:latest"
             _dbg("SB-IMAGE-FALLBACK", image=build_result["image"]) 
     
-    # Step 2: SourceDeploy 실행 (기존 SourceCommit 시나리오 사용)
-    # SourceBuild는 별도 프로세스로 이미지만 빌드하고, SourceDeploy는 기존 시나리오 사용
+    # Step 1.5: Manifest already updated in Step 0 (mirror_and_update_manifest)
+    # No additional manifest update needed here - the image tag was set during mirroring
+
+    # Step 2: SourceDeploy 실행 (환경변수 없이, manifest에 이미 실제 태그 설정됨)
+    # Manifest already contains the actual image tag (e.g., registry/owner_repo:v1.2.3)
+    # No environment variable substitution needed
     deploy_path = f"/api/v1/project/{deploy_project_id}/stage/{stage_id}/scenario/{scenario_id}/deploy"
-    _dbg("SD-DEPLOY", path=deploy_path)
-    data = await _call_ncp_rest_api('POST', base, deploy_path, {})
+
+    # Deploy with empty body (manifest already has correct image tag)
+    deploy_body = {}
+
+    _dbg("SD-DEPLOY", path=deploy_path, manifest_updated=manifest_updated, image_tag=effective_tag)
+    data = await _call_ncp_rest_api('POST', base, deploy_path, deploy_body)
     result = data.get('result') if isinstance(data, dict) else None
-    
+
     return {
-        "status": "started", 
+        "status": "started",
         "deploy_project_id": deploy_project_id,
         "build_project_id": build_project_id,
         "build_result": build_result,
+        "code_mirrored": owner is not None and repo is not None and sc_repo_name is not None,
+        "manifest_updated": manifest_updated,  # True if manifest was updated during mirroring
+        "uses_env_var": False,  # No longer using environment variable approach
+        "image": desired_image,
         "response": (result or {}).get('historyId') or data
     }
 
@@ -1881,27 +2450,30 @@ def _compose_image_repo(
     - Ignore build_project_id for naming to keep stable repo path.
     Returns: (image_repo or None, strategy)
     """
+    if not owner or not repo:
+        # Fallback for missing owner/repo
+        return (None, "missing_params")
+
     reg = (registry or "").strip()
     registry_host = reg
-    def _norm_part(s: str | None) -> str:
-        raw = (s or "").replace("-", "_")
-        return "".join(ch if (ch.isalnum() or ch == "_") else "_" for ch in raw.lower()) or "app"
-    owner_part = _norm_part(owner)
-    repo_part = _norm_part(repo)
-    name = f"{owner_part}_{repo_part}" if owner_part else repo_part
-    image_repo = (f"{registry_host}/{name}" if registry_host else name)
+
+    # Use centralized naming function
+    image_name = _generate_ncr_image_name(owner, repo)
+
+    image_repo = (f"{registry_host}/{image_name}" if registry_host else image_name)
     return (image_repo if image_repo else None), "owner_repo_underscore"
 
 # Export _dbg function for use in other modules
 __all__ = [
     "ensure_sourcecommit_repo",
-    "create_sourcebuild_project_rest", 
+    "create_sourcebuild_project_rest",
     "create_sourcedeploy_project_rest",
     "create_split_build_deploy_pipeline",
     "run_sourcebuild",
     "run_sourcedeploy",
     "ensure_sourcedeploy_project",
     "mirror_to_sourcecommit",
+    "update_sourcecommit_manifest",
     "_dbg",
     "_compose_image_repo",
 ]

@@ -487,3 +487,83 @@ async def list_project_integrations(db: Session = Depends(get_db), current_user:
             "updated_at": getattr(r, "updated_at", None),
         }
     return [dict(r) for r in raw_maps]
+
+
+# Rollback endpoints
+class RollbackToCommitRequest(BaseModel):
+    owner: str
+    repo: str
+    commit_sha: str
+
+
+class RollbackToPreviousRequest(BaseModel):
+    owner: str
+    repo: str
+    steps_back: int = 1  # Default: rollback to previous deployment
+
+
+@router.post("/rollback/commit")
+async def rollback_to_commit_endpoint(
+    req: RollbackToCommitRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """
+    Rollback to a specific commit SHA.
+
+    For advanced users who know the exact commit to rollback to.
+    """
+    from ...services.rollback import rollback_to_commit
+
+    return await rollback_to_commit(
+        owner=req.owner,
+        repo=req.repo,
+        target_commit_sha=req.commit_sha,
+        db=db,
+        user_id=str(current_user["id"])
+    )
+
+
+@router.post("/rollback/previous")
+async def rollback_to_previous_endpoint(
+    req: RollbackToPreviousRequest,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """
+    Rollback to N-th previous deployment.
+
+    For general users. Default steps_back=1 means rollback to the previous deployment.
+    """
+    from ...services.rollback import rollback_to_previous
+
+    return await rollback_to_previous(
+        owner=req.owner,
+        repo=req.repo,
+        steps_back=req.steps_back,
+        db=db,
+        user_id=str(current_user["id"])
+    )
+
+
+@router.get("/deployments/{owner}/{repo}/history")
+async def get_deployment_history(
+    owner: str,
+    repo: str,
+    limit: int = Query(10, ge=1, le=50, description="Number of deployments to return"),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """
+    Get deployment history for a project.
+
+    Returns list of recent deployments that can be used for rollback.
+    """
+    from ...services.rollback import get_rollback_candidates
+
+    return await get_rollback_candidates(
+        owner=owner,
+        repo=repo,
+        db=db,
+        limit=limit
+    )
