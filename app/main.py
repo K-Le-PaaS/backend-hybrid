@@ -25,6 +25,8 @@ from .api.v1.slack_auth import router as slack_auth_router
 from .api.v1.oauth2 import router as oauth2_router
 from .api.v1.auth_verify import router as auth_verify_router
 from .api.v1.github_workflows import router as github_workflows_router
+from .api.v1.github_oauth import router as github_oauth_router
+from .api.v1.projects import router as projects_router
 from .mcp.external.api import router as mcp_external_router
 from .core.error_handler import setup_error_handlers
 from .core.logging_config import setup_logging
@@ -79,6 +81,8 @@ def create_app() -> FastAPI:
     app.include_router(websocket_router, prefix="/api/v1", tags=["websocket"])
     app.include_router(slack_auth_router, prefix="/api/v1", tags=["slack-auth"])
     app.include_router(oauth2_router, prefix="/api/v1", tags=["oauth2"])
+    app.include_router(github_oauth_router, prefix="/api/v1", tags=["auth", "github"])
+    app.include_router(projects_router, prefix="/api/v1", tags=["projects"])
     app.include_router(auth_verify_router, prefix="/api/v1", tags=["auth"])
     app.include_router(github_workflows_router, prefix="/api/v1", tags=["github"])
     app.include_router(mcp_external_router, tags=["mcp-external"])

@@ -4,6 +4,7 @@ Google, GitHub OAuth2 로그인을 위한 엔드포인트
 """
 
 from fastapi import APIRouter, HTTPException, Query, Depends
+import logging
 from fastapi.responses import RedirectResponse
 from typing import Optional, Dict, Any
 import httpx
@@ -22,6 +23,7 @@ class OAuth2LoginRequest(BaseModel):
     redirect_uri: str
 
 router = APIRouter(prefix="/auth/oauth2", tags=["oauth2"])
+logger = logging.getLogger("app.api.oauth2")
 
 # JWT 설정
 JWT_SECRET = "your-secret-key"  # 실제로는 환경변수에서 가져와야 함
@@ -178,8 +180,13 @@ async def get_oauth2_url(
     if provider not in ["google", "github"]:
         raise HTTPException(status_code=400, detail="지원하지 않는 제공자입니다")
     
+    # Allow flexible redirect_uri as configured in frontend (e.g., /oauth2-callback)
+    # Validation should be enforced in the OAuth provider console configuration.
+    
+    logger.info("OAuth2 get_oauth2_url", extra={"provider": provider, "redirect_uri": redirect_uri})
     oauth2_manager = OAuth2Manager()
     auth_url = oauth2_manager.get_authorization_url(provider, redirect_uri)
+    logger.info("OAuth2 authorization_url_generated", extra={"provider": provider, "redirect_uri": redirect_uri, "auth_url": auth_url})
     
     return {
         "auth_url": auth_url,
@@ -199,6 +206,7 @@ async def oauth2_login(request: OAuth2LoginRequest):
         raise HTTPException(status_code=400, detail="지원하지 않는 제공자입니다")
     
     try:
+        logger.info("OAuth2 login start", extra={"provider": provider, "redirect_uri": redirect_uri})
         oauth2_manager = OAuth2Manager()
         
         # 인증 코드를 액세스 토큰으로 교환
@@ -213,6 +221,7 @@ async def oauth2_login(request: OAuth2LoginRequest):
         # JWT 토큰 생성
         jwt_token = create_jwt_token(user_info)
         
+        logger.info("OAuth2 login success", extra={"provider": provider, "redirect_uri": redirect_uri})
         return {
             "success": True,
             "access_token": jwt_token,
@@ -221,6 +230,7 @@ async def oauth2_login(request: OAuth2LoginRequest):
         }
         
     except Exception as e:
+        logger.exception("OAuth2 login failed", extra={"provider": provider, "redirect_uri": redirect_uri})
         raise HTTPException(status_code=500, detail=f"OAuth2 로그인 실패: {str(e)}")
 
 
@@ -231,6 +241,7 @@ async def exchange_google_code(code: str, redirect_uri: str) -> dict:
     if not settings.google_client_id or not settings.google_client_secret:
         raise HTTPException(status_code=500, detail="Google OAuth2 설정이 없습니다")
     
+    logger.info("Google token exchange", extra={"redirect_uri": redirect_uri, "code_prefix": code[:8]})
     async with httpx.AsyncClient() as client:
         response = await client.post(
             "https://oauth2.googleapis.com/token",
@@ -257,7 +268,7 @@ async def exchange_github_code(code: str, redirect_uri: str) -> dict:
     if not settings.github_client_id or not settings.github_client_secret:
         raise HTTPException(status_code=500, detail="GitHub OAuth2 설정이 없습니다")
     
-    print(f"GitHub 토큰 교환 시도 - code: {code[:10]}..., redirect_uri: {redirect_uri}")
+    logger.info("GitHub token exchange", extra={"redirect_uri": redirect_uri, "code_prefix": code[:8]})
     
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -271,8 +282,7 @@ async def exchange_github_code(code: str, redirect_uri: str) -> dict:
             headers={"Accept": "application/json"}
         )
         
-        print(f"GitHub 토큰 교환 응답 상태: {response.status_code}")
-        print(f"GitHub 토큰 교환 응답 내용: {response.text}")
+        logger.info("GitHub token exchange response", extra={"status_code": response.status_code})
         
         if response.status_code != 200:
             error_detail = response.text

@@ -19,8 +19,11 @@ settings = get_settings()
 if settings.database_url:
     DATABASE_URL = settings.database_url
 else:
-    # 기본값: SQLite 인메모리 데이터베이스 (테스트용)
-    DATABASE_URL = "sqlite:///./test.db"
+    # 기본값: 프로젝트 루트의 test.db (절대경로로 고정)
+    from pathlib import Path
+    db_path = (Path(__file__).resolve().parent.parent / "test.db").as_posix()
+    DATABASE_URL = f"sqlite:///{db_path}"
+    print(f"[DB] Resolved DATABASE_URL={DATABASE_URL}")
 
 # SQLite용 엔진 설정
 if DATABASE_URL.startswith("sqlite"):
@@ -56,6 +59,7 @@ def init_database():
     from .models.base import Base
     from .models.audit_log import AuditLogModel
     from .models.deployment_history import DeploymentHistoryModel
+    from .models.user_project_integration import UserProjectIntegration
     
     # 모든 모델을 임포트하여 메타데이터에 등록
     Base.metadata.create_all(bind=engine)

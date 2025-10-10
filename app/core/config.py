@@ -6,7 +6,7 @@ from typing import Dict
 
 
 class Settings(BaseSettings):
-    model_config = ConfigDict(env_prefix="KLEPAAS_", extra="ignore")
+    model_config = ConfigDict(env_prefix="KLEPAAS_", extra="ignore", protected_namespaces=("settings_",))
     app_name: str = Field(default="K-Le-PaaS Backend Hybrid")
     app_version: str = Field(default="0.1.0")
 
@@ -53,10 +53,21 @@ class Settings(BaseSettings):
     gcp_project_id: str | None = None
     gcp_gcr_region: str = Field(default="asia-northeast3", description="GCP Container Registry 지역")
     
-    # NCP Git Agent 설정
+    # NCP 설정
     ncp_git_agent_url: str | None = Field(default="http://ncp-git-agent:8001", description="NCP Git Agent URL")
     ncp_container_registry_url: str | None = None
     ncp_region: str = Field(default="KR", description="NCP 지역")
+    ncp_access_key: str | None = None
+    ncp_secret_key: str | None = None
+    ncp_api_gw: str | None = Field(default="https://ncloud.apigw.ntruss.com")
+    ncp_sourcecommit_endpoint: str | None = Field(default=None, description="SourceCommit API endpoint")
+    
+    # NCP SourceDeploy 설정
+    ncp_sourcedeploy_endpoint: str | None = Field(default="https://sourcedeploy.apigw.ntruss.com", description="SourceDeploy API endpoint")
+    ncp_nks_cluster_id: str | None = None
+    ncp_sourcecommit_username: str | None = Field(default=None, description="SourceCommit username")
+    ncp_sourcecommit_password: str | None = Field(default=None, description="SourceCommit password")
+    ncp_sourcecommit_project_id: str | None = Field(default=None, description="SourceCommit project ID")
 
     # Slack
     slack_webhook_url: str | None = None
@@ -142,6 +153,7 @@ class Settings(BaseSettings):
     github_client_id: str | None = None
     github_client_secret: str | None = None
 
+    
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
