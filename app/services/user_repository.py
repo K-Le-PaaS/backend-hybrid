@@ -8,15 +8,33 @@ from sqlalchemy import and_
 from ..models.user_repository import UserRepository
 from ..models.base import Base
 from ..database import get_db
+from ..models.user_project_integration import UserProjectIntegration
 
 
 async def get_user_repositories(db: Session, user_id: str) -> List[Dict[str, Any]]:
-    """사용자의 연동된 리포지토리 목록 조회"""
-    repositories = db.query(UserRepository).filter(
-        UserRepository.user_id == user_id
+    """사용자의 연동된 리포지토리 목록 조회 (user_project_integration 테이블 사용)"""
+    
+    repositories = db.query(UserProjectIntegration).filter(
+        UserProjectIntegration.user_id == user_id
     ).all()
     
-    return [repo.to_dict() for repo in repositories]
+    # UserProjectIntegration을 UserRepository 형식으로 변환
+    result = []
+    for repo in repositories:
+        result.append({
+            "id": str(repo.id),
+            "name": repo.github_repo,
+            "fullName": repo.github_full_name,
+            "connected": True,
+            "lastSync": repo.updated_at.isoformat() if repo.updated_at else None,
+            "branch": repo.branch or "main",
+            "status": "healthy",  # 기본값
+            "autoDeployEnabled": repo.auto_deploy_enabled or False,
+            "webhookConfigured": bool(repo.github_webhook_secret),
+            "installation_id": repo.github_installation_id,
+        })
+    
+    return result
 
 
 async def add_user_repository(

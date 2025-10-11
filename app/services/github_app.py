@@ -109,6 +109,100 @@ class GitHubAppAuth:
                 return body.get("installations", [])
             return []
     
+    async def get_installation_token_for_repo(self, owner: str, repo: str, db_session=None) -> tuple[str, str]:
+        """특정 레포지토리에 대한 GitHub App 설치 토큰을 조회 (DB 우선 + API 폴백)"""
+        
+        # 1. DB에서 먼저 조회 (빠른 응답)
+        if db_session:
+            try:
+                from ...models.user_project_integration import UserProjectIntegration
+                integration = db_session.query(UserProjectIntegration).filter(
+                    UserProjectIntegration.github_owner == owner,
+                    UserProjectIntegration.github_repo == repo
+                ).first()
+                
+                if integration and integration.github_installation_id:
+                    try:
+                        # DB에 있는 installation_id로 토큰 획득 시도
+                        token = await self.get_installation_token(str(integration.github_installation_id))
+                        return token, str(integration.github_installation_id)
+                    except Exception:
+                        # 토큰 획득 실패 시 API로 폴백
+                        pass
+            except Exception:
+                # DB 조회 실패 시 API로 폴백
+                pass
+        
+        # 2. DB에 없거나 실패한 경우 GitHub API로 실시간 조회
+        jwt_token = self.generate_jwt()
+        
+        async with httpx.AsyncClient(timeout=10) as client:
+            # 설치 목록 조회
+            installations_response = await client.get(
+                "https://api.github.com/app/installations",
+                headers={
+                    "Authorization": f"Bearer {jwt_token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28"
+                }
+            )
+            
+            if installations_response.status_code != 200:
+                raise ValueError(f"설치 목록 조회 실패: {installations_response.status_code}")
+            
+            installations = installations_response.json()
+            if not isinstance(installations, list):
+                installations = installations.get("installations", [])
+            
+            # 각 설치에 대해 레포지토리 접근 권한 확인
+            for installation in installations:
+                installation_id = installation.get("id")
+                if not installation_id:
+                    continue
+                
+                try:
+                    # 설치 토큰으로 레포지토리 접근 시도
+                    installation_token = await self.get_installation_token(str(installation_id))
+                    
+                    # 특정 레포지토리에 접근 가능한지 확인
+                    repo_response = await client.get(
+                        f"https://api.github.com/repos/{owner}/{repo}",
+                        headers={
+                            "Authorization": f"Bearer {installation_token}",
+                            "Accept": "application/vnd.github+json",
+                            "X-GitHub-Api-Version": "2022-11-28"
+                        }
+                    )
+                    
+                    if repo_response.status_code == 200:
+                        # 레포지토리에 접근 가능함
+                        # DB에 설치 정보 저장 (다음번 빠른 조회를 위해)
+                        if db_session:
+                            try:
+                                from ...services.user_project_integration import upsert_integration
+                                upsert_integration(
+                                    db=db_session,
+                                    user_id="system",  # 시스템 레벨 저장
+                                    owner=owner,
+                                    repo=repo,
+                                    repository_id=None,
+                                    installation_id=str(installation_id),
+                                    sc_project_id=None,
+                                    sc_repo_name=None,
+                                )
+                            except Exception:
+                                # DB 저장 실패해도 토큰은 반환
+                                pass
+                        
+                        return installation_token, str(installation_id)
+                        
+                except Exception:
+                    # 이 설치에서 토큰 획득 실패, 다음 설치 시도
+                    continue
+            
+            # 레포지토리에 접근 가능한 설치를 찾지 못함
+            raise ValueError(f"GitHub App이 레포지토리 '{owner}/{repo}'에 설치되지 않았습니다.")
+    
     async def verify_webhook_signature(self, payload: bytes, signature: str) -> bool:
         """GitHub App 웹훅 서명 검증"""
         if not self.settings.github_app_webhook_secret:
