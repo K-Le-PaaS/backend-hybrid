@@ -501,6 +501,7 @@ async def create_sourcebuild_project_rest(owner: str, repo: str, branch: str, im
 
     # Dockerfile-based schema for apigw REST (guarantees container build & push)
     # Use cache (not artifact) for NCR push - matches NCP Console behavior
+    # Added cmd.dockerbuild to enable native Docker build commands
     body = {
         "name": f"build-{owner}-{repo}",
         "source": {
@@ -508,16 +509,27 @@ async def create_sourcebuild_project_rest(owner: str, repo: str, branch: str, im
             "config": source_config
         },
         "env": {
+            "docker": {"use": True, "id": 1},
             "compute": {"id": 1},
-            "platform": {"type": "SourceBuild", "config": {"os": {"id": 1}, "runtime": {"id": 5, "version": {"id": 27}}}}
+            "os": 1,
+            "platform": {"type": "SourceBuild", "config": {"os": {"id": 1}, "runtime": {"id": 1, "version": {"id": 1}}}}
+        },
+        # Enable Docker build commands (matches "docker build 명령어를 사용하는 경우" checkbox)
+        "cmd": {
+            "pre": [],
+            "build": [],
+            "post": [],
+            "dockerbuild": {
+                "use": True,
+                "dockerfile": "Dockerfile",
+                "registry": registry_project,
+                "image": ncr_image_name,
+                "tag": "latest",
+                "latest": False
+            }
         },
         "cache": {
-            "use": True,
-            "registry": registry_project,
-            "image": ncr_image_name,  # e.g., k_le_paas_test_01
-            "tag": "latest",
-            "latest": True,
-            "region": 1
+            "use": False
         },
         "builder": {"type": "Dockerfile", "config": {"path": "Dockerfile"}}
     }
@@ -1851,12 +1863,7 @@ async def run_sourcebuild(
         },
         # Ensure image push is retained via cache block
         "cache": {
-            "use": True,
-            "registry": final_registry_project,
-            "image": final_image_name,
-            "tag": image_tag,
-            "latest": (image_tag == "latest"),
-            "region": 1
+            "use": False
         }
     }
 
