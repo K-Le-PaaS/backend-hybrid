@@ -47,3 +47,8 @@ class UserRepository(Base):
             "webhookConfigured": self.webhook_configured,
         }
 
+
+
+
+
+

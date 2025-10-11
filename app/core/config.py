@@ -10,8 +10,11 @@ class Settings(BaseSettings):
     app_name: str = Field(default="K-Le-PaaS Backend Hybrid")
     app_version: str = Field(default="0.1.0")
 
-    # Gemini API
+    # Vertex AI / Gemini
+    gcp_project: str | None = None
+    gcp_location: str | None = "europe-west4"
     gemini_model: str | None = "gemini-2.0-flash"
+    # Authentication expects ADC or service account via env; optional here
 
     # GitHub Webhook
     github_webhook_secret: str | None = None
@@ -42,14 +45,29 @@ class Settings(BaseSettings):
     
     # MCP Git Agent 설정
     mcp_git_agent_enabled: bool = Field(default=True, description="MCP 네이티브 Git 에이전트 사용 여부")
-    mcp_default_cloud_provider: str = Field(default="ncp", description="기본 클라우드 프로바이더 (gcp/ncp)")
+    mcp_default_cloud_provider: str = Field(default="gcp", description="기본 클라우드 프로바이더 (gcp/ncp)")
     mcp_git_agent_timeout: int = Field(default=300, description="MCP Git 에이전트 타임아웃 (초)")
     
+    # GCP Git Agent 설정
+    gcp_git_agent_url: str | None = Field(default="http://gcp-git-agent:8001", description="GCP Git Agent URL")
+    gcp_project_id: str | None = None
+    gcp_gcr_region: str = Field(default="asia-northeast3", description="GCP Container Registry 지역")
     
-    # NCP Git Agent 설정
+    # NCP 설정
     ncp_git_agent_url: str | None = Field(default="http://ncp-git-agent:8001", description="NCP Git Agent URL")
     ncp_container_registry_url: str | None = None
     ncp_region: str = Field(default="KR", description="NCP 지역")
+    ncp_access_key: str | None = None
+    ncp_secret_key: str | None = None
+    ncp_api_gw: str | None = Field(default="https://ncloud.apigw.ntruss.com")
+    ncp_sourcecommit_endpoint: str | None = Field(default=None, description="SourceCommit API endpoint")
+    
+    # NCP SourceDeploy 설정
+    ncp_sourcedeploy_endpoint: str | None = Field(default="https://sourcedeploy.apigw.ntruss.com", description="SourceDeploy API endpoint")
+    ncp_nks_cluster_id: str | None = None
+    ncp_sourcecommit_username: str | None = Field(default=None, description="SourceCommit username")
+    ncp_sourcecommit_password: str | None = Field(default=None, description="SourceCommit password")
+    ncp_sourcecommit_project_id: str | None = Field(default=None, description="SourceCommit project ID")
 
     # Slack
     slack_webhook_url: str | None = None
@@ -91,7 +109,7 @@ class Settings(BaseSettings):
     learning_ttl: int = Field(default=2592000, description="학습 데이터 TTL (초)")
     
     # Model Performance Tracking
-    llm_performance_tracking: bool = Field(default=True, description="모델 성능 추적 활성화")
+    model_performance_tracking: bool = Field(default=True, description="모델 성능 추적 활성화")
     performance_tracking_ttl: int = Field(default=7776000, description="성능 추적 데이터 TTL (초)")
     
     # Learning Weights
@@ -112,7 +130,7 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     
     # Model Selection Strategy
-    llm_selection_strategy: str = Field(default="confidence_based", description="모델 선택 전략 (confidence_based, performance_based, hybrid)")
+    model_selection_strategy: str = Field(default="confidence_based", description="모델 선택 전략 (confidence_based, performance_based, hybrid)")
     confidence_threshold: float = Field(default=0.7, description="신뢰도 임계값")
     performance_weight: float = Field(default=0.3, description="성능 가중치")
     
@@ -135,6 +153,7 @@ class Settings(BaseSettings):
     github_client_id: str | None = None
     github_client_secret: str | None = None
 
+    
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

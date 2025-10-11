@@ -5,7 +5,7 @@ __all__ = [
     "commands",
     "k8s",
     "monitoring",
-    "tutorial",
+    "tutorial"
 ]
 
 
