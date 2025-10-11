@@ -15,7 +15,7 @@ class GeminiClient(LLMClient):
         self.settings = get_settings()
 
     async def interpret(self, prompt: str, user_id: str = "default", project_name: str = "default") -> Dict[str, Any]:
-        """자연어 명령을 해석하고 적절한 액션을 반환합니다."""
+        """자연어 명령을 해석하고 구조화된 데이터를 반환합니다."""
         try:
             # Gemini API를 직접 호출하여 명령 해석
             gemini_response = await self._call_gemini_api(prompt)
@@ -23,32 +23,39 @@ class GeminiClient(LLMClient):
             # Gemini 응답에서 command와 parameters 추출
             command_data = self._parse_gemini_response(gemini_response)
             
-            # 명령어에 따른 처리
-            if command_data["command"] == "deploy":
-                return await self._handle_deploy_command(command_data, prompt)
-            elif command_data["command"] == "rollback":
-                return await self._handle_rollback_command(command_data, prompt)
-            elif command_data["command"] == "scale":
-                return await self._handle_scale_command(command_data, prompt)
-            elif command_data["command"] == "status":
-                return await self._handle_status_command(command_data, prompt)
-            elif command_data["command"] == "logs":
-                return await self._handle_logs_command(command_data, prompt)
-            elif command_data["command"] == "endpoint":
-                return await self._handle_endpoint_command(command_data, prompt)
-            elif command_data["command"] == "restart":
-                return await self._handle_restart_command(command_data, prompt)
-            else:
-                return {
-                    "intent": "unknown",
-                    "entities": command_data,
-                    "message": f"지원하지 않는 명령입니다: {command_data.get('command', 'unknown')}",
-                    "llm": {
-                        "provider": "gemini",
-                        "model": self.settings.gemini_model,
-                        "mode": "direct_api",
-                    },
-                }
+            # 파라미터를 entities 형태로 변환
+            parameters = command_data.get("parameters", {})
+            entities = {
+                "app_name": parameters.get("appName"),
+                "replicas": parameters.get("replicas", 1),
+                "lines": parameters.get("lines", 30),
+                "version": parameters.get("version", "")
+            }
+            
+            # 명령어에 따른 기본 메시지 생성
+            command = command_data.get("command", "unknown")
+            messages = {
+                "deploy": "배포 명령을 해석했습니다.",
+                "rollback": "롤백 명령을 해석했습니다.",
+                "scale": "스케일링 명령을 해석했습니다.",
+                "status": "상태 확인 명령을 해석했습니다.",
+                "logs": "로그 조회 명령을 해석했습니다.",
+                "endpoint": "엔드포인트 조회 명령을 해석했습니다.",
+                "restart": "재시작 명령을 해석했습니다.",
+                "list_pods": "파드 목록 조회 명령을 해석했습니다.",
+                "unknown": "알 수 없는 명령입니다."
+            }
+            
+            return {
+                "intent": command,
+                "entities": entities,
+                "message": messages.get(command, "명령을 해석했습니다."),
+                "llm": {
+                    "provider": "gemini",
+                    "model": self.settings.gemini_model,
+                    "mode": "interpretation_only",
+                },
+            }
         except Exception as e:
             return {
                 "intent": "error",
@@ -67,9 +74,10 @@ class GeminiClient(LLMClient):
         import httpx
         
         # Gemini API 설정
-        api_key = os.getenv("KLEPAAS_GEMINI_API_KEY")
+        # Settings에서 API 키 가져오기 (.env 파일 지원)
+        api_key = self.settings.gemini_api_key or os.getenv("KLEPAAS_GEMINI_API_KEY")
         if not api_key:
-            raise ValueError("Gemini API 키가 설정되지 않았습니다")
+            raise ValueError("Gemini API 키가 설정되지 않았습니다. .env 파일 또는 환경변수에 KLEPAAS_GEMINI_API_KEY를 설정하세요.")
         
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
         
@@ -113,6 +121,11 @@ class GeminiClient(LLMClient):
 설명: 사용자의 최신 코드를 빌드하고 클러스터에 배포합니다.
 사용자 입력 예시: "배포해줘", "최신 코드로 업데이트해줘"
 필수 JSON 형식: { "command": "deploy", "parameters": { "appName": "<추출된_앱이름>" } }
+
+8. 파드 목록 조회 (command: "list_pods")
+설명: 현재 실행 중인 모든 파드의 목록을 조회하는 명령입니다.
+사용자 입력 예시: "모든 파드 조회해줘", "파드 목록 보여줘", "실행 중인 파드들 확인"
+필수 JSON 형식: { "command": "list_pods", "parameters": {} }
 
 일반 규칙:
 - 사용자의 의도가 불분명하거나 위 7가지 명령어 중 어느 것과도 일치하지 않으면: { "command": "unknown", "parameters": { "query": "<사용자_원본_입력>" } }
@@ -166,339 +179,8 @@ class GeminiClient(LLMClient):
         except json.JSONDecodeError:
             return {"command": "unknown", "parameters": {"query": response}}
 
-    async def _process_response_with_gemini(self, command: str, raw_response: Dict[str, Any], original_prompt: str) -> str:
-        """Gemini를 사용하여 백엔드 응답을 사용자 친화적 메시지로 가공"""
-        try:
-            # Gemini에게 응답 가공 요청
-            processing_prompt = f"""
-백엔드 서버에서 받은 응답을 사용자 친화적인 JSON 메시지로 변환해주세요.
+    # 백엔드 호출 및 응답 가공 메서드 제거됨
+    # 이제 gemini.py는 자연어 해석만 담당
 
-사용자 원본 질문: {original_prompt}
-명령어 타입: {command}
-백엔드 응답: {raw_response}
-
-다음 JSON 형식으로 응답해주세요:
-{{
-  "user_message": "이모지 + 사용자 친화적 메시지",
-  "status": "success/error/warning",
-  "summary": "핵심 정보 요약",
-  "details": "상세 정보 (선택사항)"
-}}
-
-규칙:
-1. user_message는 한국어로 자연스럽게
-2. 이모지 사용으로 가독성 향상
-3. 기술적 세부사항은 간단히 설명
-4. 오류가 있다면 친근하게 안내
-"""
-            
-            content = await self._call_gemini_api(processing_prompt)
-            
-            # JSON 파싱
-            try:
-                # JSON 코드 블록에서 JSON 추출
-                json_match = re.search(r'```json\s*(\{.*?\})\s*```', content, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(1)
-                else:
-                    # 코드 블록이 없으면 전체 텍스트에서 JSON 찾기
-                    json_match = re.search(r'(\{.*?\})', content, re.DOTALL)
-                    if json_match:
-                        json_str = json_match.group(1)
-                    else:
-                        return f"✅ {command} 명령이 처리되었습니다."
-                
-                # JSON 파싱
-                parsed_response = json.loads(json_str)
-                return parsed_response.get("user_message", f"✅ {command} 명령이 처리되었습니다.")
-                
-            except json.JSONDecodeError:
-                return f"✅ {command} 명령이 처리되었습니다."
-            
-        except Exception as e:
-            # Gemini 가공 실패 시 기본 메시지
-            return f"✅ {command} 명령이 처리되었습니다."
-
-    # 명령어별 처리 메서드들
-    async def _handle_deploy_command(self, command_data: Dict[str, Any], prompt: str) -> Dict[str, Any]:
-        """배포 명령 처리"""
-        entities = command_data.get("parameters", {})
-        
-        # 우리 백엔드 다른 파트로 POST 호출
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "http://localhost:8000/api/v1/commands/execute",
-                json={
-                    "command": "deploy",
-                    "app_name": entities.get('appName', '')
-                }
-            )
-            backend_result = response.json()
-        
-        # Gemini로 응답 가공
-        processed_message = await self._process_response_with_gemini(
-            command="deploy",
-            raw_response=backend_result,
-            original_prompt=prompt
-        )
-        
-        return {
-            "intent": "deploy",
-            "entities": entities,
-            "result": backend_result,
-            "message": processed_message,
-            "llm": {
-                "provider": "gemini",
-                "model": self.settings.gemini_model,
-                "mode": "response_processing",
-            },
-        }
-
-    async def _handle_rollback_command(self, command_data: Dict[str, Any], prompt: str) -> Dict[str, Any]:
-        """롤백 명령 처리"""
-        entities = command_data.get("parameters", {})
-        
-        # 우리 백엔드 다른 파트로 POST 호출
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "http://localhost:8000/api/v1/commands/execute",
-                    json={
-                        "command": "rollback",
-                        "app_name": entities.get('appName', ''),
-                        "version": entities.get('version', '')
-                    }
-                )
-                backend_result = response.json()
-        except Exception as e:
-            # 백엔드 호출 실패 시 에러 응답
-            backend_result = {
-                "error": "Backend service unavailable",
-                "message": f"백엔드 서비스 호출 실패: {str(e)}"
-            }
-        
-        # Gemini로 응답 가공
-        processed_message = await self._process_response_with_gemini(
-            command="rollback",
-            raw_response=backend_result,
-            original_prompt=prompt
-        )
-        
-        return {
-            "intent": "rollback",
-            "entities": entities,
-            "result": backend_result,
-            "message": processed_message,
-            "llm": {
-                "provider": "gemini",
-                "model": self.settings.gemini_model,
-                "mode": "response_processing",
-            },
-        }
-
-    async def _handle_scale_command(self, command_data: Dict[str, Any], prompt: str) -> Dict[str, Any]:
-        """스케일링 명령 처리"""
-        entities = command_data.get("parameters", {})
-        
-        # 우리 백엔드 다른 파트로 POST 호출
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "http://localhost:8000/api/v1/commands/execute",
-                    json={
-                        "command": "scale",
-                        "app_name": entities.get('appName', ''),
-                        "replicas": entities.get('replicas', 1)
-                    }
-                )
-                backend_result = response.json()
-        except Exception as e:
-            # 백엔드 호출 실패 시 에러 응답
-            backend_result = {
-                "error": "Backend service unavailable",
-                "message": f"백엔드 서비스 호출 실패: {str(e)}"
-            }
-        
-        # Gemini로 응답 가공
-        processed_message = await self._process_response_with_gemini(
-            command="scale",
-            raw_response=backend_result,
-            original_prompt=prompt
-        )
-        
-        return {
-            "intent": "scale",
-            "entities": entities,
-            "result": backend_result,
-            "message": processed_message,
-            "llm": {
-                "provider": "gemini",
-                "model": self.settings.gemini_model,
-                "mode": "response_processing",
-            },
-        }
-
-    async def _handle_status_command(self, command_data: Dict[str, Any], prompt: str) -> Dict[str, Any]:
-        """상태 확인 명령 처리"""
-        entities = command_data.get("parameters", {})
-        
-        # 우리 백엔드 다른 파트로 POST 호출
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "http://localhost:8000/api/v1/commands/execute",
-                    json={
-                        "command": "status",
-                        "app_name": entities.get('appName', '')
-                    }
-                )
-                backend_result = response.json()
-        except Exception as e:
-            # 백엔드 호출 실패 시 에러 응답
-            backend_result = {
-                "error": "Backend service unavailable",
-                "message": f"백엔드 서비스 호출 실패: {str(e)}"
-            }
-        
-        # Gemini로 응답 가공
-        processed_message = await self._process_response_with_gemini(
-            command="status",
-            raw_response=backend_result,
-            original_prompt=prompt
-        )
-        
-        return {
-            "intent": "status",
-            "entities": entities,
-            "result": backend_result,
-            "message": processed_message,
-            "llm": {
-                "provider": "gemini",
-                "model": self.settings.gemini_model,
-                "mode": "response_processing",
-            },
-        }
-
-    async def _handle_logs_command(self, command_data: Dict[str, Any], prompt: str) -> Dict[str, Any]:
-        """로그 조회 명령 처리"""
-        entities = command_data.get("parameters", {})
-        
-        # 우리 백엔드 다른 파트로 POST 호출
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "http://localhost:8000/api/v1/commands/execute",
-                    json={
-                        "command": "logs",
-                        "app_name": entities.get('appName', ''),
-                        "lines": entities.get('lines', 30)
-                    }
-                )
-                backend_result = response.json()
-        except Exception as e:
-            # 백엔드 호출 실패 시 에러 응답
-            backend_result = {
-                "error": "Backend service unavailable",
-                "message": f"백엔드 서비스 호출 실패: {str(e)}"
-            }
-        
-        # Gemini로 응답 가공
-        processed_message = await self._process_response_with_gemini(
-            command="logs",
-            raw_response=backend_result,
-            original_prompt=prompt
-        )
-        
-        return {
-            "intent": "logs",
-            "entities": entities,
-            "result": backend_result,
-            "message": processed_message,
-            "llm": {
-                "provider": "gemini",
-                "model": self.settings.gemini_model,
-                "mode": "response_processing",
-            },
-        }
-
-    async def _handle_endpoint_command(self, command_data: Dict[str, Any], prompt: str) -> Dict[str, Any]:
-        """엔드포인트 조회 명령 처리"""
-        entities = command_data.get("parameters", {})
-        
-        # 우리 백엔드 다른 파트로 POST 호출
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "http://localhost:8000/api/v1/commands/execute",
-                    json={
-                        "command": "endpoint",
-                        "app_name": entities.get('appName', '')
-                    }
-                )
-                backend_result = response.json()
-        except Exception as e:
-            # 백엔드 호출 실패 시 에러 응답
-            backend_result = {
-                "error": "Backend service unavailable",
-                "message": f"백엔드 서비스 호출 실패: {str(e)}"
-            }
-        
-        # Gemini로 응답 가공
-        processed_message = await self._process_response_with_gemini(
-            command="endpoint",
-            raw_response=backend_result,
-            original_prompt=prompt
-        )
-        
-        return {
-            "intent": "endpoint",
-            "entities": entities,
-            "result": backend_result,
-            "message": processed_message,
-            "llm": {
-                "provider": "gemini",
-                "model": self.settings.gemini_model,
-                "mode": "response_processing",
-            },
-        }
-
-    async def _handle_restart_command(self, command_data: Dict[str, Any], prompt: str) -> Dict[str, Any]:
-        """재시작 명령 처리"""
-        entities = command_data.get("parameters", {})
-        
-        # 우리 백엔드 다른 파트로 POST 호출
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "http://localhost:8000/api/v1/commands/execute",
-                    json={
-                        "command": "restart",
-                        "app_name": entities.get('appName', '')
-                    }
-                )
-                backend_result = response.json()
-        except Exception as e:
-            # 백엔드 호출 실패 시 에러 응답
-            backend_result = {
-                "error": "Backend service unavailable",
-                "message": f"백엔드 서비스 호출 실패: {str(e)}"
-            }
-        
-        # Gemini로 응답 가공
-        processed_message = await self._process_response_with_gemini(
-            command="restart",
-            raw_response=backend_result,
-            original_prompt=prompt
-        )
-        
-        return {
-            "intent": "restart",
-            "entities": entities,
-            "result": backend_result,
-            "message": processed_message,
-            "llm": {
-                "provider": "gemini",
-                "model": self.settings.gemini_model,
-                "mode": "response_processing",
-            },
-        }
+    # 모든 백엔드 호출 메서드 제거됨
+    # gemini.py는 이제 자연어 해석만 담당

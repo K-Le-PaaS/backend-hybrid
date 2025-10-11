@@ -5,6 +5,9 @@ import logging
 from datetime import datetime
 import uuid
 
+# commands.py 연동을 위한 import
+from ...services.commands import CommandRequest, plan_command, execute_command
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -55,7 +58,7 @@ async def process_command(command_data: NaturalLanguageCommand):
         if any(keyword in command.lower() for keyword in dangerous_keywords):
             raise HTTPException(status_code=400, detail="위험한 명령어가 포함되어 있습니다.")
         
-        # Gemini API를 통한 고급 명령 처리
+        # Gemini API를 통한 자연어 해석 (1회만!)
         try:
             from ...llm.gemini import GeminiClient
             gemini_client = GeminiClient()
@@ -79,31 +82,56 @@ async def process_command(command_data: NaturalLanguageCommand):
             )
             command_history.insert(0, history_entry)
             
-            # Gemini 결과를 간소화된 형식으로 변환
-            if gemini_result.get("intent") != "unknown":
+            # Gemini 결과를 CommandRequest로 변환
+            entities = gemini_result.get("entities", {})
+            intent = gemini_result.get("intent", "status")
+            
+            logger.info(f"Gemini intent: {intent}")
+            logger.info(f"Gemini entities: {entities}")
+            
+            req = CommandRequest(
+                command=intent,
+                app_name=entities.get("app_name") or "",
+                replicas=entities.get("replicas", 1),
+                lines=entities.get("lines", 30),
+                version=entities.get("version") or ""
+            )
+            
+            logger.info(f"CommandRequest 생성: {req}")
+            
+            # commands.py로 실제 K8s 작업 수행
+            try:
+                plan = plan_command(req)
+                logger.info(f"CommandPlan 생성: {plan}")
+                
+                k8s_result = await execute_command(plan)
+                logger.info(f"K8s 실행 결과: {k8s_result}")
+                
+                # Gemini 메시지 + K8s 결과를 조합
                 result = {
-                    "message": gemini_result.get("message", "명령이 성공적으로 처리되었습니다."),
+                    "message": gemini_result.get("message", "명령이 완료되었습니다."),
                     "action": gemini_result.get("intent", "unknown"),
-                    "entities": gemini_result.get("entities", {}),
-                    "result": gemini_result.get("result", {})
+                    "entities": entities,
+                    "k8s_result": k8s_result  # 실제 K8s 작업 결과
                 }
-            else:
-                # Gemini가 해석하지 못한 경우 에러 응답
+                
+            except Exception as k8s_error:
+                logger.error(f"commands.py 실행 실패: {k8s_error}")
                 result = {
-                    "message": "명령을 해석할 수 없습니다. 다시 시도해주세요.",
-                    "action": "unknown",
-                    "entities": {},
-                    "result": {"error": "Command not recognized"}
+                    "message": f"명령 해석은 성공했지만 실행 중 오류가 발생했습니다: {str(k8s_error)}",
+                    "action": gemini_result.get("intent", "unknown"),
+                    "entities": entities,
+                    "k8s_result": {"error": str(k8s_error)}
                 }
                 
         except Exception as e:
             logger.error(f"Gemini API 호출 실패: {e}")
             # Gemini 실패 시 에러 응답
             result = {
-                "message": f"명령 처리 중 오류가 발생했습니다: {str(e)}",
+                "message": f"명령 해석 중 오류가 발생했습니다: {str(e)}",
                 "action": "error",
                 "entities": {},
-                "result": {"error": str(e)}
+                "k8s_result": {"error": str(e)}
             }
         
         # 히스토리 업데이트
