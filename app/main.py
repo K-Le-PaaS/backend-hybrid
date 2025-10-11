@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI
+from fastapi.openapi.utils import get_openapi
 from starlette.middleware.cors import CORSMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from fastapi import Response
@@ -42,6 +43,7 @@ import structlog
 
 APP_NAME = "K-Le-PaaS Backend Hybrid"
 APP_VERSION = os.getenv("APP_VERSION", "0.1.0")
+ROOT_PATH = os.getenv("KLEPAAS_ROOT_PATH", "")  # e.g., "/api" when served behind reverse proxy
 
 logger = structlog.get_logger(__name__)
 
@@ -51,7 +53,44 @@ def create_app() -> FastAPI:
     # 로깅 설정
     setup_logging(level="INFO", enable_colors=True)
     
-    app = FastAPI(title=APP_NAME, version=APP_VERSION)
+    # Explicitly set OpenAPI version so Swagger UI can render without errors
+    # Note: FastAPI defaults to OpenAPI 3.1.0, but we set it explicitly to avoid
+    # any tooling that requires a concrete version field in the schema output.
+    # Also, allow serving under a sub-path (e.g., "/api") when behind an Nginx reverse proxy.
+    # When serving behind a reverse proxy at a sub-path (e.g., /api), do NOT set
+    # FastAPI root_path here (which is primarily for ASGI upstreams). Instead,
+    # expose docs/openapi under the prefixed paths so Swagger UI references stay
+    # on the same sub-path and Nginx can route consistently.
+    docs_url = f"{ROOT_PATH}/docs" if ROOT_PATH else "/docs"
+    openapi_url = f"{ROOT_PATH}/openapi.json" if ROOT_PATH else "/openapi.json"
+    app = FastAPI(
+        title=APP_NAME,
+        version=APP_VERSION,
+        openapi_version="3.1.0",
+        root_path=None,
+        docs_url=docs_url,
+        redoc_url=None,
+        openapi_url=openapi_url,
+    )
+
+    # Harden schema generation: always include a valid OpenAPI version header
+    def custom_openapi() -> Dict[str, Any]:
+        if app.openapi_schema:
+            # Ensure version field remains present and correct
+            app.openapi_schema["openapi"] = "3.1.0"
+            return app.openapi_schema
+        openapi_schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=f"API documentation for {app.title}",
+            routes=app.routes,
+        )
+        # Explicitly set the spec version key
+        openapi_schema["openapi"] = "3.1.0"
+        app.openapi_schema = openapi_schema
+        return app.openapi_schema
+
+    app.openapi = custom_openapi  # type: ignore[method-assign]
 
     # App state
     app.state.started_at = datetime.now(timezone.utc)

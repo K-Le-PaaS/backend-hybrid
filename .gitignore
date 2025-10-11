@@ -1,5 +1,25 @@
 # Python
 __pycache__/
+*.pyc
+.venv/
+
+# Nginx local assets (certs, logs)
+nginx/*.pem
+nginx/*.key
+nginx/ssl/
+nginx/logs/
+
+# Docker
+*.log
+*.pid
+
+# Misc
+.DS_Store
+*.swp
+*.swo
+
+# Python
+__pycache__/
 *.py[cod]
 *$py.class
 *.so

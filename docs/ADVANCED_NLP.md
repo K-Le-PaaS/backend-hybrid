@@ -82,7 +82,7 @@ conversation_ttl: int = 86400  # 대화 히스토리 TTL (초)
 
 # 다중 모델 설정
 multi_model_enabled: bool = True
-model_selection_strategy: str = "confidence_based"
+llm_selection_strategy: str = "confidence_based"
 confidence_threshold: float = 0.7
 
 # 학습 설정
