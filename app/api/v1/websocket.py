@@ -119,12 +119,25 @@ async def websocket_deployment_monitor(
     connection_id = str(uuid.uuid4())
     
     try:
+        logger.info(f"WebSocket connection attempt: {connection_id}")
+        
         # 매니저 초기화 확인
         if not manager.is_initialized:
+            logger.info("Initializing DeploymentMonitorManager")
             await manager.initialize()
         
         # WebSocket 연결 수락
-        await manager.connect(websocket, connection_id)
+        logger.info(f"Accepting WebSocket connection: {connection_id}")
+        
+        # URL에서 deployment_id 추출 (선택적)
+        deployment_id = None
+        if "/deployment/" in str(websocket.url):
+            try:
+                deployment_id = str(websocket.url).split("/deployment/")[1].split("?")[0]
+            except:
+                pass
+        
+        await manager.connect(websocket, connection_id, deployment_id=deployment_id)
         
         logger.info("websocket_connection_established", connection_id=connection_id)
         
@@ -132,10 +145,13 @@ async def websocket_deployment_monitor(
         while True:
             try:
                 # 메시지 수신
+                logger.info(f"Waiting for message from connection: {connection_id}")
                 data = await websocket.receive_json()
+                logger.info(f"Received message from {connection_id}: {data}")
                 
                 # 메시지 처리
                 await manager.handle_message(connection_id, data)
+                logger.info(f"Message processed successfully for {connection_id}")
                 
             except WebSocketDisconnect:
                 logger.info("websocket_disconnected", connection_id=connection_id)
@@ -144,27 +160,35 @@ async def websocket_deployment_monitor(
                 logger.error(
                     "websocket_message_error",
                     error=str(e),
-                    connection_id=connection_id
+                    connection_id=connection_id,
+                    error_type=type(e).__name__
                 )
                 
-                # 에러 메시지 전송
-                error_response = {
-                    "type": "error",
-                    "data": {
-                        "error": f"Message processing failed: {str(e)}"
-                    }
-                }
+                # 오류 발생 시 연결을 즉시 종료하지 않고 계속 유지
                 try:
+                    error_response = {
+                        "type": "error",
+                        "data": {
+                            "error": f"Message processing failed: {str(e)}"
+                        }
+                    }
                     await websocket.send_json(error_response)
-                except:
+                except Exception as send_error:
+                    logger.error(f"Failed to send error response: {send_error}")
                     break
     
     except Exception as e:
         logger.error(
             "websocket_connection_failed",
             error=str(e),
-            connection_id=connection_id
+            connection_id=connection_id,
+            error_type=type(e).__name__
         )
+        # 연결 해제
+        try:
+            await manager.disconnect(connection_id)
+        except:
+            pass
     
     finally:
         # 연결 정리
