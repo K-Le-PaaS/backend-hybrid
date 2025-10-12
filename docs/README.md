@@ -36,6 +36,7 @@ docs/
 2. **NLP 시스템 이해**: 
    - [NLP 실행 아키텍처](architecture/NLP_EXECUTION_ARCHITECTURE.md) ⭐ 상세 아키텍처
    - [NLP 퀵 스타트 가이드](architecture/NLP_QUICK_START_GUIDE.md) ⭐ 팀원 가이드
+   - [NLP 명령어 구현 가이드](architecture/NLP_COMMAND_IMPLEMENTATION_GUIDE.md) ⭐ 개발자 가이드
 
 3. **Slack 연동**: [integrations/SLACK_SETUP.md](./integrations/SLACK_SETUP.md)
    - Slack 앱 생성 및 OAuth 설정
