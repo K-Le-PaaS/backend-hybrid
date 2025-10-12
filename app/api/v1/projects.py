@@ -536,3 +536,4 @@ async def connect_github_repository(
         },
         "integration_id": integration.id
     }
+

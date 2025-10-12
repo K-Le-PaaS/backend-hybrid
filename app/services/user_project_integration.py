@@ -57,11 +57,30 @@ def upsert_integration(
 ) -> UserProjectIntegration:
     _ensure_schema(db)
     full_name = f"{owner}/{repo}"
-    obj = (
-        db.query(UserProjectIntegration)
-        .filter(UserProjectIntegration.user_id == user_id, UserProjectIntegration.github_full_name == full_name)
-        .first()
-    )
+    
+    # 🔧 수정: 시스템 레벨 저장과 사용자별 저장을 구분
+    if user_id == "system":
+        # 시스템 레벨: 조직+레포지토리로만 조회 (installation_id 정보 저장용)
+        obj = (
+            db.query(UserProjectIntegration)
+            .filter(
+                UserProjectIntegration.github_owner == owner,
+                UserProjectIntegration.github_repo == repo,
+                UserProjectIntegration.user_id == "system"
+            )
+            .first()
+        )
+    else:
+        # 사용자별: 사용자+조직+레포지토리로 조회
+        obj = (
+            db.query(UserProjectIntegration)
+            .filter(
+                UserProjectIntegration.user_id == user_id,
+                UserProjectIntegration.github_full_name == full_name
+            )
+            .first()
+        )
+    
     if not obj:
         obj = UserProjectIntegration(
             user_id=user_id,

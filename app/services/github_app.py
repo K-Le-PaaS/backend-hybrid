@@ -154,51 +154,70 @@ class GitHubAppAuth:
             if not isinstance(installations, list):
                 installations = installations.get("installations", [])
             
-            # 각 설치에 대해 레포지토리 접근 권한 확인
+            # 🔧 수정: 조직별로 정확한 installation 찾기
+            target_installation = None
+            
+            # 1단계: 정확한 조직(owner)에 설치된 installation 찾기
             for installation in installations:
-                installation_id = installation.get("id")
-                if not installation_id:
-                    continue
+                account = installation.get("account", {})
+                account_login = account.get("login", "").lower()
                 
-                try:
-                    # 설치 토큰으로 레포지토리 접근 시도
-                    installation_token = await self.get_installation_token(str(installation_id))
+                if account_login == owner.lower():
+                    target_installation = installation
+                    break
+            
+            # 2단계: 정확한 조직 설치가 없으면 첫 번째 설치에서 레포지토리 접근 가능한지 확인
+            if not target_installation and installations:
+                target_installation = installations[0]
+            
+            if not target_installation:
+                raise ValueError(f"GitHub App이 조직 '{owner}'에 설치되지 않았습니다.")
+            
+            installation_id = target_installation.get("id")
+            if not installation_id:
+                raise ValueError(f"유효하지 않은 installation ID입니다.")
+            
+            try:
+                # 설치 토큰으로 레포지토리 접근 시도
+                installation_token = await self.get_installation_token(str(installation_id))
+                
+                # 특정 레포지토리에 접근 가능한지 확인
+                repo_response = await client.get(
+                    f"https://api.github.com/repos/{owner}/{repo}",
+                    headers={
+                        "Authorization": f"Bearer {installation_token}",
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28"
+                    }
+                )
+                
+                if repo_response.status_code == 200:
+                    # 레포지토리에 접근 가능함
+                    # DB에 설치 정보 저장 (조직별로 정확히 매칭)
+                    if db_session:
+                        try:
+                            from ...services.user_project_integration import upsert_integration
+                            upsert_integration(
+                                db=db_session,
+                                user_id="system",  # 시스템 레벨 저장
+                                owner=owner,  # 정확한 조직명 저장
+                                repo=repo,
+                                repository_id=None,
+                                installation_id=str(installation_id),
+                                sc_project_id=None,
+                                sc_repo_name=None,
+                            )
+                        except Exception:
+                            # DB 저장 실패해도 토큰은 반환
+                            pass
                     
-                    # 특정 레포지토리에 접근 가능한지 확인
-                    repo_response = await client.get(
-                        f"https://api.github.com/repos/{owner}/{repo}",
-                        headers={
-                            "Authorization": f"Bearer {installation_token}",
-                            "Accept": "application/vnd.github+json",
-                            "X-GitHub-Api-Version": "2022-11-28"
-                        }
-                    )
-                    
-                    if repo_response.status_code == 200:
-                        # 레포지토리에 접근 가능함
-                        # DB에 설치 정보 저장 (다음번 빠른 조회를 위해)
-                        if db_session:
-                            try:
-                                from ...services.user_project_integration import upsert_integration
-                                upsert_integration(
-                                    db=db_session,
-                                    user_id="system",  # 시스템 레벨 저장
-                                    owner=owner,
-                                    repo=repo,
-                                    repository_id=None,
-                                    installation_id=str(installation_id),
-                                    sc_project_id=None,
-                                    sc_repo_name=None,
-                                )
-                            except Exception:
-                                # DB 저장 실패해도 토큰은 반환
-                                pass
+                    return installation_token, str(installation_id)
+                else:
+                    raise ValueError(f"레포지토리 '{owner}/{repo}'에 접근할 수 없습니다. (HTTP {repo_response.status_code})")
                         
-                        return installation_token, str(installation_id)
-                        
-                except Exception:
-                    # 이 설치에서 토큰 획득 실패, 다음 설치 시도
-                    continue
+            except Exception as e:
+                # 토큰 획득 또는 레포지토리 접근 실패
+                raise ValueError(f"GitHub App이 레포지토리 '{owner}/{repo}'에 접근할 수 없습니다: {str(e)}")
             
             # 레포지토리에 접근 가능한 설치를 찾지 못함
             raise ValueError(f"GitHub App이 레포지토리 '{owner}/{repo}'에 설치되지 않았습니다.")

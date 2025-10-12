@@ -1,12 +1,15 @@
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from ...services.github_workflow import create_or_update_workflow, DEFAULT_CI_YAML
 from ...services.github_app import github_app_auth
 from ...services.user_repository import get_user_repositories, add_user_repository, remove_user_repository
 from ...database import get_db
+from ...models.user_project_integration import UserProjectIntegration
+from ..v1.auth_verify import get_current_user
 import logging
 
 logger = logging.getLogger(__name__)
@@ -549,3 +552,92 @@ async def get_connected_repositories(user_id: str = "default", db = Depends(get_
     except Exception as e:
         print(f"ERROR: Failed to get repositories for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get connected repositories: {str(e)}")
+
+
+@router.put("/github/webhook/{integration_id}")
+async def update_webhook_config(
+    integration_id: int,
+    enabled: bool = Query(..., description="Auto deploy enabled status"),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """GitHub 웹훅 설정 업데이트 (auto_deploy 토글)"""
+    try:
+        # 통합 정보 조회
+        integration = db.query(UserProjectIntegration).filter(
+            UserProjectIntegration.id == integration_id,
+            UserProjectIntegration.user_id == str(current_user["id"])
+        ).first()
+        
+        if not integration:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Integration ID {integration_id}를 찾을 수 없습니다."
+            )
+        
+        # auto_deploy_enabled 업데이트
+        integration.auto_deploy_enabled = enabled
+        db.commit()
+        db.refresh(integration)
+        
+        return {
+            "status": "success",
+            "message": f"Auto Deploy가 {'활성화' if enabled else '비활성화'}되었습니다.",
+            "integration_id": integration_id,
+            "auto_deploy_enabled": enabled,
+            "repository": {
+                "owner": integration.github_owner,
+                "repo": integration.github_repo,
+                "full_name": integration.github_full_name
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500, 
+            detail=f"웹훅 설정 업데이트 실패: {str(e)}"
+        )
+
+
+@router.get("/github/webhook/{integration_id}/status")
+async def get_webhook_status(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """GitHub 웹훅 상태 조회"""
+    try:
+        # 통합 정보 조회
+        integration = db.query(UserProjectIntegration).filter(
+            UserProjectIntegration.id == integration_id,
+            UserProjectIntegration.user_id == str(current_user["id"])
+        ).first()
+        
+        if not integration:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Integration ID {integration_id}를 찾을 수 없습니다."
+            )
+        
+        return {
+            "status": "success",
+            "integration_id": integration_id,
+            "auto_deploy_enabled": integration.auto_deploy_enabled,
+            "webhook_configured": bool(integration.github_webhook_secret),
+            "repository": {
+                "owner": integration.github_owner,
+                "repo": integration.github_repo,
+                "full_name": integration.github_full_name
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"웹훅 상태 조회 실패: {str(e)}"
+        )
