@@ -267,3 +267,37 @@ class SlackOAuthService:
                 success=False,
                 error=f"Notification failed: {str(e)}"
             )
+
+    async def open_im_channel(self, access_token: str, user_id: str) -> Optional[str]:
+        """Open (or find) a DM channel with the specified user and return channel id.
+
+        Requires im:write scope. Returns None on failure.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    "https://slack.com/api/conversations.open",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    json={"users": user_id},
+                )
+                data = resp.json()
+                if data.get("ok"):
+                    return data.get("channel", {}).get("id")
+                logger.error("slack_open_im_failed", error=data.get("error"))
+                return None
+        except Exception as e:
+            logger.error("slack_open_im_error", error=str(e))
+            return None
+
+    async def send_dm(
+        self,
+        access_token: str,
+        user_id: str,
+        title: str,
+        message: str,
+    ) -> SlackMessageResponse:
+        """Open a DM to user and send message. Requires im:write + chat:write."""
+        channel_id = await self.open_im_channel(access_token, user_id)
+        if not channel_id:
+            return SlackMessageResponse(success=False, error="dm_channel_open_failed")
+        return await self.send_notification(access_token, channel_id, title, message)

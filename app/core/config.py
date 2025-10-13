@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings
 from pydantic import Field
 from pydantic import ConfigDict
 from typing import Dict
+import secrets
 
 
 class Settings(BaseSettings):
@@ -29,6 +30,8 @@ class Settings(BaseSettings):
     rabbitmq_bridge_url: str | None = Field(default="http://localhost:8001/health")
     prometheus_health_url: str | None = None
     database_url: str | None = None
+    # Frontend base URL for redirects (e.g., https://app.example.com)
+    frontend_base_url: str | None = None
     
     # Alertmanager
     alertmanager_url: str | None = None
@@ -154,7 +157,9 @@ class Settings(BaseSettings):
     github_client_secret: str | None = None
     
     # JWT Configuration
-    secret_key: str = Field(default="your-secret-key-here", description="JWT secret key")
+    # 프로덕션에서는 환경변수 KLEPAAS_SECRET_KEY를 반드시 설정하세요.
+    # 기본값은 개발 편의를 위한 임의 키입니다.
+    secret_key: str = Field(default_factory=lambda: secrets.token_hex(32), description="JWT secret key")
 
     
 

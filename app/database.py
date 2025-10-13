@@ -10,6 +10,7 @@ from typing import Generator
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
+from sqlalchemy import text
 
 from .core.config import get_settings
 
@@ -59,6 +60,7 @@ def init_database():
     from .models.base import Base
     from .models.audit_log import AuditLogModel
     from .models.deployment_history import DeploymentHistory
+    from .models.user_slack_config import UserSlackConfig
     
     logger = structlog.get_logger(__name__)
     
@@ -75,6 +77,12 @@ def init_database():
         # 모든 모델을 임포트하여 메타데이터에 등록
         logger.info(f"Initializing database: {DATABASE_URL}")
         Base.metadata.create_all(bind=engine)
+
+        # Lightweight migration: ensure new columns exist on existing tables
+        try:
+            _ensure_user_slack_config_columns()
+        except Exception as e:
+            logger.warning(f"UserSlackConfig column ensure failed: {e}")
         logger.info("Database tables created successfully")
         
     except Exception as e:
@@ -94,3 +102,45 @@ def init_services(db_session: Session):
     init_deployment_history_service(db_session)
     init_kubernetes_watcher()
     init_deployment_monitor_manager()
+
+
+def _ensure_user_slack_config_columns() -> None:
+    """Ensure recently added columns exist for UserSlackConfig.
+
+    This is a minimal, safe migration for SQLite/Postgres: add dm_enabled (BOOLEAN) and dm_user_id (TEXT)
+    columns if they are missing. It does nothing if the table doesn't exist yet or columns already exist.
+    """
+    try:
+        with engine.connect() as conn:
+            # Detect columns (SQLite: PRAGMA; Postgres: information_schema)
+            dialect = engine.dialect.name
+            existing_cols: set[str] = set()
+            if dialect == "sqlite":
+                res = conn.execute(text("PRAGMA table_info('user_slack_configs')"))
+                existing_cols = {row[1] for row in res.fetchall()}
+            else:
+                res = conn.execute(
+                    text(
+                        """
+                        SELECT column_name FROM information_schema.columns
+                        WHERE table_name = 'user_slack_configs'
+                        """
+                    )
+                )
+                existing_cols = {row[0] for row in res.fetchall()}
+
+            # Add missing columns
+            if "dm_enabled" not in existing_cols:
+                if dialect == "sqlite":
+                    conn.execute(text("ALTER TABLE user_slack_configs ADD COLUMN dm_enabled BOOLEAN DEFAULT 1"))
+                else:
+                    conn.execute(text("ALTER TABLE user_slack_configs ADD COLUMN dm_enabled BOOLEAN DEFAULT TRUE"))
+            if "dm_user_id" not in existing_cols:
+                if dialect == "sqlite":
+                    conn.execute(text("ALTER TABLE user_slack_configs ADD COLUMN dm_user_id TEXT"))
+                else:
+                    conn.execute(text("ALTER TABLE user_slack_configs ADD COLUMN dm_user_id VARCHAR(255)"))
+            conn.commit()
+    except Exception:
+        # Best-effort; do not crash app on migration failure
+        raise

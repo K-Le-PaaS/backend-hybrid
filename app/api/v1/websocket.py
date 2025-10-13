@@ -134,7 +134,7 @@ async def websocket_deployment_monitor(
         if "/deployment/" in str(websocket.url):
             try:
                 deployment_id = str(websocket.url).split("/deployment/")[1].split("?")[0]
-            except:
+            except IndexError:
                 pass
         
         await manager.connect(websocket, connection_id, deployment_id=deployment_id)
@@ -187,7 +187,7 @@ async def websocket_deployment_monitor(
         # 연결 해제
         try:
             await manager.disconnect(connection_id)
-        except:
+        except Exception:
             pass
     
     finally:

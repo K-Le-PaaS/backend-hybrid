@@ -6,7 +6,8 @@ CI/CD 파이프라인의 배포 히스토리를 조회하는 API 엔드포인트
 """
 
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, and_
 
@@ -66,9 +67,7 @@ async def get_deployment_histories(
         deployments = query.order_by(desc(DeploymentHistory.started_at)).offset(offset).limit(limit).all()
         
         # 응답 데이터 구성
-        deployment_list = []
-        for deployment in deployments:
-            deployment_list.append(deployment.to_dict())
+        deployment_list = [deployment.to_dict() for deployment in deployments]
         
         data = {
             "deployments": deployment_list,
@@ -83,13 +82,15 @@ async def get_deployment_histories(
                 "status": status
             }
         }
-        # Explicitly disable caching
-        from fastapi import Response
-        resp = Response(content=None)
-        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-        resp.headers["Pragma"] = "no-cache"
-        resp.headers["Expires"] = "0"
-        return data
+        # Return with no-cache headers
+        return JSONResponse(
+            content=data,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            }
+        )
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch deployment histories: {str(e)}")
@@ -166,9 +167,7 @@ async def get_repository_deployment_histories(
         deployments = query.order_by(desc(DeploymentHistory.started_at)).offset(offset).limit(limit).all()
         
         # 응답 데이터 구성
-        deployment_list = []
-        for deployment in deployments:
-            deployment_list.append(deployment.to_dict())
+        deployment_list = [deployment.to_dict() for deployment in deployments]
         
         return {
             "repository": f"{owner}/{repo}",
@@ -233,25 +232,27 @@ async def get_deployment_stats(
                 )
             )
         
-        # 통계 계산
-        total_deployments = query.count()
-        successful_deployments = query.filter(DeploymentHistory.status == "success").count()
-        failed_deployments = query.filter(DeploymentHistory.status == "failed").count()
-        running_deployments = query.filter(DeploymentHistory.status == "running").count()
+        # 통계 계산(한 번의 쿼리로 집계)
+        from sqlalchemy import func, case
+        stats = query.with_entities(
+            func.count().label("total"),
+            func.sum(case((DeploymentHistory.status == "success", 1), else_=0)).label("successful"),
+            func.sum(case((DeploymentHistory.status == "failed", 1), else_=0)).label("failed"),
+            func.sum(case((DeploymentHistory.status == "running", 1), else_=0)).label("running")
+        ).one()
+        total_deployments = stats.total or 0
+        successful_deployments = stats.successful or 0
+        failed_deployments = stats.failed or 0
+        running_deployments = stats.running or 0
         
         # 성공률 계산
         success_rate = (successful_deployments / total_deployments * 100) if total_deployments > 0 else 0
         
-        # 평균 소요 시간 계산
-        completed_deployments = query.filter(
+        # 평균 소요 시간 계산(DB 집계)
+        avg_duration = query.filter(
             DeploymentHistory.status.in_(["success", "failed"]),
             DeploymentHistory.total_duration.isnot(None)
-        ).all()
-        
-        avg_duration = 0
-        if completed_deployments:
-            total_duration = sum(d.total_duration for d in completed_deployments)
-            avg_duration = total_duration / len(completed_deployments)
+        ).with_entities(func.avg(DeploymentHistory.total_duration)).scalar() or 0
         
         # 최근 배포들
         recent_deployments = query.order_by(desc(DeploymentHistory.started_at)).limit(5).all()

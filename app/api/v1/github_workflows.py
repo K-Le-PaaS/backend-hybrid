@@ -2,12 +2,15 @@ from typing import Any, Dict, Optional
 import json
 import asyncio
 
-from fastapi import APIRouter, HTTPException, Depends, Query, Request
+from fastapi import APIRouter, HTTPException, Depends, Query, Request, BackgroundTasks, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ...services.github_workflow import create_or_update_workflow, DEFAULT_CI_YAML
 from ...services.github_app import github_app_auth
+from ...models.deployment_history import DeploymentHistory
+from datetime import datetime
 from ...services.user_repository import get_user_repositories, add_user_repository, remove_user_repository
 from ...database import get_db
 from ...models.user_project_integration import UserProjectIntegration
@@ -17,6 +20,64 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+async def _send_user_slack_message(
+    db: Session,
+    user_id: str,
+    text: str,
+    channel: Optional[str] = None,
+) -> None:
+    """저장된 사용자 Slack 설정으로 간단 메시지를 보냅니다.
+
+    OAuth 설정이 있으면 chat.postMessage, 아니면 Webhook이 있으면 Webhook으로 전송.
+    실패는 배포 흐름에 영향을 주지 않고 로그만 남깁니다.
+    """
+    try:
+        from ...services.user_slack_config_service import get_user_slack_config
+        from ...services.slack_oauth import SlackOAuthService
+        import httpx  # type: ignore
+
+        cfg = get_user_slack_config(db, user_id)
+        if not cfg:
+            logger.info("Slack: no user config; skip")
+            return
+
+        target_channel = channel or cfg.deployment_channel or cfg.default_channel or "#general"
+
+        if cfg.integration_type == "webhook" and cfg.webhook_url and not cfg.dm_enabled:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.post(cfg.webhook_url, json={"text": text, "channel": target_channel})
+                logger.info(f"Slack webhook sent status={resp.status_code} channel={target_channel}")
+            except Exception as send_err:
+                logger.warning(f"Slack webhook send failed: {send_err}")
+            return
+
+        if cfg.integration_type == "oauth" and cfg.access_token:
+            svc = SlackOAuthService()
+            # DM 우선 (dm_enabled=True)
+            if cfg.dm_enabled:
+                # dm_user_id가 없으면 auth.test에서 받은 유저 ID를 저장해 둔 값 사용을 기대
+                uid = cfg.dm_user_id
+                if uid:
+                    result = await svc.send_dm(
+                        access_token=cfg.access_token,
+                        user_id=uid,
+                        title="K-Le-PaaS",
+                        message=text,
+                    )
+                    logger.info(f"Slack DM send result: success={getattr(result, 'success', True)} error={getattr(result, 'error', None)}")
+                    return
+            result = await svc.send_notification(
+                access_token=cfg.access_token,
+                channel=target_channel,
+                title="K-Le-PaaS",
+                message=text,
+            )
+            logger.info(f"Slack channel send result: success={getattr(result, 'success', True)} error={getattr(result, 'error', None)} channel={target_channel}")
+    except Exception as _:
+        # 알림 실패는 무시
+        logger.warning("Slack send encountered an exception; suppressed to not break flow", exc_info=True)
+
 
 
 async def simulate_progress(
@@ -361,11 +422,11 @@ async def get_pull_requests(
     try:
         # 🔧 수정: 실제 인증된 사용자 ID 사용
         actual_user_id = str(current_user.get("id", user_id))
-        print(f"DEBUG: Using user_id: {actual_user_id} (from current_user: {current_user.get('id')})")
+        logger.debug(f"Using user_id for PR fetch: {actual_user_id}")
         
         # 사용자별 연동된 리포지토리 조회
         user_repositories = await get_user_repositories(db, actual_user_id)
-        print(f"DEBUG: user_repositories = {user_repositories}")
+        logger.debug(f"user_repositories count = {len(user_repositories)}")
         
         if not user_repositories or len(user_repositories) == 0:
             return {
@@ -429,7 +490,7 @@ async def get_pull_requests(
                             "htmlUrl": pr["html_url"],
                             "deploymentUrl": None  # TODO: 실제 배포 URL 조회
                         }
-                        print(f"DEBUG: PR {pr['number']} htmlUrl: {pr_data['htmlUrl']}")
+                        # debug removed; keep data minimal in logs
                         pull_requests.append(pr_data)
                 
                 # 리포지토리별로 PR 데이터 그룹화
@@ -475,7 +536,7 @@ async def get_pipelines(
         
         # 실제 인증된 사용자 ID 사용
         actual_user_id = str(current_user.get("id", "default"))
-        print(f"DEBUG: Using user_id for pipelines: {actual_user_id}")
+        logger.debug(f"Using user_id for pipelines: {actual_user_id}")
         
         # 배포 히스토리 조회
         query = db.query(DeploymentHistory).filter(DeploymentHistory.user_id == actual_user_id)
@@ -498,7 +559,7 @@ async def get_pipelines(
         # 배포 히스토리를 프론트엔드 형식으로 변환
         deployments_data = []
         for deployment in deployments:
-            print(f"DEBUG: Processing deployment ID {deployment.id}, status: {deployment.status}")
+            logger.debug(f"Processing deployment ID {deployment.id}, status: {deployment.status}")
             deployments_data.append({
                 "id": deployment.id,
                 "user_id": deployment.user_id,
@@ -557,7 +618,7 @@ async def get_pipelines(
         }
         
     except Exception as e:
-        print(f"ERROR in get_pipelines: {e}")
+        logger.error(f"get_pipelines failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get deployment histories: {str(e)}")
 
 
@@ -630,10 +691,10 @@ async def connect_repository(
 async def get_connected_repositories(user_id: str = "default", db = Depends(get_db)) -> Dict[str, Any]:
     """연동된 리포지토리 목록을 조회합니다."""
     try:
-        print(f"DEBUG: Getting repositories for user_id: {user_id}")
+        logger.debug(f"Getting repositories for user_id: {user_id}")
         # 사용자별 연동된 리포지토리 조회
         repositories = await get_user_repositories(db, user_id)
-        print(f"DEBUG: Found {len(repositories)} repositories for user {user_id}")
+        logger.debug(f"Found {len(repositories)} repositories for user {user_id}")
         
         return {
             "status": "success",
@@ -641,7 +702,7 @@ async def get_connected_repositories(user_id: str = "default", db = Depends(get_
             "count": len(repositories)
         }
     except Exception as e:
-        print(f"ERROR: Failed to get repositories for user {user_id}: {str(e)}")
+        logger.error(f"Failed to get repositories for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get connected repositories: {str(e)}")
 
 
@@ -737,8 +798,9 @@ async def get_webhook_status(
 @router.post("/github/webhook")
 async def github_webhook_handler(
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
-) -> Dict[str, Any]:
+) -> JSONResponse:
     """GitHub App 웹훅 수신 및 auto_deploy_enabled 상태에 따른 처리"""
     try:
         # GitHub App 웹훅 서명 검증
@@ -798,15 +860,44 @@ async def github_webhook_handler(
                 "message": "Auto deploy is disabled for this repository"
             }
         
-        # 이벤트 타입별 처리
+        # 이벤트 타입별 처리(비동기 스케줄링)
+        # BackgroundTasks는 스레드에서 실행되므로, 코루틴을 직접 스케줄링하지 말고
+        # 새 이벤트 루프에서 실행하는 동기 래퍼를 사용합니다.
+        from ...database import SessionLocal  # type: ignore
+
+        def run_async_in_thread(coro_func, *args, **kwargs):
+            # 스레드에서 별도 세션을 열고, 새로운 이벤트 루프에서 코루틴 실행
+            session = SessionLocal()
+            try:
+                # 통합 객체는 스레드 세이프하게 재조회
+                integ = session.query(UserProjectIntegration).filter(
+                    UserProjectIntegration.id == integration.id
+                ).first()
+                if integ is None:
+                    return
+                asyncio.run(coro_func(*args, **kwargs, db=session, integration=integ))
+            finally:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
         if event_type == "push":
-            return await handle_push_webhook(payload, integration, db)
+            background_tasks.add_task(run_async_in_thread, handle_push_webhook, payload)
         elif event_type == "pull_request":
-            return await handle_pull_request_webhook(payload, integration, db)
+            background_tasks.add_task(run_async_in_thread, handle_pull_request_webhook, payload)
         elif event_type == "release":
-            return await handle_release_webhook(payload, integration, db)
+            background_tasks.add_task(run_async_in_thread, handle_release_webhook, payload)
         else:
-            return {"status": "ignored", "reason": f"unsupported_event_type: {event_type}"}
+            return JSONResponse(content={"status": "ignored", "reason": f"unsupported_event_type: {event_type}"}, status_code=status.HTTP_202_ACCEPTED)
+
+        # 즉시 수락 응답
+        return JSONResponse(content={
+            "status": "accepted",
+            "repository": full_name,
+            "installation_id": installation_id,
+            "event": event_type
+        }, status_code=status.HTTP_202_ACCEPTED)
             
     except HTTPException:
         raise
@@ -1062,6 +1153,15 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
         except Exception as e:
             logger.error(f"Failed to send deployment_started message: {str(e)}")
             raise
+
+        # Slack: 배포 시작 알림 (2회 알림 중 첫 번째)
+        short_sha = (head_commit.get("id") or "")[:7]
+        start_msg = (
+            f"🚀 배포 시작 — {integration.github_owner}/{integration.github_repo}"
+            f"\ncommit {short_sha} | by {head_commit.get('author', {}).get('name', '')}"
+            f"\ndeployment_id={deployment_history.id}"
+        )
+        await _send_user_slack_message(db, integration.user_id, start_msg)
         
         # Step 1: SourceCommit 연동 확인 및 미러링
         # SourceCommit 시작 알림
@@ -1102,6 +1202,17 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
                 status="failed",
                 data=sourcecommit_result
             )
+
+            # Slack: 실패 즉시 알림
+            fail_msg = (
+                f"❌ 배포 실패 — {integration.github_owner}/{integration.github_repo}"
+                f"\nstage=sourcecommit · reason={deployment_history.error_message}"
+                f"\ncommit {(deployment_history.github_commit_sha or '')[:7]}"
+            )
+            try:
+                await _send_user_slack_message(db, integration.user_id, fail_msg)
+            except Exception as _:
+                pass
             
             return sourcecommit_result
         
@@ -1450,6 +1561,15 @@ spec:
                 }
             }
         )
+
+        # Slack: 배포 종료 알림 (2회 알림 중 두 번째)
+        final_status = "✅ 성공" if deployment_history.status == "success" else "❌ 실패"
+        end_msg = (
+            f"{final_status} — {integration.github_owner}/{integration.github_repo}"
+            f"\ncommit {(deployment_history.github_commit_sha or '')[:7]}"
+            f"\n총 소요 {deployment_history.total_duration}s"
+        )
+        await _send_user_slack_message(db, integration.user_id, end_msg)
         
         return {
             "status": "success",
@@ -1463,6 +1583,13 @@ spec:
             
     except Exception as e:
         logger.error(f"Push webhook processing failed: {str(e)}")
+        # Slack: 예기치 못한 오류 알림
+        try:
+            repo = f"{integration.github_owner}/{integration.github_repo}" if 'integration' in locals() else "unknown"
+            msg = f"❌ 배포 실패 — {repo}\nreason={str(e)[:200]}"
+            await _send_user_slack_message(db, getattr(integration, 'user_id', None), msg)
+        except Exception:
+            pass
         return {"status": "error", "message": str(e)}
 
 
