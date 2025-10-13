@@ -62,7 +62,7 @@ async def rollback_to_commit(
 
     # 2. Check if NCR image exists for this commit
     image_name = _generate_ncr_image_name(owner, repo)
-    image_url = f"klepaas-test.kr.ncr.ntruss.com/{image_name}:{target_commit_sha}"
+    image_url = f"{get_settings().ncp_container_registry_url}/{image_name}:{target_commit_sha}"
 
     verified = await _verify_ncr_manifest_exists(image_url)
     image_exists = verified.get("exists", False)

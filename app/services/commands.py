@@ -3,19 +3,24 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
+from kubernetes import client
+from kubernetes.client.rest import ApiException
 
 from .deployments import DeployApplicationInput, perform_deploy
-from .k8s_client import get_apps_v1_api
+from .k8s_client import get_apps_v1_api, get_core_v1_api, get_networking_v1_api
 
 
 class CommandRequest(BaseModel):
     command: str = Field(min_length=1)
     app_name: str = Field(default="")
     replicas: int = Field(default=1)
-    lines: int = Field(default=30)
+    lines: int = Field(default=30, ge=1, le=100)  # 최소 1줄, 최대 100줄
     version: str = Field(default="")
+    namespace: str = Field(default="default")
+    previous: bool = Field(default=False)  # 이전 파드 로그 여부
 
 
 @dataclass
@@ -76,7 +81,7 @@ def _parse_version(text: str) -> Optional[str]:
 def plan_command(req: CommandRequest) -> CommandPlan:
     command = req.command.lower()
     app_name = req.app_name or "app"
-    ns = "default"
+    ns = req.namespace or "default"
 
     if command == "deploy":
         return CommandPlan(
@@ -96,6 +101,9 @@ def plan_command(req: CommandRequest) -> CommandPlan:
         )
     
     elif command == "status":
+        # app_name이 명시되지 않았을 때 유효성 검사
+        if not req.app_name or req.app_name.strip() == "":
+            raise ValueError("상태 확인 명령어에는 앱 이름을 명시해야 합니다. 예: 'chat-app 상태 보여줘'")
         return CommandPlan(
             tool="k8s_get_status",
             args={"name": app_name, "namespace": ns},
@@ -104,19 +112,24 @@ def plan_command(req: CommandRequest) -> CommandPlan:
     elif command == "logs":
         return CommandPlan(
             tool="k8s_get_logs",
-            args={"name": app_name, "namespace": ns, "lines": req.lines},
+            args={
+                "name": app_name, 
+                "namespace": req.namespace or ns, 
+                "lines": req.lines,
+                "previous": req.previous
+            },
         )
     
     elif command == "endpoint":
         return CommandPlan(
             tool="k8s_get_endpoints",
-            args={"name": app_name, "namespace": ns},
+            args={"name": app_name, "namespace": req.namespace or ns},
         )
     
     elif command == "restart":
         return CommandPlan(
             tool="k8s_restart_deployment",
-            args={"name": app_name, "namespace": ns},
+            args={"name": app_name, "namespace": req.namespace or ns},
         )
     
     elif command == "rollback":
@@ -124,55 +137,941 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             tool="k8s_rollback_deployment",
             args={"name": app_name, "namespace": ns, "version": req.version},
         )
+    
+    elif command == "list_pods" or command == "pods":
+        return CommandPlan(
+            tool="k8s_list_pods",
+            args={"namespace": ns},
+        )
+    
+    elif command == "overview":
+        return CommandPlan(
+            tool="k8s_get_overview",
+            args={"namespace": req.namespace or ns},
+        )
+    
+    elif command == "list_deployments":
+        return CommandPlan(
+            tool="k8s_list_all_deployments",
+            args={},
+        )
+    
+    elif command == "list_services":
+        return CommandPlan(
+            tool="k8s_list_all_services",
+            args={},
+        )
+    
+    elif command == "list_ingresses":
+        return CommandPlan(
+            tool="k8s_list_all_ingresses",
+            args={},
+        )
+    
+    elif command == "list_namespaces":
+        return CommandPlan(
+            tool="k8s_list_namespaces",
+            args={},
+        )
+    
+    elif command == "list_apps":
+        return CommandPlan(
+            tool="k8s_list_deployments",
+            args={"namespace": ns},
+        )
 
     raise ValueError("해석할 수 없는 명령입니다.")
 
 
 async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
+    """
+    명령 실행 계획을 실제 Kubernetes API 호출로 변환하여 실행
+    """
     if plan.tool == "deploy_application":
         payload = DeployApplicationInput(**plan.args)
         return await perform_deploy(payload)
 
     if plan.tool == "k8s_scale_deployment":
-        name = plan.args["name"]
-        ns = plan.args["namespace"]
-        replicas = plan.args["replicas"]
-        # TODO: Implement actual Kubernetes scale operation
-        return {"status": "not_implemented", "message": f"Scale {name} in {ns} namespace to {replicas} replicas"}
+        return await _execute_scale(plan.args)
 
-    # TODO: Implement the following command handlers
     if plan.tool == "k8s_get_status":
-        name = plan.args["name"]
-        ns = plan.args["namespace"]
-        # TODO: Implement actual Kubernetes status check
-        return {"status": "not_implemented", "message": f"Status check for {name} in {ns} namespace"}
+        return await _execute_get_status(plan.args)
 
     if plan.tool == "k8s_get_logs":
-        name = plan.args["name"]
-        ns = plan.args["namespace"]
-        lines = plan.args["lines"]
-        # TODO: Implement actual Kubernetes logs retrieval
-        return {"status": "not_implemented", "message": f"Logs for {name} in {ns} namespace ({lines} lines)"}
+        return await _execute_get_logs(plan.args)
 
     if plan.tool == "k8s_get_endpoints":
-        name = plan.args["name"]
-        ns = plan.args["namespace"]
-        # TODO: Implement actual Kubernetes endpoints retrieval
-        return {"status": "not_implemented", "message": f"Endpoints for {name} in {ns} namespace"}
+        return await _execute_get_endpoints(plan.args)
 
     if plan.tool == "k8s_restart_deployment":
-        name = plan.args["name"]
-        ns = plan.args["namespace"]
-        # TODO: Implement actual Kubernetes deployment restart
-        return {"status": "not_implemented", "message": f"Restart {name} in {ns} namespace"}
+        return await _execute_restart(plan.args)
 
     if plan.tool == "k8s_rollback_deployment":
-        name = plan.args["name"]
-        ns = plan.args["namespace"]
-        version = plan.args.get("version")
-        # TODO: Implement actual Kubernetes deployment rollback
-        return {"status": "not_implemented", "message": f"Rollback {name} in {ns} namespace to {version or 'previous version'}"}
+        return await _execute_rollback(plan.args)
+
+    if plan.tool == "k8s_list_pods":
+        return await _execute_list_pods(plan.args)
+
+    if plan.tool == "k8s_get_overview":
+        return await _execute_get_overview(plan.args)
+
+    if plan.tool == "k8s_list_all_deployments":
+        return await _execute_list_all_deployments(plan.args)
+
+    if plan.tool == "k8s_list_all_services":
+        return await _execute_list_all_services(plan.args)
+
+    if plan.tool == "k8s_list_all_ingresses":
+        return await _execute_list_all_ingresses(plan.args)
+
+    if plan.tool == "k8s_list_namespaces":
+        return await _execute_list_namespaces(plan.args)
+
+    if plan.tool == "k8s_list_deployments":
+        return await _execute_list_deployments(plan.args)
 
     raise ValueError("지원하지 않는 실행 계획입니다.")
+
+
+# ========================================
+# Kubernetes 명령어 실행 핸들러
+# ========================================
+
+async def _execute_get_status(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    배포 상태 조회 (status 명령어)
+    예: "내 앱 상태 보여줘", "chat-app 상태 어때?"
+    """
+    name = args["name"]
+    namespace = args["namespace"]
+    
+    try:
+        apps_v1 = get_apps_v1_api()
+        
+        # Deployment 정보 조회
+        deployment = apps_v1.read_namespaced_deployment(name=name, namespace=namespace)
+        
+        # Pod 목록 조회 (Deployment의 Pod 상태 확인)
+        core_v1 = get_core_v1_api()
+        label_selector = f"app={name}"
+        pods = core_v1.list_namespaced_pod(namespace=namespace, label_selector=label_selector)
+        
+        # Pod 상태 정보 추출
+        pod_statuses = []
+        for pod in pods.items:
+            pod_status = {
+                "name": pod.metadata.name,
+                "phase": pod.status.phase,
+                "ready": False,
+                "restarts": 0
+            }
+            
+            # Container 상태 체크
+            if pod.status.container_statuses:
+                for container_status in pod.status.container_statuses:
+                    pod_status["ready"] = container_status.ready
+                    pod_status["restarts"] = container_status.restart_count
+                    break
+            
+            pod_statuses.append(pod_status)
+        
+        return {
+            "status": "success",
+            "deployment": {
+                "name": deployment.metadata.name,
+                "namespace": deployment.metadata.namespace,
+                "replicas": {
+                    "desired": deployment.spec.replicas,
+                    "current": deployment.status.replicas or 0,
+                    "ready": deployment.status.ready_replicas or 0,
+                    "available": deployment.status.available_replicas or 0,
+                },
+                "image": deployment.spec.template.spec.containers[0].image if deployment.spec.template.spec.containers else None,
+                "created_at": deployment.metadata.creation_timestamp.isoformat() if deployment.metadata.creation_timestamp else None
+            },
+            "pods": pod_statuses
+        }
+        
+    except ApiException as e:
+        if e.status == 404:
+            return {"status": "error", "message": f"Deployment '{name}'을 찾을 수 없습니다."}
+        return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
+    except Exception as e:
+        return {"status": "error", "message": f"상태 조회 실패: {str(e)}"}
+
+
+async def _execute_get_logs(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Pod 로그 조회 (logs 명령어)
+    예: "최신 로그 100줄 보여줘", "로그 확인", "이전 로그 확인해줘"
+    """
+    name = args["name"]
+    namespace = args["namespace"]
+    lines = args.get("lines", 30)
+    previous = args.get("previous", False)  # 이전 파드 로그 여부
+    
+    try:
+        core_v1 = get_core_v1_api()
+        
+        # Step 1: 앱 이름으로 실제 파드 이름 찾아오기 (레이블 셀렉터 활용)
+        # 먼저 app 레이블로 시도
+        label_selector = f"app={name}"
+        pods = core_v1.list_namespaced_pod(namespace=namespace, label_selector=label_selector)
+        
+        # app 레이블로 찾을 수 없으면 파드 이름으로 직접 찾기
+        if not pods.items:
+            try:
+                pod = core_v1.read_namespaced_pod(name=name, namespace=namespace)
+                pods.items = [pod]  # 단일 파드를 리스트 형태로 변환
+            except ApiException as e:
+                if e.status == 404:
+                    # 네임스페이스 존재 여부 확인
+                    try:
+                        core_v1.read_namespace(name=namespace)
+                        # 네임스페이스는 존재하지만 파드가 없음
+                        return {"status": "error", "message": f"'{name}' 관련 Pod를 찾을 수 없습니다. 앱 이름을 확인해주세요."}
+                    except ApiException:
+                        # 네임스페이스 자체가 존재하지 않음
+                        return {"status": "error", "message": f"네임스페이스 '{namespace}'가 존재하지 않습니다. 네임스페이스 이름을 확인해주세요."}
+                else:
+                    return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
+        
+        # 첫 번째 Pod 선택
+        pod = pods.items[0]
+        pod_name = pod.metadata.name
+        
+        # Step 3: CrashLoopBackOff 상태 확인 및 대응
+        if pod.status.phase == "Failed" or (pod.status.container_statuses and 
+            any(cs.state.waiting and cs.state.waiting.reason == "CrashLoopBackOff" 
+                for cs in pod.status.container_statuses)):
+            
+            # CrashLoopBackOff 상태일 때 --previous 옵션으로 이전 파드 로그 조회
+            try:
+                logs = core_v1.read_namespaced_pod_log(
+                    name=pod_name,
+                    namespace=namespace,
+                    tail_lines=lines,
+                    previous=True  # --previous 옵션
+                )
+                
+                return {
+                    "status": "success",
+                    "pod_name": pod_name,
+                    "lines": lines,
+                    "logs": logs,
+                    "warning": "앱이 CrashLoopBackOff 상태입니다. 원인 파악을 위해 직전에 실패했던 파드의 로그를 보여드립니다.",
+                    "pod_status": pod.status.phase
+                }
+            except ApiException as prev_e:
+                # 이전 로그도 없으면 현재 로그라도 보여주기
+                logs = core_v1.read_namespaced_pod_log(
+                    name=pod_name,
+                    namespace=namespace,
+                    tail_lines=lines
+                )
+                return {
+                    "status": "success",
+                    "pod_name": pod_name,
+                    "lines": lines,
+                    "logs": logs,
+                    "warning": "앱이 CrashLoopBackOff 상태이지만 이전 로그를 찾을 수 없어 현재 로그를 보여드립니다.",
+                    "pod_status": pod.status.phase
+                }
+        
+        # Step 2: kubectl logs 명령어 조립하기 (정상 상태)
+        # follow 옵션은 실시간 로그이므로 API에서는 지원하지 않음
+        # 대신 최신 로그를 반환하고 follow=True일 때는 안내 메시지 추가
+        logs = core_v1.read_namespaced_pod_log(
+            name=pod_name,
+            namespace=namespace,
+            tail_lines=lines
+        )
+        
+        response = {
+            "status": "success",
+            "pod_name": pod_name,
+            "lines": lines,
+            "logs": logs,
+            "pod_status": pod.status.phase
+        }
+        
+        return response
+        
+    except ApiException as e:
+        if e.status == 404:
+            return {"status": "error", "message": f"Pod를 찾을 수 없습니다."}
+        return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
+    except Exception as e:
+        return {"status": "error", "message": f"로그 조회 실패: {str(e)}"}
+
+
+async def _execute_get_endpoints(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    서비스 엔드포인트 조회 - Ingress 도메인만 반환 (endpoint 명령어)
+    예: "내 앱 접속 주소 알려줘", "서비스 URL 뭐야?"
+    """
+    name = args["name"]
+    namespace = args["namespace"]
+    
+    try:
+        networking_v1 = get_networking_v1_api()
+        
+        # Ingress 조회 - 해당 서비스와 연결된 Ingress 찾기
+        try:
+            # 네임스페이스의 모든 Ingress 조회
+            ingresses = networking_v1.list_namespaced_ingress(namespace=namespace)
+            
+            for ingress in ingresses.items:
+                # Ingress 규칙에서 해당 서비스를 백엔드로 사용하는지 확인
+                for rule in ingress.spec.rules or []:
+                    for path in rule.http.paths or []:
+                        if hasattr(path.backend.service, 'name') and path.backend.service.name == name:
+                            # 도메인 추출
+                            host = rule.host
+                            if host:
+                                # HTTPS 도메인 반환
+                                domain = f"https://{host}"
+                                return {
+                                    "status": "success",
+                                    "service_name": name,
+                                    "namespace": namespace,
+                                    "endpoints": [domain],
+                                    "message": "Ingress 도메인으로 접속 가능합니다."
+                                }
+            
+            # Ingress를 찾지 못한 경우
+            return {
+                "status": "error",
+                "service_name": name,
+                "namespace": namespace,
+                "message": f"'{name}' 서비스에 대한 Ingress 도메인이 설정되지 않았습니다. 도메인 설정이 필요합니다."
+            }
+            
+        except ApiException as e:
+            if e.status == 404:
+                return {
+                    "status": "error", 
+                    "service_name": name,
+                    "namespace": namespace,
+                    "message": f"'{name}' 서비스에 대한 Ingress를 찾을 수 없습니다. 도메인 설정이 필요합니다."
+                }
+            raise
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "service_name": name,
+            "namespace": namespace,
+            "message": f"엔드포인트 조회 실패: {str(e)}"
+        }
+
+
+async def _execute_restart(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Deployment 재시작 (restart 명령어)
+    예: "앱 재시작해줘", "chat-app 껐다 켜줘"
+    
+    구현 방법: kubectl rollout restart deployment 방식으로 Pod 재시작
+    """
+    name = args["name"]
+    namespace = args["namespace"]
+    
+    try:
+        apps_v1 = get_apps_v1_api()
+        
+        # Deployment 존재 확인
+        try:
+            deployment = apps_v1.read_namespaced_deployment(name=name, namespace=namespace)
+        except ApiException as e:
+            if e.status == 404:
+                return {
+                    "status": "error",
+                    "deployment": name,
+                    "namespace": namespace,
+                    "message": f"Deployment '{name}'을 찾을 수 없습니다. 배포된 앱 이름을 확인해주세요."
+                }
+            raise
+        
+        # kubectl rollout restart deployment 구현
+        # Pod template에 재시작 annotation 추가하여 Pod 재생성 트리거
+        if deployment.spec.template.metadata.annotations is None:
+            deployment.spec.template.metadata.annotations = {}
+        
+        # 현재 시간으로 재시작 annotation 설정
+        deployment.spec.template.metadata.annotations["kubectl.kubernetes.io/restartedAt"] = datetime.now(timezone.utc).isoformat()
+        
+        # Deployment 업데이트 (이것이 kubectl rollout restart와 동일한 효과)
+        apps_v1.patch_namespaced_deployment(
+            name=name,
+            namespace=namespace,
+            body=deployment
+        )
+        
+        return {
+            "status": "success",
+            "message": f"Deployment '{name}'이 재시작되었습니다. Pod들이 새로 생성됩니다.",
+            "deployment": name,
+            "namespace": namespace,
+            "restart_method": "kubectl rollout restart"
+        }
+        
+    except ApiException as e:
+        if e.status == 404:
+            return {
+                "status": "error",
+                "deployment": name,
+                "namespace": namespace,
+                "message": f"Deployment '{name}'을 찾을 수 없습니다. 배포된 앱 이름을 확인해주세요."
+            }
+        return {
+            "status": "error",
+            "deployment": name,
+            "namespace": namespace,
+            "message": f"Kubernetes API 오류: {e.reason}"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "deployment": name,
+            "namespace": namespace,
+            "message": f"재시작 실패: {str(e)}"
+        }
+
+
+async def _execute_scale(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Deployment 스케일링 (scale 명령어)
+    예: "서버 3대로 늘려줘", "chat-app 스케일 아웃"
+    """
+    name = args["name"]
+    namespace = args["namespace"]
+    replicas = args["replicas"]
+    
+    try:
+        apps_v1 = get_apps_v1_api()
+        
+        # Deployment의 replicas 값만 업데이트
+        body = {
+            "spec": {
+                "replicas": replicas
+            }
+        }
+        
+        apps_v1.patch_namespaced_deployment_scale(
+            name=name,
+            namespace=namespace,
+            body=body
+        )
+        
+        return {
+            "status": "success",
+            "message": f"Deployment '{name}'의 replicas를 {replicas}개로 변경했습니다.",
+            "deployment": name,
+            "replicas": replicas
+        }
+        
+    except ApiException as e:
+        if e.status == 404:
+            return {"status": "error", "message": f"Deployment '{name}'을 찾을 수 없습니다."}
+        return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
+    except Exception as e:
+        return {"status": "error", "message": f"스케일링 실패: {str(e)}"}
+
+
+async def _execute_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Deployment 롤백 (rollback 명령어)
+    예: "v1.1 버전으로 롤백해줘", "이전 배포로 되돌려"
+    """
+    name = args["name"]
+    namespace = args["namespace"]
+    version = args.get("version")
+    
+    try:
+        apps_v1 = get_apps_v1_api()
+        
+        if version:
+            # 특정 버전으로 롤백 (이미지 태그 변경)
+            deployment = apps_v1.read_namespaced_deployment(name=name, namespace=namespace)
+            
+            # 첫 번째 컨테이너의 이미지를 변경
+            if deployment.spec.template.spec.containers:
+                current_image = deployment.spec.template.spec.containers[0].image
+                image_base = current_image.rsplit(":", 1)[0]  # 태그 제거
+                new_image = f"{image_base}:{version}"
+                
+                deployment.spec.template.spec.containers[0].image = new_image
+                
+                apps_v1.patch_namespaced_deployment(
+                    name=name,
+                    namespace=namespace,
+                    body=deployment
+                )
+                
+                return {
+                    "status": "success",
+                    "message": f"Deployment '{name}'을 {version} 버전으로 롤백했습니다.",
+                    "deployment": name,
+                    "version": version,
+                    "image": new_image
+                }
+        else:
+            # 이전 ReplicaSet으로 롤백 (kubectl rollout undo와 동일)
+            # Kubernetes API는 직접적인 undo를 지원하지 않으므로, 이전 ReplicaSet을 찾아서 이미지를 변경
+            return {
+                "status": "error",
+                "message": "버전을 명시해주세요. 예: 'v1.0으로 롤백'"
+            }
+        
+    except ApiException as e:
+        if e.status == 404:
+            return {"status": "error", "message": f"Deployment '{name}'을 찾을 수 없습니다."}
+        return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
+    except Exception as e:
+        return {"status": "error", "message": f"롤백 실패: {str(e)}"}
+
+
+async def _execute_list_pods(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    모든 파드 목록 조회 (list_pods 명령어)
+    예: "모든 파드 조회해줘", "파드 목록 보여줘"
+    """
+    namespace = args.get("namespace", "default")
+    
+    try:
+        core_v1 = get_core_v1_api()
+        
+        # 네임스페이스의 모든 파드 조회
+        pods = core_v1.list_namespaced_pod(namespace=namespace)
+        
+        pod_list = []
+        for pod in pods.items:
+            pod_info = {
+                "name": pod.metadata.name,
+                "namespace": pod.metadata.namespace,
+                "phase": pod.status.phase,
+                "ready": False,
+                "restarts": 0,
+                "age": None,
+                "node": pod.spec.node_name if pod.spec else None
+            }
+            
+            # Container 상태 체크
+            if pod.status.container_statuses:
+                ready_count = 0
+                total_count = len(pod.status.container_statuses)
+                total_restarts = 0
+                
+                for container_status in pod.status.container_statuses:
+                    if container_status.ready:
+                        ready_count += 1
+                    total_restarts += container_status.restart_count
+                
+                pod_info["ready"] = f"{ready_count}/{total_count}"
+                pod_info["restarts"] = total_restarts
+            
+            # Pod 생성 시간 계산
+            if pod.metadata.creation_timestamp:
+                now = datetime.now(timezone.utc)
+                age = now - pod.metadata.creation_timestamp
+                pod_info["age"] = str(age).split('.')[0]  # 초 단위 제거
+            
+            pod_list.append(pod_info)
+        
+        return {
+            "status": "success",
+            "namespace": namespace,
+            "total_pods": len(pod_list),
+            "pods": pod_list
+        }
+        
+    except ApiException as e:
+        return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
+    except Exception as e:
+        return {"status": "error", "message": f"파드 목록 조회 실패: {str(e)}"}
+
+
+async def _execute_get_overview(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    통합 대시보드 조회 (overview 명령어)
+    예: "전체 상황 보여줘", "대시보드 확인", "모든 리소스 상태"
+    
+    Deployment, Pod, Service, Ingress 모든 리소스를 한번에 조회
+    """
+    namespace = args.get("namespace", "default")
+    
+    try:
+        apps_v1 = get_apps_v1_api()
+        core_v1 = get_core_v1_api()
+        networking_v1 = get_networking_v1_api()
+        
+        overview_data = {
+            "namespace": namespace,
+            "deployments": [],
+            "pods": [],
+            "services": [],
+            "ingresses": []
+        }
+        
+        # 1. Deployments 조회
+        try:
+            deployments = apps_v1.list_namespaced_deployment(namespace=namespace)
+            for deployment in deployments.items:
+                deployment_info = {
+                    "name": deployment.metadata.name,
+                    "replicas": {
+                        "desired": deployment.spec.replicas,
+                        "current": deployment.status.replicas or 0,
+                        "ready": deployment.status.ready_replicas or 0,
+                        "available": deployment.status.available_replicas or 0,
+                    },
+                    "image": deployment.spec.template.spec.containers[0].image if deployment.spec.template.spec.containers else None,
+                    "status": "Running" if deployment.status.ready_replicas == deployment.spec.replicas else "Pending"
+                }
+                overview_data["deployments"].append(deployment_info)
+        except ApiException as e:
+            if e.status != 404:  # 404는 네임스페이스가 없는 경우
+                raise
+        
+        # 2. Pods 조회
+        try:
+            pods = core_v1.list_namespaced_pod(namespace=namespace)
+            for pod in pods.items:
+                pod_info = {
+                    "name": pod.metadata.name,
+                    "phase": pod.status.phase,
+                    "ready": False,
+                    "restarts": 0,
+                    "node": pod.spec.node_name if pod.spec else None
+                }
+                
+                # Container 상태 체크
+                if pod.status.container_statuses:
+                    ready_count = 0
+                    total_count = len(pod.status.container_statuses)
+                    total_restarts = 0
+                    
+                    for container_status in pod.status.container_statuses:
+                        if container_status.ready:
+                            ready_count += 1
+                        total_restarts += container_status.restart_count
+                    
+                    pod_info["ready"] = f"{ready_count}/{total_count}"
+                    pod_info["restarts"] = total_restarts
+                
+                overview_data["pods"].append(pod_info)
+        except ApiException as e:
+            if e.status != 404:
+                raise
+        
+        # 3. Services 조회
+        try:
+            services = core_v1.list_namespaced_service(namespace=namespace)
+            for service in services.items:
+                service_info = {
+                    "name": service.metadata.name,
+                    "type": service.spec.type,
+                    "cluster_ip": service.spec.cluster_ip,
+                    "ports": []
+                }
+                
+                # Service 포트 정보
+                if service.spec.ports:
+                    for port in service.spec.ports:
+                        port_info = {
+                            "port": port.port,
+                            "target_port": port.target_port,
+                            "protocol": port.protocol or "TCP"
+                        }
+                        if service.spec.type == "NodePort" and port.node_port:
+                            port_info["node_port"] = port.node_port
+                        service_info["ports"].append(port_info)
+                
+                overview_data["services"].append(service_info)
+        except ApiException as e:
+            if e.status != 404:
+                raise
+        
+        # 4. Ingresses 조회
+        try:
+            ingresses = networking_v1.list_namespaced_ingress(namespace=namespace)
+            for ingress in ingresses.items:
+                ingress_info = {
+                    "name": ingress.metadata.name,
+                    "hosts": [],
+                    "addresses": []
+                }
+                
+                # Ingress 호스트 정보
+                if ingress.spec.rules:
+                    for rule in ingress.spec.rules:
+                        if rule.host:
+                            ingress_info["hosts"].append(rule.host)
+                
+                # Ingress 주소 정보
+                if ingress.status.load_balancer.ingress:
+                    for lb_ingress in ingress.status.load_balancer.ingress:
+                        address = lb_ingress.ip or lb_ingress.hostname
+                        if address:
+                            ingress_info["addresses"].append(address)
+                
+                overview_data["ingresses"].append(ingress_info)
+        except ApiException as e:
+            if e.status != 404:
+                raise
+        
+        # 요약 통계
+        summary = {
+            "total_deployments": len(overview_data["deployments"]),
+            "total_pods": len(overview_data["pods"]),
+            "total_services": len(overview_data["services"]),
+            "total_ingresses": len(overview_data["ingresses"]),
+            "running_pods": len([p for p in overview_data["pods"] if p["phase"] == "Running"]),
+            "ready_deployments": len([d for d in overview_data["deployments"] if d["status"] == "Running"])
+        }
+        
+        return {
+            "status": "success",
+            "message": f"'{namespace}' 네임스페이스 통합 대시보드 조회 완료",
+            "summary": summary,
+            "resources": overview_data
+        }
+        
+    except ApiException as e:
+        if e.status == 404:
+            return {
+                "status": "error",
+                "namespace": namespace,
+                "message": f"네임스페이스 '{namespace}'가 존재하지 않습니다. 네임스페이스 이름을 확인해주세요."
+            }
+        return {
+            "status": "error",
+            "namespace": namespace,
+            "message": f"통합 대시보드 조회 실패: {e.reason}"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "namespace": namespace,
+            "message": f"통합 대시보드 조회 실패: {str(e)}"
+        }
+
+
+async def _execute_list_all_deployments(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    모든 네임스페이스의 Deployment 목록 조회 (list_deployments 명령어)
+    예: "모든 Deployment 조회해줘", "전체 앱 목록 보여줘"
+    """
+    try:
+        apps_v1 = get_apps_v1_api()
+        
+        # 모든 네임스페이스의 Deployment 조회
+        deployments = apps_v1.list_deployment_for_all_namespaces()
+        
+        deployment_list = []
+        for deployment in deployments.items:
+            deployment_info = {
+                "name": deployment.metadata.name,
+                "namespace": deployment.metadata.namespace,
+                "replicas": {
+                    "desired": deployment.spec.replicas,
+                    "current": deployment.status.replicas or 0,
+                    "ready": deployment.status.ready_replicas or 0,
+                    "available": deployment.status.available_replicas or 0,
+                },
+                "image": deployment.spec.template.spec.containers[0].image if deployment.spec.template.spec.containers else None,
+                "status": "Running" if deployment.status.ready_replicas == deployment.spec.replicas else "Pending"
+            }
+            deployment_list.append(deployment_info)
+        
+        return {
+            "status": "success",
+            "message": "모든 네임스페이스의 Deployment 목록 조회 완료",
+            "total_deployments": len(deployment_list),
+            "deployments": deployment_list
+        }
+        
+    except Exception as e:
+        return {"status": "error", "message": f"전체 Deployment 조회 실패: {str(e)}"}
+
+
+async def _execute_list_all_services(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    모든 네임스페이스의 Service 목록 조회 (list_services 명령어)
+    예: "모든 Service 조회해줘", "전체 서비스 목록 보여줘"
+    """
+    try:
+        core_v1 = get_core_v1_api()
+        
+        # 모든 네임스페이스의 Service 조회
+        services = core_v1.list_service_for_all_namespaces()
+        
+        service_list = []
+        for service in services.items:
+            service_info = {
+                "name": service.metadata.name,
+                "namespace": service.metadata.namespace,
+                "type": service.spec.type,
+                "cluster_ip": service.spec.cluster_ip,
+                "ports": []
+            }
+            
+            # Service 포트 정보
+            if service.spec.ports:
+                for port in service.spec.ports:
+                    port_info = {
+                        "port": port.port,
+                        "target_port": port.target_port,
+                        "protocol": port.protocol or "TCP"
+                    }
+                    if service.spec.type == "NodePort" and port.node_port:
+                        port_info["node_port"] = port.node_port
+                    service_info["ports"].append(port_info)
+            
+            service_list.append(service_info)
+        
+        return {
+            "status": "success",
+            "message": "모든 네임스페이스의 Service 목록 조회 완료",
+            "total_services": len(service_list),
+            "services": service_list
+        }
+        
+    except Exception as e:
+        return {"status": "error", "message": f"전체 Service 조회 실패: {str(e)}"}
+
+
+async def _execute_list_all_ingresses(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    모든 네임스페이스의 Ingress 목록 조회 (list_ingresses 명령어)
+    예: "모든 도메인 조회해줘", "전체 Ingress 목록 보여줘"
+    """
+    try:
+        networking_v1 = get_networking_v1_api()
+        
+        # 모든 네임스페이스의 Ingress 조회
+        ingresses = networking_v1.list_ingress_for_all_namespaces()
+        
+        ingress_list = []
+        for ingress in ingresses.items:
+            ingress_info = {
+                "name": ingress.metadata.name,
+                "namespace": ingress.metadata.namespace,
+                "hosts": [],
+                "addresses": []
+            }
+            
+            # Ingress 호스트 정보
+            if ingress.spec.rules:
+                for rule in ingress.spec.rules:
+                    if rule.host:
+                        ingress_info["hosts"].append(rule.host)
+            
+            # Ingress 주소 정보
+            if ingress.status.load_balancer.ingress:
+                for lb_ingress in ingress.status.load_balancer.ingress:
+                    address = lb_ingress.ip or lb_ingress.hostname
+                    if address:
+                        ingress_info["addresses"].append(address)
+            
+            ingress_list.append(ingress_info)
+        
+        return {
+            "status": "success",
+            "message": "모든 네임스페이스의 Ingress 목록 조회 완료",
+            "total_ingresses": len(ingress_list),
+            "ingresses": ingress_list
+        }
+        
+    except Exception as e:
+        return {"status": "error", "message": f"전체 Ingress 조회 실패: {str(e)}"}
+
+
+async def _execute_list_namespaces(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    클러스터의 모든 네임스페이스 목록 조회 (list_namespaces 명령어)
+    예: "모든 네임스페이스 조회해줘", "네임스페이스 목록 보여줘"
+    """
+    try:
+        core_v1 = get_core_v1_api()
+        
+        # 모든 네임스페이스 조회
+        namespaces = core_v1.list_namespace()
+        
+        namespace_list = []
+        for namespace in namespaces.items:
+            namespace_info = {
+                "name": namespace.metadata.name,
+                "status": namespace.status.phase,
+                "age": None
+            }
+            
+            # 네임스페이스 생성 시간 계산
+            if namespace.metadata.creation_timestamp:
+                now = datetime.now(timezone.utc)
+                age = now - namespace.metadata.creation_timestamp
+                namespace_info["age"] = str(age).split('.')[0]  # 초 단위 제거
+            
+            namespace_list.append(namespace_info)
+        
+        return {
+            "status": "success",
+            "message": "모든 네임스페이스 목록 조회 완료",
+            "total_namespaces": len(namespace_list),
+            "namespaces": namespace_list
+        }
+        
+    except Exception as e:
+        return {"status": "error", "message": f"네임스페이스 목록 조회 실패: {str(e)}"}
+
+
+async def _execute_list_deployments(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    네임스페이스의 모든 Deployment 목록 조회 (list_apps 명령어)
+    예: "test 네임스페이스 앱 목록 보여줘", "default 네임스페이스 모든 앱 확인"
+    """
+    namespace = args.get("namespace", "default")
+    
+    try:
+        apps_v1 = get_apps_v1_api()
+        
+        # 네임스페이스의 모든 Deployment 조회
+        deployments = apps_v1.list_namespaced_deployment(namespace=namespace)
+        
+        deployment_list = []
+        for deployment in deployments.items:
+            deployment_info = {
+                "name": deployment.metadata.name,
+                "namespace": deployment.metadata.namespace,
+                "replicas": {
+                    "desired": deployment.spec.replicas,
+                    "current": deployment.status.replicas or 0,
+                    "ready": deployment.status.ready_replicas or 0,
+                    "available": deployment.status.available_replicas or 0,
+                },
+                "image": deployment.spec.template.spec.containers[0].image if deployment.spec.template.spec.containers else None,
+                "age": None,
+                "status": "Running" if deployment.status.ready_replicas == deployment.spec.replicas else "Pending"
+            }
+            
+            # Deployment 생성 시간 계산
+            if deployment.metadata.creation_timestamp:
+                now = datetime.now(timezone.utc)
+                age = now - deployment.metadata.creation_timestamp
+                deployment_info["age"] = str(age).split('.')[0]  # 초 단위 제거
+            
+            deployment_list.append(deployment_info)
+        
+        return {
+            "status": "success",
+            "namespace": namespace,
+            "total_deployments": len(deployment_list),
+            "deployments": deployment_list
+        }
+        
+    except ApiException as e:
+        return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
+    except Exception as e:
+        return {"status": "error", "message": f"Deployment 목록 조회 실패: {str(e)}"}
 
 
