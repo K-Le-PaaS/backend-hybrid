@@ -58,6 +58,11 @@ def get_apps_v1_api(context: Optional[str] = None) -> client.AppsV1Api:
     return client.AppsV1Api()
 
 
+def get_networking_v1_api(context: Optional[str] = None) -> client.NetworkingV1Api:
+    load_kube_config(context=context)
+    return client.NetworkingV1Api()
+
+
 def list_kube_contexts() -> List[Tuple[str, bool]]:
     """Return available kube contexts as list of (name, is_current)."""
     try:

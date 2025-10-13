@@ -129,48 +129,43 @@ class GeminiClient(LLMClient):
 사용자 입력 예시: "배포해줘", "최신 코드로 업데이트해줘"
 필수 JSON 형식: { "command": "deploy", "parameters": { "appName": "<추출된_앱이름>" } }
 
-8. 파드 목록 조회 (command: "list_pods")
-설명: 현재 실행 중인 모든 파드의 목록을 조회하는 명령입니다.
-사용자 입력 예시: "모든 파드 조회해줘", "파드 목록 보여줘", "실행 중인 파드들 확인"
-필수 JSON 형식: { "command": "list_pods", "parameters": {} }
-
-9. 통합 대시보드 조회 (command: "overview")
+8. 통합 대시보드 조회 (command: "overview")
 설명: 특정 네임스페이스의 모든 리소스를 한번에 조회하는 명령입니다 (Deployment, Pod, Service, Ingress).
 사용자 입력 예시: "전체 상황 보여줘", "대시보드 확인", "모든 리소스 상태", "네임스페이스 전체 현황", "클러스터 상태 확인"
 필수 JSON 형식: { "command": "overview", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-10. 파드 목록 조회 (command: "list_pods")
+9. 파드 목록 조회 (command: "list_pods")
 설명: 현재 실행 중인 모든 파드의 목록을 조회하는 명령입니다.
 사용자 입력 예시: "모든 파드 조회해줘", "파드 목록 보여줘", "실행 중인 파드들 확인"
 필수 JSON 형식: { "command": "list_pods", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-11. 전체 Deployment 조회 (command: "list_deployments")
+10. 전체 Deployment 조회 (command: "list_deployments")
 설명: 모든 네임스페이스의 Deployment 목록을 조회하는 명령입니다.
 사용자 입력 예시: "모든 Deployment 조회해줘", "전체 앱 목록 보여줘", "모든 배포 확인"
 필수 JSON 형식: { "command": "list_deployments", "parameters": {} }
 
-12. 전체 Service 조회 (command: "list_services")
+11. 전체 Service 조회 (command: "list_services")
 설명: 모든 네임스페이스의 Service 목록을 조회하는 명령입니다.
 사용자 입력 예시: "모든 Service 조회해줘", "전체 서비스 목록 보여줘", "모든 서비스 확인"
 필수 JSON 형식: { "command": "list_services", "parameters": {} }
 
-13. 전체 Ingress/도메인 조회 (command: "list_ingresses")
+12. 전체 Ingress/도메인 조회 (command: "list_ingresses")
 설명: 모든 네임스페이스의 Ingress와 도메인 목록을 조회하는 명령입니다.
 사용자 입력 예시: "모든 도메인 조회해줘", "전체 Ingress 목록 보여줘", "모든 접속 주소 확인"
 필수 JSON 형식: { "command": "list_ingresses", "parameters": {} }
 
-14. 네임스페이스 목록 조회 (command: "list_namespaces")
+13. 네임스페이스 목록 조회 (command: "list_namespaces")
 설명: 클러스터의 모든 네임스페이스 목록을 조회하는 명령입니다.
 사용자 입력 예시: "모든 네임스페이스 조회해줘", "네임스페이스 목록 보여줘", "전체 네임스페이스 확인"
 필수 JSON 형식: { "command": "list_namespaces", "parameters": {} }
 
-15. 네임스페이스 앱 목록 조회 (command: "list_apps")
+14. 네임스페이스 앱 목록 조회 (command: "list_apps")
 설명: 특정 네임스페이스의 모든 애플리케이션(Deployment) 목록을 조회하는 명령입니다.
 사용자 입력 예시: "test 네임스페이스 앱 목록 보여줘", "default 네임스페이스 모든 앱 확인", "특정 네임스페이스 앱 목록 조회"
 필수 JSON 형식: { "command": "list_apps", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
 일반 규칙:
-- 사용자의 의도가 불분명하거나 위 15가지 명령어 중 어느 것과도 일치하지 않으면: { "command": "unknown", "parameters": { "query": "<사용자_원본_입력>" } }
+- 사용자의 의도가 불분명하거나 위 14가지 명령어 중 어느 것과도 일치하지 않으면: { "command": "unknown", "parameters": { "query": "<사용자_원본_입력>" } }
 - appName이 명시되지 않은 경우, 컨텍스트상 기본 앱이 있다면 그 이름을 사용하거나 null을 반환합니다.
 - 오직 JSON 객체만 반환하며, 추가 설명이나 대화는 포함하지 않습니다."""
         

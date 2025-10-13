@@ -16,7 +16,6 @@ from .api.v1.system import router as system_router
 from .api.v1.dashboard import router as dashboard_router
 from .api.v1.deployments import router as deployments_router
 from .api.v1.nlp import router as nlp_router
-from .api.v1.commands import router as commands_router
 from .api.v1.cicd import router as cicd_router
 from .api.v1.k8s import router as k8s_router
 from .api.v1.monitoring import router as monitoring_router
@@ -112,7 +111,6 @@ def create_app() -> FastAPI:
     app.include_router(dashboard_router, prefix="/api/v1", tags=["dashboard"])
     app.include_router(deployments_router, prefix="/api/v1", tags=["deployments"])
     app.include_router(nlp_router, prefix="/api/v1", tags=["nlp"])
-    app.include_router(commands_router, prefix="/api/v1", tags=["commands"])
     app.include_router(cicd_router, prefix="/api/v1", tags=["cicd"])
     app.include_router(k8s_router, prefix="/api/v1", tags=["k8s"])
     app.include_router(monitoring_router, prefix="/api/v1", tags=["monitoring"])

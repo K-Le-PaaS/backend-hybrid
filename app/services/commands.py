@@ -10,7 +10,7 @@ from kubernetes import client
 from kubernetes.client.rest import ApiException
 
 from .deployments import DeployApplicationInput, perform_deploy
-from .k8s_client import get_apps_v1_api, get_core_v1_api
+from .k8s_client import get_apps_v1_api, get_core_v1_api, get_networking_v1_api
 
 
 class CommandRequest(BaseModel):
@@ -414,10 +414,7 @@ async def _execute_get_endpoints(args: Dict[str, Any]) -> Dict[str, Any]:
     namespace = args["namespace"]
     
     try:
-        from kubernetes import client
-        # Use the same configured API client as CoreV1 to avoid defaulting to localhost
-        core_v1 = get_core_v1_api()
-        networking_v1 = client.NetworkingV1Api(api_client=core_v1.api_client)
+        networking_v1 = get_networking_v1_api()
         
         # Ingress 조회 - 해당 서비스와 연결된 Ingress 찾기
         try:
@@ -675,7 +672,6 @@ async def _execute_list_pods(args: Dict[str, Any]) -> Dict[str, Any]:
             
             # Pod 생성 시간 계산
             if pod.metadata.creation_timestamp:
-                from datetime import datetime, timezone
                 now = datetime.now(timezone.utc)
                 age = now - pod.metadata.creation_timestamp
                 pod_info["age"] = str(age).split('.')[0]  # 초 단위 제거
@@ -705,13 +701,9 @@ async def _execute_get_overview(args: Dict[str, Any]) -> Dict[str, Any]:
     namespace = args.get("namespace", "default")
     
     try:
-        from kubernetes import client
         apps_v1 = get_apps_v1_api()
         core_v1 = get_core_v1_api()
-        
-        # Use the same api_client as get_core_v1_api() to ensure correct cluster context
-        api_client = get_core_v1_api().api_client 
-        networking_v1 = client.NetworkingV1Api(api_client)
+        networking_v1 = get_networking_v1_api()
         
         overview_data = {
             "namespace": namespace,
@@ -955,11 +947,7 @@ async def _execute_list_all_ingresses(args: Dict[str, Any]) -> Dict[str, Any]:
     예: "모든 도메인 조회해줘", "전체 Ingress 목록 보여줘"
     """
     try:
-        from kubernetes import client
-        
-        # Use the same api_client as get_core_v1_api() to ensure correct cluster context
-        api_client = get_core_v1_api().api_client 
-        networking_v1 = client.NetworkingV1Api(api_client)
+        networking_v1 = get_networking_v1_api()
         
         # 모든 네임스페이스의 Ingress 조회
         ingresses = networking_v1.list_ingress_for_all_namespaces()
@@ -1020,7 +1008,6 @@ async def _execute_list_namespaces(args: Dict[str, Any]) -> Dict[str, Any]:
             
             # 네임스페이스 생성 시간 계산
             if namespace.metadata.creation_timestamp:
-                from datetime import datetime, timezone
                 now = datetime.now(timezone.utc)
                 age = now - namespace.metadata.creation_timestamp
                 namespace_info["age"] = str(age).split('.')[0]  # 초 단위 제거
@@ -1069,7 +1056,6 @@ async def _execute_list_deployments(args: Dict[str, Any]) -> Dict[str, Any]:
             
             # Deployment 생성 시간 계산
             if deployment.metadata.creation_timestamp:
-                from datetime import datetime, timezone
                 now = datetime.now(timezone.utc)
                 age = now - deployment.metadata.creation_timestamp
                 deployment_info["age"] = str(age).split('.')[0]  # 초 단위 제거
