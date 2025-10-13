@@ -260,6 +260,15 @@ async def github_push_webhook(
     if not integ.sc_project_id or not integ.sc_repo_name:
         raise HTTPException(status_code=409, detail="sourcecommit mapping missing: call create-and-link first")
 
+    # 🔧 추가: auto_deploy_enabled 상태 확인
+    if not getattr(integ, 'auto_deploy_enabled', False):
+        return {
+            "status": "skipped", 
+            "reason": "auto_deploy_disabled",
+            "repository": full_name,
+            "message": "Auto deploy is disabled for this repository"
+        }
+
     # 2) SourceCommit 확인 및 미러링
     ensure = ensure_sourcecommit_repo(integ.sc_project_id, integ.sc_repo_name)
     if ensure.get("status") not in ("created", "exists"):

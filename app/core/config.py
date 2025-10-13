@@ -152,11 +152,18 @@ class Settings(BaseSettings):
     google_client_secret: str | None = None
     github_client_id: str | None = None
     github_client_secret: str | None = None
+    
+    # JWT Configuration
+    secret_key: str = Field(default="your-secret-key-here", description="JWT secret key")
 
     
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
+
+
+# 기존 코드와의 호환성을 위한 settings 인스턴스
+settings = get_settings()
 
 

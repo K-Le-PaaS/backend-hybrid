@@ -58,7 +58,7 @@ def init_database():
     import structlog
     from .models.base import Base
     from .models.audit_log import AuditLogModel
-    from .models.deployment_history import DeploymentHistoryModel
+    from .models.deployment_history import DeploymentHistory
     
     logger = structlog.get_logger(__name__)
     

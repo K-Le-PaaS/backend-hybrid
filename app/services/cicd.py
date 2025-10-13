@@ -81,6 +81,34 @@ async def handle_push_event(event: Dict[str, Any]) -> Dict[str, Any]:
     if not is_merge:
         return {"status": "ignored", "reason": "not a PR merge commit"}
 
+    # 🔧 추가: auto_deploy_enabled 상태 확인
+    # GitHub App installation_id로 사용자 설정 조회
+    installation_id = event.get("installation", {}).get("id")
+    if installation_id:
+        try:
+            from ..database import SessionLocal
+            from ..models.user_project_integration import UserProjectIntegration
+            
+            db = SessionLocal()
+            try:
+                # installation_id로 통합 정보 조회
+                integration = db.query(UserProjectIntegration).filter(
+                    UserProjectIntegration.github_installation_id == str(installation_id)
+                ).first()
+                
+                if integration and not getattr(integration, 'auto_deploy_enabled', False):
+                    return {
+                        "status": "skipped", 
+                        "reason": "auto_deploy_disabled",
+                        "repository": event.get("repository", {}).get("full_name", "unknown"),
+                        "message": "Auto deploy is disabled for this repository"
+                    }
+            finally:
+                db.close()
+        except Exception as e:
+            log.warning("Failed to check auto_deploy_enabled status", error=str(e))
+            # DB 조회 실패 시에도 배포는 진행 (기존 동작 유지)
+
     repo = event.get("repository", {}).get("name", "app")
     # simplistic image tag using commit sha short
     commit = (event.get("after") or "")[:7] or "latest"

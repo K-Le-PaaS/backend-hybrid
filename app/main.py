@@ -22,12 +22,14 @@ from .api.v1.k8s import router as k8s_router
 from .api.v1.monitoring import router as monitoring_router
 from .api.v1.tutorial import router as tutorial_router
 from .api.v1.websocket import router as websocket_router
+from .websocket.deployment_monitor import handle_deployment_websocket, handle_user_websocket
 from .api.v1.slack_auth import router as slack_auth_router
 from .api.v1.oauth2 import router as oauth2_router
 from .api.v1.auth_verify import router as auth_verify_router
 from .api.v1.github_workflows import router as github_workflows_router
 from .api.v1.github_oauth import router as github_oauth_router
 from .api.v1.projects import router as projects_router
+from .api.v1.deployment_histories import router as deployment_histories_router
 from .mcp.external.api import router as mcp_external_router
 from .core.error_handler import setup_error_handlers
 from .core.logging_config import setup_logging
@@ -36,7 +38,7 @@ from .database import init_database, init_services, get_db
 # 모든 모델을 import하여 테이블이 생성되도록 함
 from .models.user_repository import UserRepository
 from .models.command_history import CommandHistory
-from .models.deployment_history import DeploymentHistoryModel
+from .models.deployment_history import DeploymentHistory
 from .models.audit_log import AuditLogModel
 import structlog
 
@@ -122,6 +124,7 @@ def create_app() -> FastAPI:
     app.include_router(oauth2_router, prefix="/api/v1", tags=["oauth2"])
     app.include_router(github_oauth_router, prefix="/api/v1", tags=["auth", "github"])
     app.include_router(projects_router, prefix="/api/v1", tags=["projects"])
+    app.include_router(deployment_histories_router, prefix="/api/v1", tags=["deployment-histories"])
     app.include_router(auth_verify_router, prefix="/api/v1", tags=["auth"])
     app.include_router(github_workflows_router, prefix="/api/v1", tags=["github"])
     app.include_router(mcp_external_router, tags=["mcp-external"])
