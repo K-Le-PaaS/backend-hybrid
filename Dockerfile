@@ -12,10 +12,9 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 # Install NCP IAM Authenticator for NKS cluster access
-RUN curl -L -o /usr/local/bin/ncp-iam-authenticator "https://github.com/NaverCloudPlatform/ncp-iam-authenticator/releases/latest/download/ncp-iam-authenticator_linux_amd64" && \
+RUN curl -L -o /usr/local/bin/ncp-iam-authenticator "https://kr.object.ncloudstorage.com/nks-download/ncp-iam-authenticator/v1.0.0/linux/amd64/ncp-iam-authenticator" && \
     chmod +x /usr/local/bin/ncp-iam-authenticator && \
-    ncp-iam-authenticator --version && \
-    rm -f /tmp/ncp-iam-authenticator*
+    ncp-iam-authenticator --version
 
 # Add a non-root user
 RUN useradd --create-home appuser
