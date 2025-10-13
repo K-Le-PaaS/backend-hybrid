@@ -6,7 +6,13 @@ from typing import Dict
 
 
 class Settings(BaseSettings):
-    model_config = ConfigDict(env_prefix="KLEPAAS_", extra="ignore", protected_namespaces=('settings_',))
+    model_config = ConfigDict(
+        env_prefix="KLEPAAS_", 
+        extra="ignore", 
+        protected_namespaces=('settings_',),
+        env_file=".env",
+        env_file_encoding="utf-8"
+    )
     app_name: str = Field(default="K-Le-PaaS Backend Hybrid")
     app_version: str = Field(default="0.1.0")
 
@@ -38,6 +44,10 @@ class Settings(BaseSettings):
     enable_k8s_deploy: bool = False
     k8s_staging_namespace: str = "staging"
     k8s_image_pull_secret: str | None = "ncp-cr"
+    
+    # Kubernetes Config 경로 (환경별 다른 클러스터 사용 시)
+    k8s_config_file: str | None = Field(default=None, description="Kubeconfig 파일 경로 (기본: ~/.kube/config)")
+    k8s_context: str | None = Field(default=None, description="사용할 Kubernetes context")
 
     # MCP trigger (optional)
     mcp_trigger_provider: str | None = None

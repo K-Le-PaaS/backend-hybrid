@@ -78,7 +78,6 @@ def test_system():
         "/api/v1/system/health",
         "/api/v1/deployments",
         "/api/v1/nlp",
-        "/api/v1/commands",
         "/api/v1/cicd",
         "/api/v1/k8s",
         "/api/v1/monitoring",

@@ -1,5 +1,9 @@
 # NCP SourceDeploy Scenario 수동 생성 가이드
 
+> **배경 및 목적**: NCP SourceDeploy API를 통한 시나리오 자동 생성이 실패할 때 NCP Console에서 수동으로 시나리오를 생성하고 실제 API 페이로드를 캡처하여 정확한 스키마를 파악하기 위한 단계별 가이드입니다.
+
+---
+
 ## 상황
 - 자동 생성 실패: 에러 330900 "unknown"
 - 프로젝트 ID: 12922 (API로 생성됨, 하지만 조회 안 됨)
@@ -69,7 +73,7 @@ Scenario가 성공적으로 생성되면:
 
 1. **코드 업데이트**: `app/services/ncp_pipeline.py`의 시나리오 생성 body를 위에서 캡처한 payload로 수정
 2. **테스트**: 다시 자동 생성 테스트
-3. **문서화**: 정확한 스키마를 `NCP_SCENARIO_DEBUG.md`에 추가
+3. **문서화**: 정확한 스키마를 문서에 추가
 
 ## 대안: 수동 생성만 사용
 
@@ -109,3 +113,10 @@ Scenario 생성 자동화가 불가능하다면:
 **유일한 해결책: NCP Console에서 수동 생성 시 실제 API 페이로드 캡처**
 
 이것이 NCP API의 정확한 스키마를 알 수 있는 유일한 방법입니다.
+
+---
+
+**관련 문서**:
+- [NCP 시나리오 디버깅](./NCP_SCENARIO_DEBUG.md)
+- [NCP 이미지 이름 수정](./NCP_IMAGE_NAME_FIX.md)
+

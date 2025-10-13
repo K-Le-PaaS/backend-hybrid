@@ -1,11 +1,17 @@
 # NCP SourceDeploy Scenario 생성 디버깅 가이드
 
+> **배경 및 목적**: NCP SourceDeploy API를 통한 시나리오 자동 생성 시 발생하는 에러 330900 "unknown"을 해결하기 위한 디버깅 가이드입니다. 수동 생성을 통해 정확한 API 스키마를 파악하는 방법을 제시합니다.
+
+---
+
 ## 문제 상황
+
 - Deploy 프로젝트: **12920** ✅ 생성 성공
 - Stage: **14146** (production) ✅ 생성 성공
 - Scenario: ❌ **생성 실패** (에러 330900 "unknown")
 
 ## 로그 분석
+
 ```
 deploy_project_id=12920
 stage_id=14146
@@ -105,7 +111,7 @@ sc_repo_id=634466
 
 ## 해결 방법
 
-### 옵션 1: NCP Console에서 수동 생성 후 API 페이로드 확인
+### 옵션 1: NCP Console에서 수동 생성 후 API 페이로드 확인 (권장)
 
 1. **NCP Console 접속**
    - https://console.ncloud.com
@@ -162,3 +168,10 @@ if not scenario_id:
 2. [ ] 정확한 API 페이로드 스키마 확인
 3. [ ] 코드 수정 및 테스트
 4. [ ] 또는 NCP 지원팀 문의
+
+---
+
+**관련 문서**:
+- [NCP 시나리오 수동 생성 가이드](./NCP_SCENARIO_MANUAL_CREATION.md)
+- [NCP 이미지 이름 수정](./NCP_IMAGE_NAME_FIX.md)
+
