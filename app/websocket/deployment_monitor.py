@@ -9,7 +9,8 @@ import json
 import asyncio
 from typing import Dict, List, Set, Optional
 from fastapi import WebSocket, WebSocketDisconnect
-from datetime import datetime
+from fastapi.websockets import WebSocketState
+from datetime import datetime, timezone
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -33,11 +34,24 @@ class DeploymentMonitorManager:
         
         # 초기화 상태
         self.is_initialized = False
+
+        # 배포별 최근 이벤트 저장: {deployment_id: [message, ...]}
+        # 새로고침/재연결 시 스냅샷 재전송에 사용 (간단한 순차 복원)
+        self.deployment_last_events: Dict[str, List[dict]] = {}
+        # 이벤트 저장 상한 (메모리 보호)
+        self.max_events_per_deployment: int = 200
+
+        # 스테이지 시작 시각 저장: {deployment_id: {stage: datetime}}
+        self.stage_started_at: Dict[str, Dict[str, datetime]] = {}
     
     async def initialize(self):
         """매니저 초기화"""
         self.is_initialized = True
         logger.info("DeploymentMonitorManager initialized")
+
+    def _utcnow_iso(self) -> str:
+        """UTC now in ISO8601 with timezone (e.g., +00:00) to avoid client TZ drift."""
+        return datetime.now(timezone.utc).isoformat()
     
     async def connect(self, websocket: WebSocket, connection_id: str, deployment_id: str = None, user_id: str = None):
         """기존 API와 호환성을 위한 연결 메서드"""
@@ -122,6 +136,9 @@ class DeploymentMonitorManager:
             deployment_id = data.get("deployment_id")
             user_id = data.get("user_id")
             
+            logger.info(f"Received subscribe message: subscriber_id={subscriber_id}, deployment_id={deployment_id}, user_id={user_id}")
+            logger.info(f"Connection ID: {connection_id}")
+            
             if subscriber_id and connection_id in self.connections:
                 websocket = self.connections[connection_id]
                 
@@ -141,12 +158,32 @@ class DeploymentMonitorManager:
                 
                 # 사용자별 연결 등록
                 if user_id:
+                    logger.info(f"Registering user {user_id} for WebSocket connection")
                     if user_id not in self.user_connections:
                         self.user_connections[user_id] = []
                     if websocket not in self.user_connections[user_id]:
                         self.user_connections[user_id].append(websocket)
+                        logger.info(f"User {user_id} registered. Total connections: {len(self.user_connections[user_id])}")
+                    else:
+                        logger.info(f"User {user_id} already registered")
                 
                 logger.info(f"Subscriber {subscriber_id} registered for deployment {deployment_id}, user {user_id}")
+
+                # 구독 직후 스냅샷 재전송 (해당 배포의 최근 이벤트들을 순서대로 전달)
+                try:
+                    if deployment_id and deployment_id in self.deployment_last_events:
+                        snapshot_events = self.deployment_last_events[deployment_id]
+                        logger.info(
+                            f"Replaying {len(snapshot_events)} cached events to connection {connection_id} for deployment {deployment_id}"
+                        )
+                        for evt in snapshot_events:
+                            try:
+                                await websocket.send_json(evt)
+                            except Exception as replay_err:
+                                logger.warning(f"Failed to replay cached event: {replay_err}")
+                                break
+                except Exception as e:
+                    logger.warning(f"Snapshot replay failed: {e}")
                 
         elif message_type == "unsubscribe":
             # 구독 해제 처리
@@ -238,65 +275,117 @@ class DeploymentMonitorManager:
     async def send_to_websocket(self, websocket: WebSocket, message: dict):
         """특정 WebSocket에 메시지 전송"""
         try:
+            # WebSocket 연결 상태 확인
+            if websocket.client_state != WebSocketState.CONNECTED:
+                logger.warning(f"WebSocket not connected, skipping message: {message.get('type', 'unknown')}")
+                return False
+                
             await websocket.send_text(json.dumps(message, ensure_ascii=False))
+            logger.info(f"Message sent to WebSocket: {message.get('type', 'unknown')}")
+            return True
         except Exception as e:
             logger.error(f"Failed to send message to WebSocket: {e}")
             await self.disconnect(websocket)
+            return False
     
     async def broadcast_to_deployment(self, deployment_id: str, message: dict):
         """특정 배포의 모든 연결에 메시지 브로드캐스트"""
         if deployment_id not in self.deployment_connections:
-                return
+            return
             
         connections = self.deployment_connections[deployment_id].copy()
         for websocket in connections:
-            await self.send_to_websocket(websocket, message)
+            success = await self.send_to_websocket(websocket, message)
+            if not success:
+                # 연결이 끊어진 경우 연결 목록에서 제거
+                if websocket in self.deployment_connections[deployment_id]:
+                    self.deployment_connections[deployment_id].remove(websocket)
     
     async def broadcast_to_user(self, user_id: str, message: dict):
         """특정 사용자의 모든 연결에 메시지 브로드캐스트"""
+        logger.info(f"Broadcasting to user {user_id}")
+        logger.info(f"Available user connections: {list(self.user_connections.keys())}")
+        
         if user_id not in self.user_connections:
-                return
+            logger.warning(f"User {user_id} not found in user_connections")
+            return
             
         connections = self.user_connections[user_id].copy()
+        logger.info(f"Found {len(connections)} connections for user {user_id}")
+        
         for websocket in connections:
-            await self.send_to_websocket(websocket, message)
+            success = await self.send_to_websocket(websocket, message)
+            if not success:
+                # 연결이 끊어진 경우 연결 목록에서 제거
+                if websocket in self.user_connections[user_id]:
+                    self.user_connections[user_id].remove(websocket)
     
     async def send_deployment_started(self, deployment_id: str, user_id: str, data: dict):
         """배포 시작 알림"""
         message = {
             "type": "deployment_started",
             "deployment_id": deployment_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": self._utcnow_iso(),
+            "started_at": self._utcnow_iso(),
             "data": data
         }
         
+        logger.info(f"Broadcasting deployment_started message: {message}")
+        logger.info(f"User connections for user {user_id}: {list(self.user_connections.keys())}")
+        logger.info(f"Deployment connections for deployment {deployment_id}: {list(self.deployment_connections.keys())}")
+
+        self._record_deployment_event(deployment_id, message)
         await self.broadcast_to_deployment(deployment_id, message)
         await self.broadcast_to_user(user_id, message)
     
     async def send_stage_started(self, deployment_id: str, user_id: str, stage: str, data: dict):
         """단계 시작 알림"""
+        # 시작 시간 기록
+        try:
+            if deployment_id not in self.stage_started_at:
+                self.stage_started_at[deployment_id] = {}
+            self.stage_started_at[deployment_id][stage] = datetime.now(timezone.utc)
+        except Exception:
+            pass
         message = {
             "type": "stage_started",
             "deployment_id": deployment_id,
             "stage": stage,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": self._utcnow_iso(),
+            "started_at": (self.stage_started_at.get(deployment_id, {}).get(stage) or datetime.now(timezone.utc)).isoformat(),
             "data": data
         }
-        
+        self._record_deployment_event(deployment_id, message)
         await self.broadcast_to_deployment(deployment_id, message)
         await self.broadcast_to_user(user_id, message)
     
     async def send_stage_completed(self, deployment_id: str, user_id: str, stage: str, status: str, data: dict):
         """단계 완료 알림"""
+        # duration이 없으면 서버에서 계산(UTC 기준)
+        duration_val = None
+        try:
+            if isinstance(data, dict):
+                duration_val = data.get("duration")
+        except Exception:
+            duration_val = None
+        if duration_val in (None, 0):
+            try:
+                started_dt = self.stage_started_at.get(deployment_id, {}).get(stage)
+                if started_dt:
+                    duration_val = max(0, int((datetime.now(timezone.utc) - started_dt).total_seconds()))
+            except Exception:
+                duration_val = None
         message = {
             "type": "stage_completed",
             "deployment_id": deployment_id,
             "stage": stage,
             "status": status,  # success, failed
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": self._utcnow_iso(),
+            "completed_at": datetime.utcnow().isoformat(),
+            "duration": duration_val,
             "data": data
         }
-        
+        self._record_deployment_event(deployment_id, message)
         await self.broadcast_to_deployment(deployment_id, message)
         await self.broadcast_to_user(user_id, message)
     
@@ -306,12 +395,83 @@ class DeploymentMonitorManager:
             "type": "deployment_completed",
             "deployment_id": deployment_id,
             "status": status,  # success, failed
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": self._utcnow_iso(),
+            "completed_at": datetime.utcnow().isoformat(),
+            "total_duration": data.get("total_duration") if isinstance(data, dict) else None,
             "data": data
         }
-        
+        self._record_deployment_event(deployment_id, message)
         await self.broadcast_to_deployment(deployment_id, message)
         await self.broadcast_to_user(user_id, message)
+    
+    async def send_stage_progress(self, deployment_id: str, user_id: str, stage: str, progress: int, elapsed_time: int, message: str = None):
+        """단계별 실시간 진행률 전송"""
+        # elapsed_time이 0/없으면 started_at 기준으로 계산해 채움
+        started_dt = None
+        try:
+            started_dt = self.stage_started_at.get(deployment_id, {}).get(stage)
+        except Exception:
+            started_dt = None
+        # 처음 progress가 들어오는 경우에도 시작시각이 없을 수 있으므로 여기서 초기화
+        if started_dt is None:
+            try:
+                if deployment_id not in self.stage_started_at:
+                    self.stage_started_at[deployment_id] = {}
+                self.stage_started_at[deployment_id][stage] = datetime.now(timezone.utc)
+                started_dt = self.stage_started_at[deployment_id][stage]
+            except Exception:
+                started_dt = None
+        computed_elapsed = None
+        if started_dt is not None:
+            try:
+                computed_elapsed = max(0, int((datetime.now(timezone.utc) - started_dt).total_seconds()))
+            except Exception:
+                computed_elapsed = None
+        use_elapsed = elapsed_time if (isinstance(elapsed_time, int) and elapsed_time > 0) else (computed_elapsed or 0)
+        websocket_message = {
+            "type": "stage_progress",
+            "deployment_id": deployment_id,
+            "user_id": user_id,
+            "stage": stage,
+            "progress": progress,  # 0-100
+            "elapsed_time": use_elapsed,  # 초 단위
+            "message": message,
+            "started_at": started_dt.isoformat() if started_dt else None,
+            "timestamp": self._utcnow_iso()
+        }
+        
+        logger.info(f"Sending stage_progress: {stage} - {progress}% for deployment {deployment_id}")
+        logger.info(f"Stage progress message: {websocket_message}")
+        self._record_deployment_event(deployment_id, websocket_message)
+        await self.broadcast_to_deployment(deployment_id, websocket_message)
+        await self.broadcast_to_user(user_id, websocket_message)
+
+    def _record_deployment_event(self, deployment_id: str, message: dict) -> None:
+        """배포별 최근 이벤트를 저장한다. 구독 시 스냅샷 재전송에 사용."""
+        try:
+            if not deployment_id:
+                return
+            if deployment_id not in self.deployment_last_events:
+                self.deployment_last_events[deployment_id] = []
+            events = self.deployment_last_events[deployment_id]
+
+            # 같은 타입/스테이지의 진행 이벤트는 최신으로 교체하여 중복 축소 (특히 stage_progress)
+            replaced = False
+            if message.get("type") == "stage_progress":
+                stage = message.get("stage")
+                for i in range(len(events) - 1, -1, -1):
+                    evt = events[i]
+                    if evt.get("type") == "stage_progress" and evt.get("stage") == stage:
+                        events[i] = message
+                        replaced = True
+                        break
+            if not replaced:
+                events.append(message)
+            # 상한 관리
+            if len(events) > self.max_events_per_deployment:
+                self.deployment_last_events[deployment_id] = events[-self.max_events_per_deployment:]
+        except Exception as e:
+            logger.warning(f"Failed to record deployment event: {e}")
     
     def get_connection_stats(self) -> dict:
         """연결 통계 반환"""

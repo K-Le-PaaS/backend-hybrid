@@ -1,5 +1,6 @@
 from typing import Any, Dict, Optional
 import json
+import asyncio
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel, Field
@@ -16,6 +17,44 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def simulate_progress(
+    deployment_monitor_manager,
+    deployment_id: str,
+    user_id: str,
+    stage: str,
+    start_progress: int,
+    end_progress: int,
+    duration_seconds: int,
+    message_template: str,
+    steps: int = 10
+):
+    """연속적인 진행률을 시뮬레이션합니다."""
+    progress_step = (end_progress - start_progress) / steps
+    time_step = duration_seconds / steps
+    
+    for i in range(steps + 1):
+        current_progress = int(start_progress + (progress_step * i))
+        # 각 단계별로 독립적인 카운터 (0부터 시작)
+        stage_counter = i
+        
+        # 마지막 단계에서는 정확한 end_progress로 설정
+        if i == steps:
+            current_progress = end_progress
+        
+        await deployment_monitor_manager.send_stage_progress(
+            deployment_id=deployment_id,
+            user_id=user_id,
+            stage=stage,
+            progress=current_progress,
+            elapsed_time=0,  # 프론트엔드에서 자체 카운터 사용
+            message=message_template
+        )
+        
+        # 마지막 단계가 아니면 대기
+        if i < steps:
+            await asyncio.sleep(time_step)
 
 
 async def get_pr_ci_status(client, token: str, repo_full_name: str, pr_number: int) -> str:
@@ -999,24 +1038,52 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
         # WebSocket으로 배포 시작 알림
         from ...websocket.deployment_monitor import deployment_monitor_manager
         
-        await deployment_monitor_manager.send_deployment_started(
-            deployment_id=str(deployment_history.id),
-            user_id=integration.user_id,
-            data={
-                "repository": f"{integration.github_owner}/{integration.github_repo}",
-                "commit": {
-                    "sha": head_commit.get("id"),
-                    "message": head_commit.get("message"),
-                    "author": head_commit.get("author", {}).get("name")
-                },
-                "trigger": {
-                    "type": "merge" if is_merge else "push",
-                    "actor": pusher
+        logger.info(f"Sending deployment_started WebSocket message for deployment {deployment_history.id}")
+        logger.info(f"User ID: {integration.user_id}, Repository: {integration.github_owner}/{integration.github_repo}")
+        
+        try:
+            await deployment_monitor_manager.send_deployment_started(
+                deployment_id=str(deployment_history.id),
+                user_id=integration.user_id,
+                data={
+                    "repository": f"{integration.github_owner}/{integration.github_repo}",
+                    "commit": {
+                        "sha": head_commit.get("id"),
+                        "message": head_commit.get("message"),
+                        "author": head_commit.get("author", {}).get("name")
+                    },
+                    "trigger": {
+                        "type": "merge" if is_merge else "push",
+                        "actor": pusher
+                    }
                 }
-            }
-        )
+            )
+            logger.info(f"deployment_started message sent successfully for deployment {deployment_history.id}")
+        except Exception as e:
+            logger.error(f"Failed to send deployment_started message: {str(e)}")
+            raise
         
         # Step 1: SourceCommit 연동 확인 및 미러링
+        # SourceCommit 시작 알림
+        await deployment_monitor_manager.send_stage_progress(
+            deployment_id=str(deployment_history.id),
+            user_id=integration.user_id,
+            stage="sourcecommit",
+            progress=0,
+            elapsed_time=0,
+            message="Starting SourceCommit mirroring..."
+        )
+        
+        # 0-30%: GitHub 토큰 획득 및 SourceCommit 리포지토리 확인
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcecommit",
+            0, 30, 2, "Getting GitHub token and checking SourceCommit repository..."
+        )
+        
+        # 실제 작업: GitHub 토큰 획득 및 SourceCommit 리포지토리 확인
         sourcecommit_result = await handle_sourcecommit_mirror(payload, integration, db)
         if sourcecommit_result.get("status") != "success":
             # SourceCommit 실패 시 배포 히스토리 업데이트
@@ -1037,6 +1104,33 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
             )
             
             return sourcecommit_result
+        
+        # 30-60%: Git clone --mirror 완료
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcecommit",
+            30, 60, 3, "Cloning repository from GitHub..."
+        )
+        
+        # 60-90%: K8s 매니페스트 주입 (선택적)
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcecommit",
+            60, 90, 2, "Adding Kubernetes manifests..."
+        )
+        
+        # 90-100%: SourceCommit 푸시 완료
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcecommit",
+            90, 100, 1, "Pushing to SourceCommit..."
+        )
         
         # SourceCommit 성공 시 배포 히스토리 업데이트
         deployment_history.sourcecommit_status = "success"
@@ -1079,6 +1173,25 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
         # SourceBuild 시작 시간 기록
         sourcebuild_start_time = datetime.utcnow()
         
+        # SourceBuild 시작 알림
+        await deployment_monitor_manager.send_stage_progress(
+            deployment_id=str(deployment_history.id),
+            user_id=integration.user_id,
+            stage="sourcebuild",
+            progress=0,
+            elapsed_time=0,
+            message="Starting SourceBuild..."
+        )
+        
+        # 0-20%: 프로젝트 상세 조회
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcebuild",
+            0, 20, 2, "Analyzing project configuration..."
+        )
+        
         # SourceBuild 프로젝트 확인/생성 (build/run과 동일)
         build_id = await ensure_sourcebuild_project(
             owner=integration.github_owner,
@@ -1090,9 +1203,36 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
             user_id=integration.user_id
         )
         
+        # 20-50%: 빌드 트리거 API 호출
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcebuild",
+            20, 50, 2, "Triggering Docker build..."
+        )
+        
         # SourceBuild 실행 (build/run과 동일)
         build_result = await run_sb(build_id, image_repo=image_repo)
         logger.info(f"SourceBuild completed: {build_result}")
+        
+        # 50-80%: 빌드 진행 중
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcebuild",
+            50, 80, 3, "Building Docker image..."
+        )
+        
+        # 80-100%: 이미지 푸시 완료
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcebuild",
+            80, 100, 2, "Pushing image to registry..."
+        )
         
         # SourceBuild 결과에 따른 배포 히스토리 업데이트
         if build_result.get("status") == "success":
@@ -1112,6 +1252,17 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
             deployment_history.completed_at = datetime.utcnow()
         
         db.commit()
+        
+        # SourceBuild 완료 진행률 전송
+        sourcebuild_duration = (datetime.utcnow() - sourcebuild_start_time).total_seconds()
+        await deployment_monitor_manager.send_stage_progress(
+            deployment_id=str(deployment_history.id),
+            user_id=integration.user_id,
+            stage="sourcebuild",
+            progress=100,
+            elapsed_time=int(sourcebuild_duration),
+            message="SourceBuild completed" if build_result.get("status") == "success" else "SourceBuild failed"
+        )
         
         # WebSocket으로 SourceBuild 완료 알림
         await deployment_monitor_manager.send_stage_completed(
@@ -1137,6 +1288,25 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
         
         # SourceDeploy 시작 시간 기록
         sourcedeploy_start_time = datetime.utcnow()
+        
+        # SourceDeploy 시작 알림
+        await deployment_monitor_manager.send_stage_progress(
+            deployment_id=str(deployment_history.id),
+            user_id=integration.user_id,
+            stage="sourcedeploy",
+            progress=0,
+            elapsed_time=0,
+            message="Starting SourceDeploy..."
+        )
+        
+        # 0-25%: K8s 매니페스트 생성
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcedeploy",
+            0, 25, 2, "Generating Kubernetes manifests..."
+        )
         
         # 배포 매니페스트 생성 (deploy/run과 동일)
         manifest_text = f"""
@@ -1164,6 +1334,15 @@ spec:
         
         nks_cluster_id = getattr(settings, "ncp_nks_cluster_id", None)
         
+        # 25-50%: SourceDeploy 프로젝트 확인/생성
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcedeploy",
+            25, 50, 2, "Setting up deployment project..."
+        )
+        
         # SourceDeploy 프로젝트 확인/생성 (deploy/run과 동일)
         deploy_project_id = await ensure_sourcedeploy_project(
             owner=integration.github_owner,
@@ -1172,6 +1351,15 @@ spec:
             nks_cluster_id=nks_cluster_id,
             db=db,
             user_id=integration.user_id,
+        )
+        
+        # 50-75%: 배포 실행 API 호출
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcedeploy",
+            50, 75, 2, "Triggering Kubernetes deployment..."
         )
         
         # SourceDeploy 실행 (deploy/run과 동일)
@@ -1187,6 +1375,15 @@ spec:
         )
         
         logger.info(f"SourceDeploy completed: {deploy_result}")
+        
+        # 75-100%: 배포 완료 대기
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcedeploy",
+            75, 100, 3, "Waiting for deployment completion..."
+        )
         
         # SourceDeploy 결과에 따른 배포 히스토리 업데이트
         if deploy_result.get("status") in ["started", "success"]:
@@ -1208,6 +1405,17 @@ spec:
             deployment_history.completed_at = datetime.utcnow()
         
         db.commit()
+        
+        # SourceDeploy 완료 진행률 전송
+        sourcedeploy_duration = (datetime.utcnow() - sourcedeploy_start_time).total_seconds()
+        await deployment_monitor_manager.send_stage_progress(
+            deployment_id=str(deployment_history.id),
+            user_id=integration.user_id,
+            stage="sourcedeploy",
+            progress=100,
+            elapsed_time=int(sourcedeploy_duration),
+            message="SourceDeploy completed" if deploy_result.get("status") in ["started", "success"] else "SourceDeploy failed"
+        )
         
         # WebSocket으로 SourceDeploy 완료 알림
         await deployment_monitor_manager.send_stage_completed(

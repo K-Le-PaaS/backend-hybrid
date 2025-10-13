@@ -6,7 +6,7 @@ CI/CD 파이프라인의 배포 히스토리를 조회하는 API 엔드포인트
 """
 
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, and_
 
@@ -70,7 +70,7 @@ async def get_deployment_histories(
         for deployment in deployments:
             deployment_list.append(deployment.to_dict())
         
-        return {
+        data = {
             "deployments": deployment_list,
             "pagination": {
                 "total": total_count,
@@ -83,6 +83,13 @@ async def get_deployment_histories(
                 "status": status
             }
         }
+        # Explicitly disable caching
+        from fastapi import Response
+        resp = Response(content=None)
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return data
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch deployment histories: {str(e)}")
