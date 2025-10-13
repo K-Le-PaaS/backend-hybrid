@@ -53,6 +53,16 @@ async def process_command(command_data: NaturalLanguageCommand):
         if len(command) > 500:
             raise HTTPException(status_code=400, detail="명령이 너무 깁니다. (최대 500자)")
         
+        # 로그 줄 수 제한 검증 (추가 검증)
+        if "줄" in command or "lines" in command.lower():
+            # 숫자 추출하여 제한 확인
+            import re
+            numbers = re.findall(r'\d+', command)
+            for num_str in numbers:
+                num = int(num_str)
+                if num > 100:
+                    raise HTTPException(status_code=400, detail="로그 줄 수는 최대 100줄까지 조회 가능합니다.")
+        
         # 위험한 명령어 체크
         dangerous_keywords = ['rm -rf', 'sudo', 'kill', 'format', 'delete all']
         if any(keyword in command.lower() for keyword in dangerous_keywords):
@@ -94,7 +104,9 @@ async def process_command(command_data: NaturalLanguageCommand):
                 app_name=entities.get("app_name") or "",
                 replicas=entities.get("replicas", 1),
                 lines=entities.get("lines", 30),
-                version=entities.get("version") or ""
+                version=entities.get("version") or "",
+                namespace=entities.get("namespace") or "default",
+                previous=bool(entities.get("previous", False))
             )
             
             logger.info(f"CommandRequest 생성: {req}")
@@ -202,4 +214,4 @@ async def get_command_suggestions(context: Optional[str] = None):
 
 
 # REMOVED: execute_kubernetes_command() - 레거시 코드
-# 현재는 POST 방식으로 /api/v1/commands/execute를 통해 백엔드에서 처리
+# 현재는 services/commands.py를 직접 호출하여 처리

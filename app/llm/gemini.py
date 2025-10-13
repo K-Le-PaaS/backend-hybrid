@@ -29,7 +29,9 @@ class GeminiClient(LLMClient):
                 "app_name": parameters.get("appName"),
                 "replicas": parameters.get("replicas", 1),
                 "lines": parameters.get("lines", 30),
-                "version": parameters.get("version", "")
+                "version": parameters.get("version", ""),
+                "namespace": parameters.get("namespace", "default"),
+                "previous": parameters.get("previous", False) if parameters.get("previous") is not None else False  # 이전 파드 로그 여부
             }
             
             # 명령어에 따른 기본 메시지 생성
@@ -43,6 +45,7 @@ class GeminiClient(LLMClient):
                 "endpoint": "엔드포인트 조회 명령을 해석했습니다.",
                 "restart": "재시작 명령을 해석했습니다.",
                 "list_pods": "파드 목록 조회 명령을 해석했습니다.",
+                "list_apps": "네임스페이스 앱 목록 조회 명령을 해석했습니다.",
                 "unknown": "알 수 없는 명령입니다."
             }
             
@@ -90,22 +93,26 @@ class GeminiClient(LLMClient):
 1. 상태 확인 (command: "status")
 설명: 배포된 애플리케이션의 현재 상태를 확인하는 명령입니다.
 사용자 입력 예시: "내 앱 상태 보여줘", "chat-app 상태 어때?", "서버 목록 확인"
-필수 JSON 형식: { "command": "status", "parameters": { "appName": "<추출된_앱이름_없으면_null>" } }
+필수 JSON 형식: { "command": "status", "parameters": { "appName": "<추출된_앱이름_없으면_null>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
 2. 로그 조회 (command: "logs")
 설명: 배포된 애플리케이션의 로그를 조회하는 명령입니다.
-사용자 입력 예시: "최신 로그 100줄 보여줘", "로그 확인", "에러 로그 찾아줘"
-필수 JSON 형식: { "command": "logs", "parameters": { "appName": "<추출된_앱이름_없으면_null>", "lines": <추출된_줄_수_없으면_30> } }
+사용자 입력 예시: "최신 로그 100줄 보여줘", "로그 확인", "에러 로그 찾아줘", "이전 로그 확인해줘", "test 네임스페이스 nginx 로그 보여줘"
+제한사항: 로그 줄 수는 최대 100줄까지 조회 가능합니다.
+네임스페이스 추출 규칙: "test 네임스페이스", "default 네임스페이스", "kube-system에서" 등의 표현에서 네임스페이스명을 정확히 추출하세요.
+필수 JSON 형식: { "command": "logs", "parameters": { "appName": "<추출된_앱이름_없으면_null>", "lines": <추출된_줄_수_없으면_30_최대_100>, "previous": <이전_파드_로그_요청시_true>, "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
 3. 엔드포인트/URL 확인 (command: "endpoint")
 설명: 배포된 서비스의 접속 주소를 확인하는 명령입니다.
-사용자 입력 예시: "내 앱 접속 주소 알려줘", "서비스 URL 뭐야?", "내 앱 주소 알려줘", "앱 URL 확인", "접속 주소 보여줘", "서비스 주소 알려줘", "엔드포인트 확인", "외부 접속 주소", "인그레스 URL", "로드밸런서 주소"
-필수 JSON 형식: { "command": "endpoint", "parameters": { "appName": "<추출된_앱이름_없으면_null>" } }
+기능: Service 확인 → LoadBalancer/NodePort/ClusterIP 엔드포인트 제공
+사용자 입력 예시: "내 앱 접속 주소 알려줘", "서비스 URL 뭐야?", "내 앱 주소 알려줘", "앱 URL 확인", "접속 주소 보여줘", "서비스 주소 알려줘", "엔드포인트 확인", "외부 접속 주소", "로드밸런서 주소"
+필수 JSON 형식: { "command": "endpoint", "parameters": { "appName": "<추출된_앱이름_없으면_null>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
 4. 재시작 (command: "restart")
 설명: 애플리케이션을 재시작하는 명령입니다.
-사용자 입력 예시: "앱 재시작해줘", "chat-app 껐다 켜줘"
-필수 JSON 형식: { "command": "restart", "parameters": { "appName": "<추출된_앱이름_없으면_null>" } }
+기능: kubectl rollout restart deployment로 Pod 재시작
+사용자 입력 예시: "앱 재시작해줘", "chat-app 껐다 켜줘", "nginx-test 재시작", "서비스 재시작해줘"
+필수 JSON 형식: { "command": "restart", "parameters": { "appName": "<추출된_앱이름_없으면_null>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
 5. 스케일링 (command: "scale")
 설명: 애플리케이션의 서버(파드) 개수를 조절하는 명령입니다.
@@ -127,8 +134,43 @@ class GeminiClient(LLMClient):
 사용자 입력 예시: "모든 파드 조회해줘", "파드 목록 보여줘", "실행 중인 파드들 확인"
 필수 JSON 형식: { "command": "list_pods", "parameters": {} }
 
+9. 통합 대시보드 조회 (command: "overview")
+설명: 특정 네임스페이스의 모든 리소스를 한번에 조회하는 명령입니다 (Deployment, Pod, Service, Ingress).
+사용자 입력 예시: "전체 상황 보여줘", "대시보드 확인", "모든 리소스 상태", "네임스페이스 전체 현황", "클러스터 상태 확인"
+필수 JSON 형식: { "command": "overview", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
+
+10. 파드 목록 조회 (command: "list_pods")
+설명: 현재 실행 중인 모든 파드의 목록을 조회하는 명령입니다.
+사용자 입력 예시: "모든 파드 조회해줘", "파드 목록 보여줘", "실행 중인 파드들 확인"
+필수 JSON 형식: { "command": "list_pods", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
+
+11. 전체 Deployment 조회 (command: "list_deployments")
+설명: 모든 네임스페이스의 Deployment 목록을 조회하는 명령입니다.
+사용자 입력 예시: "모든 Deployment 조회해줘", "전체 앱 목록 보여줘", "모든 배포 확인"
+필수 JSON 형식: { "command": "list_deployments", "parameters": {} }
+
+12. 전체 Service 조회 (command: "list_services")
+설명: 모든 네임스페이스의 Service 목록을 조회하는 명령입니다.
+사용자 입력 예시: "모든 Service 조회해줘", "전체 서비스 목록 보여줘", "모든 서비스 확인"
+필수 JSON 형식: { "command": "list_services", "parameters": {} }
+
+13. 전체 Ingress/도메인 조회 (command: "list_ingresses")
+설명: 모든 네임스페이스의 Ingress와 도메인 목록을 조회하는 명령입니다.
+사용자 입력 예시: "모든 도메인 조회해줘", "전체 Ingress 목록 보여줘", "모든 접속 주소 확인"
+필수 JSON 형식: { "command": "list_ingresses", "parameters": {} }
+
+14. 네임스페이스 목록 조회 (command: "list_namespaces")
+설명: 클러스터의 모든 네임스페이스 목록을 조회하는 명령입니다.
+사용자 입력 예시: "모든 네임스페이스 조회해줘", "네임스페이스 목록 보여줘", "전체 네임스페이스 확인"
+필수 JSON 형식: { "command": "list_namespaces", "parameters": {} }
+
+15. 네임스페이스 앱 목록 조회 (command: "list_apps")
+설명: 특정 네임스페이스의 모든 애플리케이션(Deployment) 목록을 조회하는 명령입니다.
+사용자 입력 예시: "test 네임스페이스 앱 목록 보여줘", "default 네임스페이스 모든 앱 확인", "특정 네임스페이스 앱 목록 조회"
+필수 JSON 형식: { "command": "list_apps", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
+
 일반 규칙:
-- 사용자의 의도가 불분명하거나 위 7가지 명령어 중 어느 것과도 일치하지 않으면: { "command": "unknown", "parameters": { "query": "<사용자_원본_입력>" } }
+- 사용자의 의도가 불분명하거나 위 15가지 명령어 중 어느 것과도 일치하지 않으면: { "command": "unknown", "parameters": { "query": "<사용자_원본_입력>" } }
 - appName이 명시되지 않은 경우, 컨텍스트상 기본 앱이 있다면 그 이름을 사용하거나 null을 반환합니다.
 - 오직 JSON 객체만 반환하며, 추가 설명이나 대화는 포함하지 않습니다."""
         
