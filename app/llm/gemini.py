@@ -23,19 +23,49 @@ class GeminiClient(LLMClient):
             # Gemini 응답에서 command와 parameters 추출
             command_data = self._parse_gemini_response(gemini_response)
             
-            # 파라미터를 entities 형태로 변환
+            # 파라미터 파싱 및 명령어 결정
             parameters = command_data.get("parameters", {})
-            entities = {
-                "app_name": parameters.get("appName"),
-                "replicas": parameters.get("replicas", 1),
-                "lines": parameters.get("lines", 30),
-                "version": parameters.get("version", ""),
-                "namespace": parameters.get("namespace", "default"),
-                "previous": parameters.get("previous", False) if parameters.get("previous") is not None else False  # 이전 파드 로그 여부
-            }
+            command = command_data.get("command", "unknown")
+
+            # 명령어에 따른 entities 구성 (해당 명령에 필요한 필드만 포함)
+            entities: Dict[str, Any] = {}
+
+            # app_name 포함이 필요한 명령어들
+            if command in ("status", "endpoint", "restart", "scale", "rollback", "deploy", "logs"):
+                if parameters.get("appName") is not None:
+                    entities["app_name"] = parameters.get("appName")
+
+            # namespace 기본값 포함이 필요한 명령어들
+            if command in ("status", "endpoint", "restart", "overview", "list_pods", "list_apps", "logs"):
+                entities["namespace"] = parameters.get("namespace", "default")
+
+            # 스케일링 복제수
+            if command == "scale":
+                if parameters.get("replicas") is not None:
+                    entities["replicas"] = parameters.get("replicas")
+
+            # 롤백 버전
+            if command == "rollback":
+                if parameters.get("version") is not None:
+                    entities["version"] = parameters.get("version")
+
+            # 로그 관련 옵션: lines, previous
+            if command == "logs":
+                raw_lines = parameters.get("lines", 30)
+                try:
+                    coerced_lines = int(raw_lines)
+                except (TypeError, ValueError):
+                    coerced_lines = 30
+                if coerced_lines < 1:
+                    coerced_lines = 1
+                if coerced_lines > 100:
+                    coerced_lines = 100
+                entities["lines"] = coerced_lines
+                entities["previous"] = bool(parameters.get("previous", False))
+
+            # list_deployments / list_services / list_ingresses / list_namespaces 는 파라미터 없음
             
             # 명령어에 따른 기본 메시지 생성
-            command = command_data.get("command", "unknown")
             messages = {
                 "deploy": "배포 명령을 해석했습니다.",
                 "rollback": "롤백 명령을 해석했습니다.",
@@ -46,6 +76,11 @@ class GeminiClient(LLMClient):
                 "restart": "재시작 명령을 해석했습니다.",
                 "list_pods": "파드 목록 조회 명령을 해석했습니다.",
                 "list_apps": "네임스페이스 앱 목록 조회 명령을 해석했습니다.",
+                "list_deployments": "전체 Deployment 조회 명령을 해석했습니다.",
+                "list_services": "전체 Service 조회 명령을 해석했습니다.",
+                "list_ingresses": "전체 Ingress/도메인 조회 명령을 해석했습니다.",
+                "list_namespaces": "네임스페이스 목록 조회 명령을 해석했습니다.",
+                "overview": "통합 대시보드 조회 명령을 해석했습니다.",
                 "unknown": "알 수 없는 명령입니다."
             }
             
