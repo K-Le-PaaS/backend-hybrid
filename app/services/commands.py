@@ -113,6 +113,9 @@ def plan_command(req: CommandRequest) -> CommandPlan:
         )
     
     elif command == "scale":
+        # 리소스 이름이 명시되지 않았을 때 유효성 검사
+        if not req.deployment_name or req.deployment_name.strip() == "":
+            raise ValueError("스케일링 명령어에는 배포 이름을 명시해야 합니다. 예: 'nginx-deployment 3개로 늘려줘'")
         return CommandPlan(
             tool="k8s_scale_deployment",
             args={"name": resource_name, "namespace": ns, "replicas": req.replicas},
@@ -120,7 +123,7 @@ def plan_command(req: CommandRequest) -> CommandPlan:
     
     elif command == "status":
         # 리소스 이름이 명시되지 않았을 때 유효성 검사
-        if not resource_name or resource_name.strip() == "":
+        if not req.pod_name or req.pod_name.strip() == "":
             raise ValueError("상태 확인 명령어에는 리소스 이름을 명시해야 합니다. 예: 'chat-app 상태 보여줘'")
         return CommandPlan(
             tool="k8s_get_status",
@@ -128,6 +131,9 @@ def plan_command(req: CommandRequest) -> CommandPlan:
         )
     
     elif command == "logs":
+        # 리소스 이름이 명시되지 않았을 때 유효성 검사
+        if not req.pod_name or req.pod_name.strip() == "":
+            raise ValueError("로그 조회 명령어에는 리소스 이름을 명시해야 합니다. 예: 'chat-app 로그 보여줘'")
         return CommandPlan(
             tool="k8s_get_logs",
             args={
@@ -139,18 +145,27 @@ def plan_command(req: CommandRequest) -> CommandPlan:
         )
     
     elif command == "endpoint":
+        # 리소스 이름이 명시되지 않았을 때 유효성 검사
+        if not req.service_name or req.service_name.strip() == "":
+            raise ValueError("엔드포인트 조회 명령어에는 서비스 이름을 명시해야 합니다. 예: 'nginx-service 엔드포인트 보여줘'")
         return CommandPlan(
             tool="k8s_get_endpoints",
             args={"name": resource_name, "namespace": req.namespace or ns},
         )
     
     elif command == "restart":
+        # 리소스 이름이 명시되지 않았을 때 유효성 검사
+        if not req.pod_name or req.pod_name.strip() == "":
+            raise ValueError("재시작 명령어에는 리소스 이름을 명시해야 합니다. 예: 'chat-app 재시작해줘'")
         return CommandPlan(
             tool="k8s_restart_deployment",
             args={"name": resource_name, "namespace": req.namespace or ns},
         )
     
     elif command == "rollback":
+        # 리소스 이름이 명시되지 않았을 때 유효성 검사
+        if not req.deployment_name or req.deployment_name.strip() == "":
+            raise ValueError("롤백 명령어에는 배포 이름을 명시해야 합니다. 예: 'nginx-deployment v1.0으로 롤백'")
         return CommandPlan(
             tool="k8s_rollback_deployment",
             args={"name": resource_name, "namespace": ns, "version": req.version},
@@ -199,12 +214,18 @@ def plan_command(req: CommandRequest) -> CommandPlan:
         )
     
     elif command == "get_service":
+        # 리소스 이름이 명시되지 않았을 때 유효성 검사
+        if not req.service_name or req.service_name.strip() == "":
+            raise ValueError("Service 조회 명령어에는 서비스 이름을 명시해야 합니다. 예: 'nginx-service 정보 보여줘'")
         return CommandPlan(
             tool="k8s_get_service",
             args={"name": resource_name, "namespace": ns},
         )
     
     elif command == "get_deployment":
+        # 리소스 이름이 명시되지 않았을 때 유효성 검사
+        if not req.deployment_name or req.deployment_name.strip() == "":
+            raise ValueError("Deployment 조회 명령어에는 배포 이름을 명시해야 합니다. 예: 'nginx-deployment 정보 보여줘'")
         return CommandPlan(
             tool="k8s_get_deployment",
             args={"name": resource_name, "namespace": ns},
@@ -270,6 +291,67 @@ async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
 
 
 # ========================================
+# 공통 헬퍼 함수
+# ========================================
+
+def _format_pod_statuses(pods: list, include_labels: bool = True, include_creation_time: bool = True, include_namespace: bool = False, include_age: bool = False) -> list:
+    """
+    Pod 목록을 상태 정보로 포맷팅하는 공통 헬퍼 함수
+    
+    Args:
+        pods: Kubernetes Pod 객체 목록
+        include_labels: 라벨 정보 포함 여부
+        include_creation_time: 생성 시간 정보 포함 여부
+        include_namespace: 네임스페이스 정보 포함 여부
+        include_age: 나이 정보 포함 여부
+    
+    Returns:
+        포맷팅된 Pod 상태 정보 목록
+    """
+    pod_statuses = []
+    for pod in pods:
+        pod_status = {
+            "name": pod.metadata.name,
+            "phase": pod.status.phase,
+            "ready": False,
+            "restarts": 0,
+            "node": pod.spec.node_name if pod.spec else None,
+        }
+        
+        # 조건부 필드 추가
+        if include_namespace:
+            pod_status["namespace"] = pod.metadata.namespace
+        if include_labels:
+            pod_status["labels"] = pod.metadata.labels or {}
+        if include_creation_time:
+            pod_status["creation_timestamp"] = pod.metadata.creation_timestamp.isoformat() if pod.metadata.creation_timestamp else None
+        if include_age:
+            pod_status["age"] = None
+            if pod.metadata.creation_timestamp:
+                now = datetime.now(timezone.utc)
+                age = now - pod.metadata.creation_timestamp
+                pod_status["age"] = str(age).split('.')[0]  # 초 단위 제거
+        
+        # Container 상태 체크
+        if pod.status.container_statuses:
+            ready_count = 0
+            total_count = len(pod.status.container_statuses)
+            total_restarts = 0
+            
+            for container_status in pod.status.container_statuses:
+                if container_status.ready:
+                    ready_count += 1
+                total_restarts += container_status.restart_count
+            
+            pod_status["ready"] = f"{ready_count}/{total_count}"
+            pod_status["restarts"] = total_restarts
+        
+        pod_statuses.append(pod_status)
+    
+    return pod_statuses
+
+
+# ========================================
 # Kubernetes 명령어 실행 핸들러
 # ========================================
 
@@ -295,34 +377,8 @@ async def _execute_get_status(args: Dict[str, Any]) -> Dict[str, Any]:
                 "message": f"라벨 'app={name}'로 Pod를 찾을 수 없습니다. 앱 이름을 확인해주세요."
             }
         
-        # Pod 상태 정보 추출
-        pod_statuses = []
-        for pod in pods.items:
-            pod_status = {
-                "name": pod.metadata.name,
-                "phase": pod.status.phase,
-                "ready": False,
-                "restarts": 0,
-                "node": pod.spec.node_name if pod.spec else None,
-                "labels": pod.metadata.labels or {},
-                "creation_timestamp": pod.metadata.creation_timestamp.isoformat() if pod.metadata.creation_timestamp else None
-            }
-            
-            # Container 상태 체크
-            if pod.status.container_statuses:
-                ready_count = 0
-                total_count = len(pod.status.container_statuses)
-                total_restarts = 0
-                
-                for container_status in pod.status.container_statuses:
-                    if container_status.ready:
-                        ready_count += 1
-                    total_restarts += container_status.restart_count
-                
-                pod_status["ready"] = f"{ready_count}/{total_count}"
-                pod_status["restarts"] = total_restarts
-            
-            pod_statuses.append(pod_status)
+        # Pod 상태 정보 추출 (헬퍼 함수 사용)
+        pod_statuses = _format_pod_statuses(pods.items, include_labels=True, include_creation_time=True)
         
         return {
             "status": "success",
@@ -716,39 +772,8 @@ async def _execute_list_pods(args: Dict[str, Any]) -> Dict[str, Any]:
         # 네임스페이스의 모든 파드 조회
         pods = core_v1.list_namespaced_pod(namespace=namespace)
         
-        pod_list = []
-        for pod in pods.items:
-            pod_info = {
-                "name": pod.metadata.name,
-                "namespace": pod.metadata.namespace,
-                "phase": pod.status.phase,
-                "ready": False,
-                "restarts": 0,
-                "age": None,
-                "node": pod.spec.node_name if pod.spec else None
-            }
-            
-            # Container 상태 체크
-            if pod.status.container_statuses:
-                ready_count = 0
-                total_count = len(pod.status.container_statuses)
-                total_restarts = 0
-                
-                for container_status in pod.status.container_statuses:
-                    if container_status.ready:
-                        ready_count += 1
-                    total_restarts += container_status.restart_count
-                
-                pod_info["ready"] = f"{ready_count}/{total_count}"
-                pod_info["restarts"] = total_restarts
-            
-            # Pod 생성 시간 계산
-            if pod.metadata.creation_timestamp:
-                now = datetime.now(timezone.utc)
-                age = now - pod.metadata.creation_timestamp
-                pod_info["age"] = str(age).split('.')[0]  # 초 단위 제거
-            
-            pod_list.append(pod_info)
+        # Pod 상태 정보 추출 (헬퍼 함수 사용)
+        pod_list = _format_pod_statuses(pods.items, include_labels=False, include_creation_time=False, include_namespace=True, include_age=True)
         
         return {
             "status": "success",
@@ -808,30 +833,8 @@ async def _execute_get_overview(args: Dict[str, Any]) -> Dict[str, Any]:
         # 2. Pods 조회
         try:
             pods = core_v1.list_namespaced_pod(namespace=namespace)
-            for pod in pods.items:
-                pod_info = {
-                    "name": pod.metadata.name,
-                    "phase": pod.status.phase,
-                    "ready": False,
-                    "restarts": 0,
-                    "node": pod.spec.node_name if pod.spec else None
-                }
-                
-                # Container 상태 체크
-                if pod.status.container_statuses:
-                    ready_count = 0
-                    total_count = len(pod.status.container_statuses)
-                    total_restarts = 0
-                    
-                    for container_status in pod.status.container_statuses:
-                        if container_status.ready:
-                            ready_count += 1
-                        total_restarts += container_status.restart_count
-                    
-                    pod_info["ready"] = f"{ready_count}/{total_count}"
-                    pod_info["restarts"] = total_restarts
-                
-                overview_data["pods"].append(pod_info)
+            # Pod 상태 정보 추출 (헬퍼 함수 사용)
+            overview_data["pods"] = _format_pod_statuses(pods.items, include_labels=False, include_creation_time=False, include_namespace=False, include_age=False)
         except ApiException as e:
             if e.status != 404:
                 raise
@@ -1361,32 +1364,8 @@ async def _execute_get_deployment(args: Dict[str, Any]) -> Dict[str, Any]:
         label_selector = f"app={name}"
         pods = core_v1.list_namespaced_pod(namespace=namespace, label_selector=label_selector)
         
-        pod_list = []
-        for pod in pods.items:
-            pod_info = {
-                "name": pod.metadata.name,
-                "phase": pod.status.phase,
-                "ready": False,
-                "restarts": 0,
-                "node": pod.spec.node_name if pod.spec else None,
-                "creation_timestamp": pod.metadata.creation_timestamp.isoformat() if pod.metadata.creation_timestamp else None
-            }
-            
-            # Container 상태 체크
-            if pod.status.container_statuses:
-                ready_count = 0
-                total_count = len(pod.status.container_statuses)
-                total_restarts = 0
-                
-                for container_status in pod.status.container_statuses:
-                    if container_status.ready:
-                        ready_count += 1
-                    total_restarts += container_status.restart_count
-                
-                pod_info["ready"] = f"{ready_count}/{total_count}"
-                pod_info["restarts"] = total_restarts
-            
-            pod_list.append(pod_info)
+        # Pod 상태 정보 추출 (헬퍼 함수 사용)
+        pod_list = _format_pod_statuses(pods.items, include_labels=False, include_creation_time=True)
         
         deployment_info["pods"] = {
             "total": len(pod_list),
