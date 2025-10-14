@@ -1,17 +1,120 @@
 from typing import Any, Dict, Optional
+import json
+import asyncio
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from ...services.github_workflow import create_or_update_workflow, DEFAULT_CI_YAML
 from ...services.github_app import github_app_auth
 from ...services.user_repository import get_user_repositories, add_user_repository, remove_user_repository
 from ...database import get_db
+from ...models.user_project_integration import UserProjectIntegration
+from ..v1.auth_verify import get_current_user
 import logging
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def simulate_progress(
+    deployment_monitor_manager,
+    deployment_id: str,
+    user_id: str,
+    stage: str,
+    start_progress: int,
+    end_progress: int,
+    duration_seconds: int,
+    message_template: str,
+    steps: int = 10
+):
+    """연속적인 진행률을 시뮬레이션합니다."""
+    progress_step = (end_progress - start_progress) / steps
+    time_step = duration_seconds / steps
+    
+    for i in range(steps + 1):
+        current_progress = int(start_progress + (progress_step * i))
+        # 각 단계별로 독립적인 카운터 (0부터 시작)
+        stage_counter = i
+        
+        # 마지막 단계에서는 정확한 end_progress로 설정
+        if i == steps:
+            current_progress = end_progress
+        
+        await deployment_monitor_manager.send_stage_progress(
+            deployment_id=deployment_id,
+            user_id=user_id,
+            stage=stage,
+            progress=current_progress,
+            elapsed_time=0,  # 프론트엔드에서 자체 카운터 사용
+            message=message_template
+        )
+        
+        # 마지막 단계가 아니면 대기
+        if i < steps:
+            await asyncio.sleep(time_step)
+
+
+async def get_pr_ci_status(client, token: str, repo_full_name: str, pr_number: int) -> str:
+    """PR의 실제 CI 상태를 조회합니다."""
+    try:
+        # GitHub Actions 워크플로우 실행 상태 조회
+        response = await client.get(
+            f"https://api.github.com/repos/{repo_full_name}/actions/runs",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28"
+            },
+            params={
+                "per_page": 10,  # 최근 10개 실행만 조회
+                "branch": f"pr/{pr_number}"  # PR 브랜치의 워크플로우 실행
+            }
+        )
+        
+        if response.status_code == 200:
+            runs = response.json().get("workflow_runs", [])
+            if runs:
+                latest_run = runs[0]
+                conclusion = latest_run.get("conclusion")
+                status = latest_run.get("status")
+                
+                if conclusion == "success":
+                    return "success"
+                elif conclusion == "failure":
+                    return "failure"
+                elif conclusion == "cancelled":
+                    return "cancelled"
+                elif status == "in_progress":
+                    return "pending"
+                else:
+                    return "pending"
+        
+        # 워크플로우가 없거나 조회 실패 시 PR 상태 기반으로 판단
+        pr_response = await client.get(
+            f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28"
+            }
+        )
+        
+        if pr_response.status_code == 200:
+            pr_data = pr_response.json()
+            # PR이 mergeable 상태인지 확인
+            if pr_data.get("mergeable") is True:
+                return "success"
+            elif pr_data.get("mergeable") is False:
+                return "failure"
+        
+        return "pending"
+        
+    except Exception as e:
+        logger.warning(f"Failed to get CI status for PR {pr_number}: {e}")
+        return "pending"
 
 
 class InstallWorkflowRequest(BaseModel):
@@ -249,11 +352,19 @@ async def get_connected_repositories() -> Dict[str, Any]:
 
 
 @router.get("/github/pull-requests", response_model=Dict[str, Any])
-async def get_pull_requests(user_id: str = "default", db = Depends(get_db)) -> Dict[str, Any]:
+async def get_pull_requests(
+    user_id: str = "default", 
+    db = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, Any]:
     """Pull Request 목록을 조회합니다."""
     try:
+        # 🔧 수정: 실제 인증된 사용자 ID 사용
+        actual_user_id = str(current_user.get("id", user_id))
+        print(f"DEBUG: Using user_id: {actual_user_id} (from current_user: {current_user.get('id')})")
+        
         # 사용자별 연동된 리포지토리 조회
-        user_repositories = await get_user_repositories(db, user_id)
+        user_repositories = await get_user_repositories(db, actual_user_id)
         print(f"DEBUG: user_repositories = {user_repositories}")
         
         if not user_repositories or len(user_repositories) == 0:
@@ -301,7 +412,10 @@ async def get_pull_requests(user_id: str = "default", db = Depends(get_db)) -> D
                 if prs_response.status_code == 200:
                     prs_data = prs_response.json()
                     for pr in prs_data:
-                        pull_requests.append({
+                        # 🔧 수정: 실제 CI 상태 조회
+                        ci_status = await get_pr_ci_status(client, token, full_name, pr["number"])
+                        
+                        pr_data = {
                             "id": str(pr["id"]),
                             "number": pr["number"],
                             "title": pr["title"],
@@ -310,9 +424,13 @@ async def get_pull_requests(user_id: str = "default", db = Depends(get_db)) -> D
                             "branch": pr["head"]["ref"],
                             "targetBranch": pr["base"]["ref"],
                             "createdAt": pr["created_at"],
-                            "ciStatus": "success",
-                            "deploymentStatus": None
-                        })
+                            "ciStatus": ci_status,
+                            "deploymentStatus": None,
+                            "htmlUrl": pr["html_url"],
+                            "deploymentUrl": None  # TODO: 실제 배포 URL 조회
+                        }
+                        print(f"DEBUG: PR {pr['number']} htmlUrl: {pr_data['htmlUrl']}")
+                        pull_requests.append(pr_data)
                 
                 # 리포지토리별로 PR 데이터 그룹화
                 repositories_data.append({
@@ -343,128 +461,104 @@ async def get_pull_requests(user_id: str = "default", db = Depends(get_db)) -> D
 
 
 @router.get("/github/pipelines", response_model=Dict[str, Any])
-async def get_pipelines(user_id: str = "default", db = Depends(get_db)) -> Dict[str, Any]:
-    """CI/CD 파이프라인 상태를 조회합니다."""
+async def get_pipelines(
+    repository: str = None,
+    status: str = None,
+    limit: int = 20,
+    offset: int = 0,
+    db = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """배포 히스토리를 조회합니다."""
     try:
-        # 사용자별 연동된 리포지토리 조회
-        user_repositories = await get_user_repositories(db, user_id)
+        from ...models.deployment_history import DeploymentHistory
         
-        if not user_repositories or len(user_repositories) == 0:
-            return {
-                "status": "success",
-                "repositories": [],
-                "count": 0,
-                "message": "연동된 리포지토리가 없습니다."
-            }
+        # 실제 인증된 사용자 ID 사용
+        actual_user_id = str(current_user.get("id", "default"))
+        print(f"DEBUG: Using user_id for pipelines: {actual_user_id}")
         
-        # 설치된 GitHub App 목록을 가져와서 첫 번째 앱 사용
-        installations = await github_app_auth.get_app_installations()
+        # 배포 히스토리 조회
+        query = db.query(DeploymentHistory).filter(DeploymentHistory.user_id == actual_user_id)
         
-        if not installations or len(installations) == 0:
-            return {
-                "status": "success",
-                "repositories": [],
-                "count": 0,
-                "message": "GitHub App이 설치되어 있지 않습니다."
-            }
-        
-        installation_id = installations[0]["id"]
-        token = await github_app_auth.get_installation_token(str(installation_id))
-        
-        import httpx
-        async with httpx.AsyncClient() as client:
-            repositories_data = []
-            
-            # 각 연동된 리포지토리의 워크플로우 실행 조회
-            for repo in user_repositories:
-                full_name = repo.get("fullName")
-                if not full_name:
-                    continue
-                    
-                workflows_response = await client.get(
-                    f"https://api.github.com/repos/{full_name}/actions/runs",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Accept": "application/vnd.github+json",
-                        "X-GitHub-Api-Version": "2022-11-28"
-                    }
+        if repository:
+            if '/' in repository:
+                owner, repo_name = repository.split('/', 1)
+                query = query.filter(
+                    DeploymentHistory.github_owner == owner,
+                    DeploymentHistory.github_repo == repo_name
                 )
-                
-                pipelines = []
-                if workflows_response.status_code == 200:
-                    workflows_data = workflows_response.json()
-                    # 최근 5개 워크플로우만 처리 (성능 최적화)
-                    recent_workflows = workflows_data.get("workflow_runs", [])[:5]
-                    
-                    for workflow in recent_workflows:
-                        # Jobs 조회는 실행 중이거나 실패한 워크플로우만
-                        stages = []
-                        if workflow.get("status") in ["in_progress", "completed"] and workflow.get("conclusion") != "success":
-                            try:
-                                jobs_response = await client.get(
-                                    f"https://api.github.com/repos/{full_name}/actions/runs/{workflow['id']}/jobs",
-                                    headers={
-                                        "Authorization": f"Bearer {token}",
-                                        "Accept": "application/vnd.github+json",
-                                        "X-GitHub-Api-Version": "2022-11-28"
-                                    }
-                                )
-                                
-                                if jobs_response.status_code == 200:
-                                    jobs = jobs_response.json()
-                                    for job in jobs.get("jobs", []):
-                                        stages.append({
-                                            "name": job["name"],
-                                            "status": job["conclusion"] or job["status"]
-                                        })
-                            except Exception as e:
-                                # Jobs 조회 실패 시 빈 stages로 처리
-                                pass
-                        
-                        # 상태 매핑
-                        status_mapping = {
-                            "completed": "success" if workflow["conclusion"] == "success" else "failed",
-                            "in_progress": "running",
-                            "queued": "pending",
-                            "cancelled": "cancelled"
-                        }
-                        
-                        pipelines.append({
-                            "id": str(workflow["id"]),
-                            "branch": workflow["head_branch"],
-                            "commit": workflow["head_sha"][:7],
-                            "status": status_mapping.get(workflow["status"], "unknown"),
-                            "startedAt": workflow["created_at"],
-                            "duration": workflow.get("run_duration_ms", 0) // 1000 if workflow.get("run_duration_ms") else 0,
-                            "stages": stages
-                        })
-                
-                # 리포지토리별로 파이프라인 데이터 그룹화
-                repositories_data.append({
-                    "repository": {
-                        "id": repo.get("id"),
-                        "name": repo.get("name"),
-                        "fullName": repo.get("fullName"),
-                        "branch": repo.get("branch"),
-                        "status": repo.get("status"),
-                        "lastSync": repo.get("lastSync")
+            else:
+                query = query.filter(DeploymentHistory.github_repo == repository)
+        
+        if status:
+            query = query.filter(DeploymentHistory.status == status)
+            
+        deployments = query.order_by(DeploymentHistory.started_at.desc()).offset(offset).limit(limit).all()
+        
+        # 배포 히스토리를 프론트엔드 형식으로 변환
+        deployments_data = []
+        for deployment in deployments:
+            print(f"DEBUG: Processing deployment ID {deployment.id}, status: {deployment.status}")
+            deployments_data.append({
+                "id": deployment.id,
+                "user_id": deployment.user_id,
+                "repository": f"{deployment.github_owner}/{deployment.github_repo}",
+                "commit": {
+                    "sha": deployment.github_commit_sha or "",
+                    "short_sha": deployment.github_commit_sha[:7] if deployment.github_commit_sha else "",
+                    "message": deployment.github_commit_message or "",
+                    "author": deployment.github_commit_author or "",
+                    "url": deployment.github_commit_url
+                },
+                "status": deployment.status,
+                "stages": {
+                    "sourcecommit": {
+                        "status": deployment.sourcecommit_status,
+                        "duration": deployment.sourcecommit_duration
                     },
-                    "pipelines": pipelines,
-                    "pipelineCount": len(pipelines)
-                })
-            
-            # 파이프라인 개수로 정렬
-            repositories_data.sort(key=lambda x: x["pipelineCount"], reverse=True)
-            
-            total_pipelines = sum(repo["pipelineCount"] for repo in repositories_data)
-            
-            return {
-                "status": "success",
-                "repositories": repositories_data,
-                "count": total_pipelines
-            }
+                    "sourcebuild": {
+                        "status": deployment.sourcebuild_status,
+                        "duration": deployment.sourcebuild_duration
+                    },
+                    "sourcedeploy": {
+                        "status": deployment.sourcedeploy_status,
+                        "duration": deployment.sourcedeploy_duration
+                    }
+                },
+                "image": {
+                    "name": deployment.image_name,
+                    "tag": deployment.image_tag,
+                    "url": f"{deployment.image_name}:{deployment.image_tag}" if deployment.image_name and deployment.image_tag else None
+                },
+                "cluster": {
+                    "id": deployment.cluster_id,
+                    "name": deployment.cluster_name,
+                    "namespace": deployment.namespace
+                },
+                "timing": {
+                    "started_at": deployment.started_at.isoformat() if deployment.started_at else None,
+                    "completed_at": deployment.completed_at.isoformat() if deployment.completed_at else None,
+                    "total_duration": deployment.total_duration
+                },
+                "error": {
+                    "message": deployment.error_message,
+                    "stage": deployment.error_stage
+                } if deployment.error_message else None,
+                "auto_deploy_enabled": deployment.auto_deploy_enabled,
+                "created_at": deployment.created_at.isoformat() if deployment.created_at else None,
+                "updated_at": deployment.updated_at.isoformat() if deployment.updated_at else None
+            })
+        
+        return {
+            "status": "success",
+            "deployments": deployments_data,
+            "count": len(deployments_data),
+            "total": query.count()
+        }
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get pipelines: {str(e)}")
+        print(f"ERROR in get_pipelines: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get deployment histories: {str(e)}")
 
 
 # 연동된 리포지토리 저장 (메모리 기반, 실제로는 DB에 저장해야 함)
@@ -549,3 +643,862 @@ async def get_connected_repositories(user_id: str = "default", db = Depends(get_
     except Exception as e:
         print(f"ERROR: Failed to get repositories for user {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get connected repositories: {str(e)}")
+
+
+@router.put("/github/webhook/{integration_id}")
+async def update_webhook_config(
+    integration_id: int,
+    enabled: bool = Query(..., description="Auto deploy enabled status"),
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """GitHub 웹훅 설정 업데이트 (auto_deploy 토글)"""
+    try:
+        # 통합 정보 조회
+        integration = db.query(UserProjectIntegration).filter(
+            UserProjectIntegration.id == integration_id,
+            UserProjectIntegration.user_id == str(current_user["id"])
+        ).first()
+        
+        if not integration:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Integration ID {integration_id}를 찾을 수 없습니다."
+            )
+        
+        # auto_deploy_enabled 업데이트
+        integration.auto_deploy_enabled = enabled
+        db.commit()
+        db.refresh(integration)
+        
+        return {
+            "status": "success",
+            "message": f"Auto Deploy가 {'활성화' if enabled else '비활성화'}되었습니다.",
+            "integration_id": integration_id,
+            "auto_deploy_enabled": enabled,
+            "repository": {
+                "owner": integration.github_owner,
+                "repo": integration.github_repo,
+                "full_name": integration.github_full_name
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500, 
+            detail=f"웹훅 설정 업데이트 실패: {str(e)}"
+        )
+
+
+@router.get("/github/webhook/{integration_id}/status")
+async def get_webhook_status(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """GitHub 웹훅 상태 조회"""
+    try:
+        # 통합 정보 조회
+        integration = db.query(UserProjectIntegration).filter(
+            UserProjectIntegration.id == integration_id,
+            UserProjectIntegration.user_id == str(current_user["id"])
+        ).first()
+        
+        if not integration:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Integration ID {integration_id}를 찾을 수 없습니다."
+            )
+        
+        return {
+            "status": "success",
+            "integration_id": integration_id,
+            "auto_deploy_enabled": integration.auto_deploy_enabled,
+            "webhook_configured": bool(integration.github_webhook_secret),
+            "repository": {
+                "owner": integration.github_owner,
+                "repo": integration.github_repo,
+                "full_name": integration.github_full_name
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"웹훅 상태 조회 실패: {str(e)}"
+        )
+
+
+@router.post("/github/webhook")
+async def github_webhook_handler(
+    request: Request,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """GitHub App 웹훅 수신 및 auto_deploy_enabled 상태에 따른 처리"""
+    try:
+        # GitHub App 웹훅 서명 검증
+        body_bytes = await request.body()
+        signature = request.headers.get("X-Hub-Signature-256")
+        
+        if not signature:
+            raise HTTPException(status_code=400, detail="Missing signature header")
+        
+        # GitHub App 웹훅 서명 검증
+        if not await github_app_auth.verify_webhook_signature(body_bytes, signature):
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+        
+        # 웹훅 페이로드 파싱
+        try:
+            payload = json.loads(body_bytes.decode("utf-8"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload")
+        
+        # 이벤트 타입 확인
+        event_type = request.headers.get("X-GitHub-Event")
+        logger.info(f"Webhook event type: {event_type}")
+        if not event_type:
+            raise HTTPException(status_code=400, detail="Missing event type header")
+        
+        # installation_id와 리포지토리 정보 추출
+        installation_id = payload.get("installation", {}).get("id")
+        if not installation_id:
+            return {"status": "ignored", "reason": "no installation_id"}
+        
+        # 리포지토리 정보 추출
+        repository = payload.get("repository", {})
+        full_name = repository.get("full_name")  # owner/repo
+        if not full_name:
+            return {"status": "ignored", "reason": "no repository full_name"}
+        
+        owner, repo_name = full_name.split("/", 1)
+        
+        # 🔧 수정: installation_id + 리포지토리 이름으로 정확한 통합 정보 조회
+        integration = db.query(UserProjectIntegration).filter(
+            UserProjectIntegration.github_installation_id == str(installation_id),
+            UserProjectIntegration.github_owner == owner,
+            UserProjectIntegration.github_repo == repo_name
+        ).first()
+        
+        if not integration:
+            return {"status": "ignored", "reason": "integration_not_found", "repository": full_name}
+        
+        # auto_deploy_enabled 상태 확인
+        logger.info(f"Integration found: {integration.github_owner}/{integration.github_repo}, auto_deploy_enabled: {getattr(integration, 'auto_deploy_enabled', False)}")
+        if not getattr(integration, 'auto_deploy_enabled', False):
+            logger.info(f"Auto deploy disabled for {integration.github_owner}/{integration.github_repo}")
+            return {
+                "status": "skipped",
+                "reason": "auto_deploy_disabled",
+                "repository": f"{integration.github_owner}/{integration.github_repo}",
+                "message": "Auto deploy is disabled for this repository"
+            }
+        
+        # 이벤트 타입별 처리
+        if event_type == "push":
+            return await handle_push_webhook(payload, integration, db)
+        elif event_type == "pull_request":
+            return await handle_pull_request_webhook(payload, integration, db)
+        elif event_type == "release":
+            return await handle_release_webhook(payload, integration, db)
+        else:
+            return {"status": "ignored", "reason": f"unsupported_event_type: {event_type}"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"GitHub webhook processing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
+
+
+async def auto_link_sourcecommit(integration: UserProjectIntegration, db: Session) -> Dict[str, Any]:
+    """SourceCommit 자동 연동"""
+    try:
+        from ...core.config import get_settings
+        from ...services.user_project_integration import upsert_integration
+        
+        settings = get_settings()
+        
+        # 환경변수에서 SourceCommit 정보 가져오기
+        sc_project_id = getattr(settings, 'ncp_sourcecommit_project_id', None)
+        sc_username = getattr(settings, 'ncp_sourcecommit_username', None)
+        sc_password = getattr(settings, 'ncp_sourcecommit_password', None)
+        
+        if not sc_project_id:
+            return {
+                "status": "error",
+                "reason": "sourcecommit_config_missing",
+                "message": "SourceCommit project ID not configured in environment"
+            }
+        
+        # 리포지토리 이름 생성: {owner}-{repo_name}
+        sc_repo_name = f"{integration.github_owner}-{integration.github_repo}"
+        
+        # GitHub 리포지토리 URL 생성
+        github_repo_url = f"https://github.com/{integration.github_owner}/{integration.github_repo}.git"
+        
+        # SourceCommit full URL 생성
+        sc_full_url = f"https://devtools.ncloud.com/{sc_project_id}/{sc_repo_name}.git"
+        
+        logger.info(f"Auto-linking SourceCommit: {sc_repo_name} -> {sc_full_url}")
+        
+        # DB에 SourceCommit 정보 업데이트
+        updated_integration = upsert_integration(
+            db=db,
+            user_id=integration.user_id,
+            owner=integration.github_owner,
+            repo=integration.github_repo,
+            repository_id=integration.github_repository_id,
+            installation_id=integration.github_installation_id,
+            sc_project_id=sc_project_id,
+            sc_repo_name=sc_repo_name,
+            sc_clone_url=sc_full_url
+        )
+        
+        # SourceCommit 리포지토리 생성
+        from ...services.ncp_pipeline import ensure_sourcecommit_repo
+        ensure_result = ensure_sourcecommit_repo(sc_project_id, sc_repo_name)
+        
+        if ensure_result.get("status") not in ("created", "exists"):
+            logger.warning(f"SourceCommit repository creation failed: {ensure_result}")
+            # DB는 업데이트했으므로 계속 진행
+        
+        # GitHub → SourceCommit 미러링
+        from ...services.ncp_pipeline import mirror_to_sourcecommit
+        
+        # GitHub 토큰 획득
+        from ...services.github_app import github_app_auth
+        github_token = await github_app_auth.get_installation_token(str(integration.github_installation_id))
+        
+        mirror_result = mirror_to_sourcecommit(
+            github_repo_url=github_repo_url,
+            installation_or_access_token=github_token,
+            sc_project_id=sc_project_id,
+            sc_repo_name=sc_repo_name,
+            sc_username=sc_username,
+            sc_password=sc_password,
+            sc_full_url=sc_full_url
+        )
+        
+        return {
+            "status": "success",
+            "message": "SourceCommit auto-linked successfully",
+            "sourcecommit": {
+                "project_id": sc_project_id,
+                "repo_name": sc_repo_name,
+                "full_url": sc_full_url
+            },
+            "mirror_result": mirror_result
+        }
+        
+    except Exception as e:
+        logger.error(f"SourceCommit auto-link failed: {str(e)}")
+        return {
+            "status": "error",
+            "reason": "auto_link_failed",
+            "message": str(e)
+        }
+
+
+async def handle_sourcecommit_mirror(payload: Dict[str, Any], integration: UserProjectIntegration, db: Session) -> Dict[str, Any]:
+    """SourceCommit 연동 및 미러링 처리"""
+    try:
+        logger.info(f"Starting SourceCommit mirror for {integration.github_owner}/{integration.github_repo}")
+        
+        # 기존 통합 정보에서 SourceCommit 정보 확인
+        logger.info(f"SourceCommit config - project_id: {integration.sc_project_id}, repo_name: {integration.sc_repo_name}")
+        
+        # SourceCommit이 연동되지 않은 경우 자동으로 연동
+        if not integration.sc_project_id or not integration.sc_repo_name:
+            logger.info("SourceCommit not configured, attempting auto-link")
+            auto_link_result = await auto_link_sourcecommit(integration, db)
+            if auto_link_result.get("status") != "success":
+                return auto_link_result
+            
+            # DB에서 업데이트된 정보 다시 조회
+            db.refresh(integration)
+            logger.info(f"Auto-linked SourceCommit - project_id: {integration.sc_project_id}, repo_name: {integration.sc_repo_name}")
+        
+        # GitHub 토큰 획득
+        installation_id = integration.github_installation_id
+        if not installation_id:
+            return {
+                "status": "error",
+                "reason": "no_installation_id",
+                "message": "GitHub installation ID not found"
+            }
+        
+        from ...services.github_app import github_app_auth
+        try:
+            github_token = await github_app_auth.get_installation_token(str(installation_id))
+        except Exception as e:
+            logger.error(f"Failed to get GitHub token: {str(e)}")
+            return {
+                "status": "error",
+                "reason": "github_token_failed",
+                "message": f"Failed to get GitHub token: {str(e)}"
+            }
+        
+        # SourceCommit 리포지토리 확인 (기존 리포지토리 사용)
+        from ...services.ncp_pipeline import ensure_sourcecommit_repo
+        ensure_result = ensure_sourcecommit_repo(integration.sc_project_id, integration.sc_repo_name)
+        
+        if ensure_result.get("status") not in ("created", "exists"):
+            return {
+                "status": "error",
+                "reason": "sourcecommit_repo_failed",
+                "message": f"SourceCommit repository check failed: {ensure_result}"
+            }
+        
+        # GitHub → SourceCommit 미러링 (k8s 매니페스트 포함)
+        from ...services.ncp_pipeline import mirror_to_sourcecommit
+        
+        github_repo_url = f"https://github.com/{integration.github_owner}/{integration.github_repo}.git"
+        
+        mirror_result = mirror_to_sourcecommit(
+            github_repo_url=github_repo_url,
+            installation_or_access_token=github_token,
+            sc_project_id=integration.sc_project_id,
+            sc_repo_name=integration.sc_repo_name
+        )
+        
+        return {
+            "status": "success",
+            "repository": f"{integration.github_owner}/{integration.github_repo}",
+            "sourcecommit": {
+                "project_id": integration.sc_project_id,
+                "repo_name": integration.sc_repo_name
+            },
+            "mirror_result": mirror_result
+        }
+        
+    except Exception as e:
+        logger.error(f"SourceCommit mirror processing failed: {str(e)}")
+        return {
+            "status": "error",
+            "reason": "mirror_failed",
+            "message": str(e)
+        }
+
+
+async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectIntegration, db: Session) -> Dict[str, Any]:
+    """Push 이벤트 처리"""
+    try:
+        logger.info(f"Processing push webhook for {integration.github_owner}/{integration.github_repo}")
+        
+        # main 브랜치 push 확인
+        ref = payload.get("ref", "")
+        logger.info(f"Push ref: {ref}")
+        if not ref.endswith("/main"):
+            logger.info(f"Not main branch push: {ref}")
+            return {"status": "ignored", "reason": "not_main_branch", "ref": ref}
+        
+        # PR merge 또는 직접 push 확인
+        head_commit = payload.get("head_commit", {})
+        message = head_commit.get("message", "").lower()
+        pusher = payload.get("pusher", {}).get("name", "").lower()
+        is_merge = ("merge pull request" in message) or (pusher == "web-flow")
+        is_direct_push = pusher != "web-flow"  # 직접 push (사용자가 직접 push)
+        
+        logger.info(f"Commit message: {message}, pusher: {pusher}, is_merge: {is_merge}, is_direct_push: {is_direct_push}")
+        
+        # PR merge 또는 직접 push 모두 처리
+        if not is_merge and not is_direct_push:
+            logger.info("Not a PR merge or direct push, ignoring")
+            return {"status": "ignored", "reason": "not_pr_merge_or_direct_push"}
+        
+        # 배포 히스토리 생성
+        from ...models.deployment_history import DeploymentHistory
+        from datetime import datetime
+        import json
+        
+        deployment_history = DeploymentHistory(
+            user_id=integration.user_id,
+            github_owner=integration.github_owner,
+            github_repo=integration.github_repo,
+            github_commit_sha=head_commit.get("id"),
+            github_commit_message=head_commit.get("message"),
+            github_commit_author=head_commit.get("author", {}).get("name"),
+            github_commit_url=head_commit.get("url"),
+            status="running",
+            auto_deploy_enabled=integration.auto_deploy_enabled,
+            webhook_payload=json.dumps(payload)  # 디버깅용
+        )
+        
+        db.add(deployment_history)
+        db.commit()
+        db.refresh(deployment_history)
+        
+        logger.info(f"Deployment history created: ID {deployment_history.id}")
+        
+        # WebSocket으로 배포 시작 알림
+        from ...websocket.deployment_monitor import deployment_monitor_manager
+        
+        logger.info(f"Sending deployment_started WebSocket message for deployment {deployment_history.id}")
+        logger.info(f"User ID: {integration.user_id}, Repository: {integration.github_owner}/{integration.github_repo}")
+        
+        try:
+            await deployment_monitor_manager.send_deployment_started(
+                deployment_id=str(deployment_history.id),
+                user_id=integration.user_id,
+                data={
+                    "repository": f"{integration.github_owner}/{integration.github_repo}",
+                    "commit": {
+                        "sha": head_commit.get("id"),
+                        "message": head_commit.get("message"),
+                        "author": head_commit.get("author", {}).get("name")
+                    },
+                    "trigger": {
+                        "type": "merge" if is_merge else "push",
+                        "actor": pusher
+                    }
+                }
+            )
+            logger.info(f"deployment_started message sent successfully for deployment {deployment_history.id}")
+        except Exception as e:
+            logger.error(f"Failed to send deployment_started message: {str(e)}")
+            raise
+        
+        # Step 1: SourceCommit 연동 확인 및 미러링
+        # SourceCommit 시작 알림
+        await deployment_monitor_manager.send_stage_progress(
+            deployment_id=str(deployment_history.id),
+            user_id=integration.user_id,
+            stage="sourcecommit",
+            progress=0,
+            elapsed_time=0,
+            message="Starting SourceCommit mirroring..."
+        )
+        
+        # 0-30%: GitHub 토큰 획득 및 SourceCommit 리포지토리 확인
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcecommit",
+            0, 30, 2, "Getting GitHub token and checking SourceCommit repository..."
+        )
+        
+        # 실제 작업: GitHub 토큰 획득 및 SourceCommit 리포지토리 확인
+        sourcecommit_result = await handle_sourcecommit_mirror(payload, integration, db)
+        if sourcecommit_result.get("status") != "success":
+            # SourceCommit 실패 시 배포 히스토리 업데이트
+            deployment_history.sourcecommit_status = "failed"
+            deployment_history.status = "failed"
+            deployment_history.error_message = sourcecommit_result.get("message", "SourceCommit failed")
+            deployment_history.error_stage = "sourcecommit"
+            deployment_history.completed_at = datetime.utcnow()
+            db.commit()
+            
+            # WebSocket으로 실패 알림
+            await deployment_monitor_manager.send_stage_completed(
+                deployment_id=str(deployment_history.id),
+                user_id=integration.user_id,
+                stage="sourcecommit",
+                status="failed",
+                data=sourcecommit_result
+            )
+            
+            return sourcecommit_result
+        
+        # 30-60%: Git clone --mirror 완료
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcecommit",
+            30, 60, 3, "Cloning repository from GitHub..."
+        )
+        
+        # 60-90%: K8s 매니페스트 주입 (선택적)
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcecommit",
+            60, 90, 2, "Adding Kubernetes manifests..."
+        )
+        
+        # 90-100%: SourceCommit 푸시 완료
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcecommit",
+            90, 100, 1, "Pushing to SourceCommit..."
+        )
+        
+        # SourceCommit 성공 시 배포 히스토리 업데이트
+        deployment_history.sourcecommit_status = "success"
+        # 실제 소요 시간 계산
+        sourcecommit_duration = (datetime.utcnow() - deployment_history.started_at).total_seconds()
+        deployment_history.sourcecommit_duration = int(sourcecommit_duration)
+        db.commit()
+        
+        # WebSocket으로 SourceCommit 완료 알림
+        await deployment_monitor_manager.send_stage_completed(
+            deployment_id=str(deployment_history.id),
+            user_id=integration.user_id,
+            stage="sourcecommit",
+            status="success",
+            data=sourcecommit_result
+        )
+        
+        # Step 2: SourceBuild 실행 (build/run 방식 사용)
+        from ...services.ncp_pipeline import ensure_sourcebuild_project, run_sourcebuild as run_sb
+        from ...core.config import get_settings
+        
+        settings = get_settings()
+        
+        # 이미지 레지스트리 URL 구성 (build/run과 동일)
+        registry = getattr(settings, "ncp_container_registry_url", None)
+        if not registry:
+            logger.error("ncp_container_registry_url not configured")
+            return {
+                "status": "error",
+                "reason": "registry_not_configured",
+                "repository": f"{integration.github_owner}/{integration.github_repo}",
+                "sourcecommit": sourcecommit_result
+            }
+        
+        image_repo = f"{registry}/{integration.github_owner}-{integration.github_repo}"
+        
+        logger.info(f"Starting SourceBuild for {integration.github_owner}/{integration.github_repo}")
+        logger.info(f"Image repo: {image_repo}")
+        
+        # SourceBuild 시작 시간 기록
+        sourcebuild_start_time = datetime.utcnow()
+        
+        # SourceBuild 시작 알림
+        await deployment_monitor_manager.send_stage_progress(
+            deployment_id=str(deployment_history.id),
+            user_id=integration.user_id,
+            stage="sourcebuild",
+            progress=0,
+            elapsed_time=0,
+            message="Starting SourceBuild..."
+        )
+        
+        # 0-20%: 프로젝트 상세 조회
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcebuild",
+            0, 20, 2, "Analyzing project configuration..."
+        )
+        
+        # SourceBuild 프로젝트 확인/생성 (build/run과 동일)
+        build_id = await ensure_sourcebuild_project(
+            owner=integration.github_owner,
+            repo=integration.github_repo,
+            branch="main",
+            sc_project_id=integration.sc_project_id,
+            sc_repo_name=integration.sc_repo_name,
+            db=db,
+            user_id=integration.user_id
+        )
+        
+        # 20-50%: 빌드 트리거 API 호출
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcebuild",
+            20, 50, 2, "Triggering Docker build..."
+        )
+        
+        # SourceBuild 실행 (build/run과 동일)
+        build_result = await run_sb(build_id, image_repo=image_repo)
+        logger.info(f"SourceBuild completed: {build_result}")
+        
+        # 50-80%: 빌드 진행 중
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcebuild",
+            50, 80, 3, "Building Docker image..."
+        )
+        
+        # 80-100%: 이미지 푸시 완료
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcebuild",
+            80, 100, 2, "Pushing image to registry..."
+        )
+        
+        # SourceBuild 결과에 따른 배포 히스토리 업데이트
+        if build_result.get("status") == "success":
+            deployment_history.sourcebuild_status = "success"
+            # 실제 소요 시간 계산
+            sourcebuild_duration = (datetime.utcnow() - sourcebuild_start_time).total_seconds()
+            deployment_history.sourcebuild_duration = int(sourcebuild_duration)
+            deployment_history.sourcebuild_project_id = str(build_id)
+            deployment_history.build_id = build_result.get("build_id")
+            deployment_history.image_name = build_result.get("image")
+            deployment_history.image_tag = build_result.get("image_tag")
+        else:
+            deployment_history.sourcebuild_status = "failed"
+            deployment_history.status = "failed"
+            deployment_history.error_message = build_result.get("message", "SourceBuild failed")
+            deployment_history.error_stage = "sourcebuild"
+            deployment_history.completed_at = datetime.utcnow()
+        
+        db.commit()
+        
+        # SourceBuild 완료 진행률 전송
+        sourcebuild_duration = (datetime.utcnow() - sourcebuild_start_time).total_seconds()
+        await deployment_monitor_manager.send_stage_progress(
+            deployment_id=str(deployment_history.id),
+            user_id=integration.user_id,
+            stage="sourcebuild",
+            progress=100,
+            elapsed_time=int(sourcebuild_duration),
+            message="SourceBuild completed" if build_result.get("status") == "success" else "SourceBuild failed"
+        )
+        
+        # WebSocket으로 SourceBuild 완료 알림
+        await deployment_monitor_manager.send_stage_completed(
+            deployment_id=str(deployment_history.id),
+            user_id=integration.user_id,
+            stage="sourcebuild",
+            status=build_result.get("status", "failed"),
+            data=build_result
+        )
+        
+        # SourceBuild 실패 시 중단
+        if build_result.get("status") != "success":
+            return {
+                "status": "error",
+                "reason": "sourcebuild_failed",
+                "repository": f"{integration.github_owner}/{integration.github_repo}",
+                "sourcecommit": sourcecommit_result,
+                "sourcebuild": build_result
+            }
+        
+        # Step 3: SourceDeploy 실행 (deploy/run 방식 사용)
+        from ...services.ncp_pipeline import ensure_sourcedeploy_project, run_sourcedeploy
+        
+        # SourceDeploy 시작 시간 기록
+        sourcedeploy_start_time = datetime.utcnow()
+        
+        # SourceDeploy 시작 알림
+        await deployment_monitor_manager.send_stage_progress(
+            deployment_id=str(deployment_history.id),
+            user_id=integration.user_id,
+            stage="sourcedeploy",
+            progress=0,
+            elapsed_time=0,
+            message="Starting SourceDeploy..."
+        )
+        
+        # 0-25%: K8s 매니페스트 생성
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcedeploy",
+            0, 25, 2, "Generating Kubernetes manifests..."
+        )
+        
+        # 배포 매니페스트 생성 (deploy/run과 동일)
+        manifest_text = f"""
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {integration.github_repo}-deploy
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {integration.github_repo}
+  template:
+    metadata:
+      labels:
+        app: {integration.github_repo}
+    spec:
+      containers:
+      - name: {integration.github_repo}
+        image: {image_repo}:${{GIT_COMMIT}}
+        ports:
+        - containerPort: 80
+""".strip()
+        
+        nks_cluster_id = getattr(settings, "ncp_nks_cluster_id", None)
+        
+        # 25-50%: SourceDeploy 프로젝트 확인/생성
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcedeploy",
+            25, 50, 2, "Setting up deployment project..."
+        )
+        
+        # SourceDeploy 프로젝트 확인/생성 (deploy/run과 동일)
+        deploy_project_id = await ensure_sourcedeploy_project(
+            owner=integration.github_owner,
+            repo=integration.github_repo,
+            manifest_text=manifest_text,
+            nks_cluster_id=nks_cluster_id,
+            db=db,
+            user_id=integration.user_id,
+        )
+        
+        # 50-75%: 배포 실행 API 호출
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcedeploy",
+            50, 75, 2, "Triggering Kubernetes deployment..."
+        )
+        
+        # SourceDeploy 실행 (deploy/run과 동일)
+        deploy_result = await run_sourcedeploy(
+            deploy_project_id,
+            stage_name="production",
+            scenario_name="deploy-app",
+            sc_project_id=integration.sc_project_id,
+            db=db,
+            user_id=integration.user_id,
+            owner=integration.github_owner,
+            repo=integration.github_repo,
+        )
+        
+        logger.info(f"SourceDeploy completed: {deploy_result}")
+        
+        # 75-100%: 배포 완료 대기
+        await simulate_progress(
+            deployment_monitor_manager,
+            str(deployment_history.id),
+            integration.user_id,
+            "sourcedeploy",
+            75, 100, 3, "Waiting for deployment completion..."
+        )
+        
+        # SourceDeploy 결과에 따른 배포 히스토리 업데이트
+        if deploy_result.get("status") in ["started", "success"]:
+            # NCP SourceDeploy는 비동기 실행이므로 "started"도 성공으로 간주
+            deployment_history.sourcedeploy_status = "success"
+            # 실제 소요 시간 계산
+            sourcedeploy_duration = (datetime.utcnow() - sourcedeploy_start_time).total_seconds()
+            deployment_history.sourcedeploy_duration = int(sourcedeploy_duration)
+            deployment_history.sourcedeploy_project_id = str(deploy_project_id)
+            deployment_history.deploy_id = deploy_result.get("response") or deploy_result.get("deploy_id")
+            deployment_history.status = "success"
+            deployment_history.completed_at = datetime.utcnow()
+            deployment_history.calculate_duration()  # 총 소요 시간 계산
+        else:
+            deployment_history.sourcedeploy_status = "failed"
+            deployment_history.status = "failed"
+            deployment_history.error_message = deploy_result.get("message", "SourceDeploy failed")
+            deployment_history.error_stage = "sourcedeploy"
+            deployment_history.completed_at = datetime.utcnow()
+        
+        db.commit()
+        
+        # SourceDeploy 완료 진행률 전송
+        sourcedeploy_duration = (datetime.utcnow() - sourcedeploy_start_time).total_seconds()
+        await deployment_monitor_manager.send_stage_progress(
+            deployment_id=str(deployment_history.id),
+            user_id=integration.user_id,
+            stage="sourcedeploy",
+            progress=100,
+            elapsed_time=int(sourcedeploy_duration),
+            message="SourceDeploy completed" if deploy_result.get("status") in ["started", "success"] else "SourceDeploy failed"
+        )
+        
+        # WebSocket으로 SourceDeploy 완료 알림
+        await deployment_monitor_manager.send_stage_completed(
+            deployment_id=str(deployment_history.id),
+            user_id=integration.user_id,
+            stage="sourcedeploy",
+            status=deploy_result.get("status", "failed"),
+            data=deploy_result
+        )
+        
+        # 전체 배포 완료 알림
+        await deployment_monitor_manager.send_deployment_completed(
+            deployment_id=str(deployment_history.id),
+            user_id=integration.user_id,
+            status=deployment_history.status,
+            data={
+                "repository": f"{integration.github_owner}/{integration.github_repo}",
+                "total_duration": deployment_history.total_duration,
+                "stages": {
+                    "sourcecommit": {
+                        "status": deployment_history.sourcecommit_status,
+                        "duration": deployment_history.sourcecommit_duration
+                    },
+                    "sourcebuild": {
+                        "status": deployment_history.sourcebuild_status,
+                        "duration": deployment_history.sourcebuild_duration
+                    },
+                    "sourcedeploy": {
+                        "status": deployment_history.sourcedeploy_status,
+                        "duration": deployment_history.sourcedeploy_duration
+                    }
+                }
+            }
+        )
+        
+        return {
+            "status": "success",
+            "event": "push",
+            "repository": f"{integration.github_owner}/{integration.github_repo}",
+            "deployment_id": deployment_history.id,
+            "sourcecommit": sourcecommit_result,
+            "build_result": build_result,
+            "deploy_result": deploy_result
+        }
+            
+    except Exception as e:
+        logger.error(f"Push webhook processing failed: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+
+async def handle_pull_request_webhook(payload: Dict[str, Any], integration: UserProjectIntegration, db: Session) -> Dict[str, Any]:
+    """Pull Request 이벤트 처리"""
+    action = payload.get("action")
+    if action != "closed":
+        return {"status": "ignored", "reason": f"unsupported_action: {action}"}
+    
+    pr = payload.get("pull_request", {})
+    if not pr.get("merged"):
+        return {"status": "ignored", "reason": "pr_not_merged"}
+    
+    # main 브랜치로의 merge인지 확인
+    base_branch = pr.get("base", {}).get("ref")
+    if base_branch != "main":
+        return {"status": "ignored", "reason": "not_merged_to_main", "base_branch": base_branch}
+    
+    # Push 이벤트와 동일한 처리 (SourceCommit 미러링 포함)
+    return await handle_push_webhook(payload, integration, db)
+
+
+async def handle_release_webhook(payload: Dict[str, Any], integration: UserProjectIntegration, db: Session) -> Dict[str, Any]:
+    """Release 이벤트 처리 (프로덕션 배포)"""
+    action = payload.get("action")
+    if action != "published":
+        return {"status": "ignored", "reason": f"unsupported_action: {action}"}
+    
+    release = payload.get("release", {})
+    tag_name = release.get("tag_name", "latest")
+    
+    # 프로덕션 배포 로직 (향후 구현)
+    return {
+        "status": "success",
+        "event": "release",
+        "repository": f"{integration.github_owner}/{integration.github_repo}",
+        "tag": tag_name,
+        "message": "Production deployment triggered"
+    }

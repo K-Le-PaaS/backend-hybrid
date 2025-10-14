@@ -1825,7 +1825,9 @@ async def run_sourcebuild(
             registry_host, image_path = image_repo.split("/", 1)
         except ValueError:
             registry_host, image_path = image_repo, image_repo
-        final_image_name = image_path.rsplit("/", 1)[-1]
+        # Extract image name and convert to lowercase for NCR compatibility
+        raw_image_name = image_path.rsplit("/", 1)[-1]
+        final_image_name = raw_image_name.lower()  # ✅ 소문자 변환 추가
         final_registry_project = (registry_host or "").split(".")[0] or "klepaas-test"
         _dbg("SB-IMAGE-SOURCE", source="fallback_image_repo",
              image=final_image_name,

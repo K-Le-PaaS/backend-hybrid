@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, desc, func
 
 from ..models.deployment_history import (
-    DeploymentHistoryModel,
+    DeploymentHistory,
     DeploymentHistoryCreate,
     DeploymentHistoryResponse,
     DeploymentHistoryQuery,
@@ -91,7 +91,7 @@ class DeploymentHistoryService:
             )
             
             # 데이터베이스에 저장
-            deployment_record = DeploymentHistoryModel(
+            deployment_record = DeploymentHistory(
                 app_name=deployment_data.app_name,
                 environment=deployment_data.environment,
                 image=deployment_data.image,
@@ -145,8 +145,8 @@ class DeploymentHistoryService:
     ) -> bool:
         """배포 상태를 업데이트합니다."""
         try:
-            deployment = self.db.query(DeploymentHistoryModel).filter(
-                DeploymentHistoryModel.id == deployment_id
+            deployment = self.db.query(DeploymentHistory).filter(
+                DeploymentHistory.id == deployment_id
             ).first()
             
             if not deployment:
@@ -226,7 +226,7 @@ class DeploymentHistoryService:
             )
             
             # 데이터베이스에 저장
-            rollback_record = DeploymentHistoryModel(
+            rollback_record = DeploymentHistory(
                 app_name=rollback_data.app_name,
                 environment=rollback_data.environment,
                 image=rollback_data.image,
@@ -249,8 +249,8 @@ class DeploymentHistoryService:
             self.db.refresh(rollback_record)
             
             # 원본 배포 기록에 롤백 정보 업데이트
-            original_deployment = self.db.query(DeploymentHistoryModel).filter(
-                DeploymentHistoryModel.id == rolled_back_from
+            original_deployment = self.db.query(DeploymentHistory).filter(
+                DeploymentHistory.id == rolled_back_from
             ).first()
             
             if original_deployment:
@@ -288,14 +288,14 @@ class DeploymentHistoryService:
         """최근 배포 버전들을 조회합니다."""
         try:
             deployments = (
-                self.db.query(DeploymentHistoryModel)
+                self.db.query(DeploymentHistory)
                 .filter(
                     and_(
-                        DeploymentHistoryModel.app_name == app_name,
-                        DeploymentHistoryModel.environment == environment
+                        DeploymentHistory.app_name == app_name,
+                        DeploymentHistory.environment == environment
                     )
                 )
-                .order_by(desc(DeploymentHistoryModel.created_at))
+                .order_by(desc(DeploymentHistory.created_at))
                 .limit(limit)
                 .all()
             )
@@ -349,15 +349,15 @@ class DeploymentHistoryService:
         try:
             # 최근 2개 버전 조회
             deployments = (
-                self.db.query(DeploymentHistoryModel)
+                self.db.query(DeploymentHistory)
                 .filter(
                     and_(
-                        DeploymentHistoryModel.app_name == app_name,
-                        DeploymentHistoryModel.environment == environment,
-                        DeploymentHistoryModel.is_rollback == False  # 롤백이 아닌 배포만
+                        DeploymentHistory.app_name == app_name,
+                        DeploymentHistory.environment == environment,
+                        DeploymentHistory.is_rollback == False  # 롤백이 아닌 배포만
                     )
                 )
-                .order_by(desc(DeploymentHistoryModel.created_at))
+                .order_by(desc(DeploymentHistory.created_at))
                 .limit(2)
                 .all()
             )
@@ -409,32 +409,32 @@ class DeploymentHistoryService:
         """배포 히스토리를 조회합니다."""
         try:
             # 기본 쿼리
-            db_query = self.db.query(DeploymentHistoryModel)
+            db_query = self.db.query(DeploymentHistory)
             
             # 필터 적용
             if query.app_name:
-                db_query = db_query.filter(DeploymentHistoryModel.app_name == query.app_name)
+                db_query = db_query.filter(DeploymentHistory.app_name == query.app_name)
             
             if query.environment:
-                db_query = db_query.filter(DeploymentHistoryModel.environment == query.environment)
+                db_query = db_query.filter(DeploymentHistory.environment == query.environment)
             
             if query.status:
-                db_query = db_query.filter(DeploymentHistoryModel.status == query.status.value)
+                db_query = db_query.filter(DeploymentHistory.status == query.status.value)
             
             if query.image_tag_type:
-                db_query = db_query.filter(DeploymentHistoryModel.image_tag_type == query.image_tag_type.value)
+                db_query = db_query.filter(DeploymentHistory.image_tag_type == query.image_tag_type.value)
             
             if query.is_rollback is not None:
-                db_query = db_query.filter(DeploymentHistoryModel.is_rollback == query.is_rollback)
+                db_query = db_query.filter(DeploymentHistory.is_rollback == query.is_rollback)
             
             if query.start_time:
-                db_query = db_query.filter(DeploymentHistoryModel.created_at >= query.start_time)
+                db_query = db_query.filter(DeploymentHistory.created_at >= query.start_time)
             
             if query.end_time:
-                db_query = db_query.filter(DeploymentHistoryModel.created_at <= query.end_time)
+                db_query = db_query.filter(DeploymentHistory.created_at <= query.end_time)
             
             # 정렬 및 페이징
-            db_query = db_query.order_by(desc(DeploymentHistoryModel.created_at))
+            db_query = db_query.order_by(desc(DeploymentHistory.created_at))
             db_query = db_query.offset(query.offset).limit(query.limit)
             
             # 결과 조회
@@ -485,30 +485,30 @@ class DeploymentHistoryService:
         """배포 통계를 조회합니다."""
         try:
             # 기본 쿼리
-            base_query = self.db.query(DeploymentHistoryModel)
+            base_query = self.db.query(DeploymentHistory)
             
             if app_name:
-                base_query = base_query.filter(DeploymentHistoryModel.app_name == app_name)
+                base_query = base_query.filter(DeploymentHistory.app_name == app_name)
             
             if environment:
-                base_query = base_query.filter(DeploymentHistoryModel.environment == environment)
+                base_query = base_query.filter(DeploymentHistory.environment == environment)
             
             if start_time:
-                base_query = base_query.filter(DeploymentHistoryModel.created_at >= start_time)
+                base_query = base_query.filter(DeploymentHistory.created_at >= start_time)
             
             if end_time:
-                base_query = base_query.filter(DeploymentHistoryModel.created_at <= end_time)
+                base_query = base_query.filter(DeploymentHistory.created_at <= end_time)
             
             # 전체 통계
             total_deployments = base_query.count()
             successful_deployments = base_query.filter(
-                DeploymentHistoryModel.status == DeploymentStatus.SUCCESS.value
+                DeploymentHistory.status == DeploymentStatus.SUCCESS.value
             ).count()
             failed_deployments = base_query.filter(
                 DeploymentStatus.FAILED.value
             ).count()
             rollback_count = base_query.filter(
-                DeploymentHistoryModel.is_rollback == True
+                DeploymentHistory.is_rollback == True
             ).count()
             
             # 성공률 계산
@@ -517,8 +517,8 @@ class DeploymentHistoryService:
             # 평균 배포 시간 계산
             successful_deployments_with_time = base_query.filter(
                 and_(
-                    DeploymentHistoryModel.status == DeploymentStatus.SUCCESS.value,
-                    DeploymentHistoryModel.deployed_at.isnot(None)
+                    DeploymentHistory.status == DeploymentStatus.SUCCESS.value,
+                    DeploymentHistory.deployed_at.isnot(None)
                 )
             ).all()
             
@@ -534,7 +534,7 @@ class DeploymentHistoryService:
             # 최근 배포 조회
             recent_deployments = (
                 base_query
-                .order_by(desc(DeploymentHistoryModel.created_at))
+                .order_by(desc(DeploymentHistory.created_at))
                 .limit(5)
                 .all()
             )
@@ -575,10 +575,10 @@ class DeploymentHistoryService:
             tag_type_results = (
                 base_query
                 .with_entities(
-                    DeploymentHistoryModel.image_tag_type,
-                    func.count(DeploymentHistoryModel.id)
+                    DeploymentHistory.image_tag_type,
+                    func.count(DeploymentHistory.id)
                 )
-                .group_by(DeploymentHistoryModel.image_tag_type)
+                .group_by(DeploymentHistory.image_tag_type)
                 .all()
             )
             for tag_type, count in tag_type_results:
@@ -589,10 +589,10 @@ class DeploymentHistoryService:
             environment_results = (
                 base_query
                 .with_entities(
-                    DeploymentHistoryModel.environment,
-                    func.count(DeploymentHistoryModel.id)
+                    DeploymentHistory.environment,
+                    func.count(DeploymentHistory.id)
                 )
-                .group_by(DeploymentHistoryModel.environment)
+                .group_by(DeploymentHistory.environment)
                 .all()
             )
             for env, count in environment_results:
@@ -614,12 +614,12 @@ class DeploymentHistoryService:
             logger.error("deployment_stats_failed", error=str(e))
             raise
 
-    async def get_all_deployments(self) -> List[DeploymentHistoryModel]:
+    async def get_all_deployments(self) -> List[DeploymentHistory]:
         """모든 배포 기록을 조회합니다."""
         try:
             deployments = (
-                self.db.query(DeploymentHistoryModel)
-                .order_by(desc(DeploymentHistoryModel.deployed_at))
+                self.db.query(DeploymentHistory)
+                .order_by(desc(DeploymentHistory.deployed_at))
                 .all()
             )
             return deployments

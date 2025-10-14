@@ -16,7 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.base import Base
 from models.deployment_history import (
-    DeploymentHistoryModel,
+    DeploymentHistory,
     ImageTagType,
     DeploymentStatus
 )

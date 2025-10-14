@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 # 직접 import
 from app.models.base import Base
 from app.models.deployment_history import (
-    DeploymentHistoryModel,
+    DeploymentHistory,
     ImageTagType,
     DeploymentStatus
 )

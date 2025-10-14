@@ -260,6 +260,15 @@ async def github_push_webhook(
     if not integ.sc_project_id or not integ.sc_repo_name:
         raise HTTPException(status_code=409, detail="sourcecommit mapping missing: call create-and-link first")
 
+    # 🔧 추가: auto_deploy_enabled 상태 확인
+    if not getattr(integ, 'auto_deploy_enabled', False):
+        return {
+            "status": "skipped", 
+            "reason": "auto_deploy_disabled",
+            "repository": full_name,
+            "message": "Auto deploy is disabled for this repository"
+        }
+
     # 2) SourceCommit 확인 및 미러링
     ensure = ensure_sourcecommit_repo(integ.sc_project_id, integ.sc_repo_name)
     if ensure.get("status") not in ("created", "exists"):
@@ -331,19 +340,19 @@ class RunBuildRequest(BaseModel):
 
 @router.post("/build/run")
 async def run_build(req: RunBuildRequest, db: Session = Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
-    from ...services.ncp_pipeline import ensure_sourcebuild_project, run_sourcebuild as run_sb, _compose_image_repo
+    from ...services.ncp_pipeline import ensure_sourcebuild_project, run_sourcebuild as run_sb
 
     # If only build_project_id provided, construct image_repo from settings
     if req.build_project_id:
-        # Need owner/repo to compose final image name
+        # Need owner/repo to construct image_repo, so require them even when build_project_id is provided
         if not (req.owner and req.repo):
             raise HTTPException(status_code=400, detail="owner/repo required to construct image_repo")
         registry = getattr(settings, "ncp_container_registry_url", None)
         if not registry:
             raise HTTPException(status_code=500, detail="ncp_container_registry_url not configured")
-        image_repo, strategy = _compose_image_repo(registry, req.owner, req.repo, build_project_id=req.build_project_id)
+        image_repo = f"{registry}/{req.owner}-{req.repo}"
 
-        # Get integration to pass SourceCommit info
+        # Get integration to pass SourceCommit info for Dockerfile verification
         integ = get_integration(db, user_id=str(current_user["id"]), owner=req.owner, repo=req.repo)
         sc_project_id = getattr(integ, "sc_project_id", None) if integ else None
         sc_repo_name = getattr(integ, "sc_repo_name", None) if integ else None
@@ -353,6 +362,12 @@ async def run_build(req: RunBuildRequest, db: Session = Depends(get_db), current
 
     if not (req.owner and req.repo):
         raise HTTPException(status_code=400, detail="owner/repo or build_project_id required")
+
+    # Construct image_repo from settings
+    registry = getattr(settings, "ncp_container_registry_url", None)
+    if not registry:
+        raise HTTPException(status_code=500, detail="ncp_container_registry_url not configured")
+    image_repo = f"{registry}/{req.owner}-{req.repo}"
 
     # Ensure SourceBuild exists and persist to DB (use SourceCommit mapping from integration)
     integ = get_integration(db, user_id=str(current_user["id"]), owner=req.owner, repo=req.repo)
@@ -368,11 +383,6 @@ async def run_build(req: RunBuildRequest, db: Session = Depends(get_db), current
         db=db,
         user_id=str(current_user["id"])  # type: ignore
     )
-    # Compose final image name as <repo><buildIdDigits>
-    registry = getattr(settings, "ncp_container_registry_url", None)
-    if not registry:
-        raise HTTPException(status_code=500, detail="ncp_container_registry_url not configured")
-    image_repo, strategy = _compose_image_repo(registry, req.owner, req.repo, build_project_id=build_id)
     return await run_sb(build_id, image_repo=image_repo)
 
 
@@ -489,81 +499,50 @@ async def list_project_integrations(db: Session = Depends(get_db), current_user:
     return [dict(r) for r in raw_maps]
 
 
-# Rollback endpoints
-class RollbackToCommitRequest(BaseModel):
-    owner: str
-    repo: str
-    commit_sha: str
-
-
-class RollbackToPreviousRequest(BaseModel):
-    owner: str
-    repo: str
-    steps_back: int = 1  # Default: rollback to previous deployment
-
-
-@router.post("/rollback/commit")
-async def rollback_to_commit_endpoint(
-    req: RollbackToCommitRequest,
+@router.post("/github/connect")
+async def connect_github_repository(
+    req: MirrorToSCRequest,
     db: Session = Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """
-    Rollback to a specific commit SHA.
+    """GitHub 레포지토리 연동 (NCP 연동 없이)"""
+    # Parse owner/repo from URL
+    tail = req.repo_url.split("github.com/")[-1].rstrip("/")
+    owner = tail.split("/")[0]
+    repo_name = tail.split("/")[1].replace('.git','') if '/' in tail else tail
+    
+    # GitHub App 설치 상태를 확인 (DB 우선 + API 폴백)
+    try:
+        # DB에서 먼저 조회하고, 없으면 GitHub API로 실시간 조회
+        token, installation_id = await github_app_auth.get_installation_token_for_repo(owner, repo_name, db)
+    except Exception as e:
+        # GitHub App이 설치되지 않은 경우
+        raise HTTPException(
+            status_code=401, 
+            detail=f"GitHub App이 레포지토리 '{owner}/{repo_name}'에 설치되지 않았습니다. GitHub App을 설치해주세요."
+        )
 
-    For advanced users who know the exact commit to rollback to.
-    """
-    from ...services.rollback import rollback_to_commit
-
-    return await rollback_to_commit(
-        owner=req.owner,
-        repo=req.repo,
-        target_commit_sha=req.commit_sha,
+    # GitHub 연동 정보를 DB에 저장 (user_project_integration 테이블 사용)
+    integration = upsert_integration(
         db=db,
-        user_id=str(current_user["id"])
-    )
-
-
-@router.post("/rollback/previous")
-async def rollback_to_previous_endpoint(
-    req: RollbackToPreviousRequest,
-    db: Session = Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_user)
-) -> Dict[str, Any]:
-    """
-    Rollback to N-th previous deployment.
-
-    For general users. Default steps_back=1 means rollback to the previous deployment.
-    """
-    from ...services.rollback import rollback_to_previous
-
-    return await rollback_to_previous(
-        owner=req.owner,
-        repo=req.repo,
-        steps_back=req.steps_back,
-        db=db,
-        user_id=str(current_user["id"])
-    )
-
-
-@router.get("/deployments/{owner}/{repo}/history")
-async def get_deployment_history(
-    owner: str,
-    repo: str,
-    limit: int = Query(10, ge=1, le=50, description="Number of deployments to return"),
-    db: Session = Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_user)
-) -> Dict[str, Any]:
-    """
-    Get deployment history for a project.
-
-    Returns list of recent deployments that can be used for rollback.
-    """
-    from ...services.rollback import get_rollback_candidates
-
-    return await get_rollback_candidates(
+        user_id=str(current_user["id"]),
+        user_email=current_user.get("email"),
         owner=owner,
-        repo=repo,
-        db=db,
-        limit=limit
+        repo=repo_name,
+        repository_id=None,
+        installation_id=installation_id,  # GitHub App 설치 ID 저장
+        sc_project_id=None,    # NCP 연동은 별도
+        sc_repo_name=None,
     )
+
+    return {
+        "status": "success",
+        "message": "GitHub 레포지토리가 성공적으로 연동되었습니다.",
+        "repository": {
+            "owner": owner,
+            "repo": repo_name,
+            "url": req.repo_url
+        },
+        "integration_id": integration.id
+    }
+
