@@ -58,7 +58,7 @@ class GeminiClient(LLMClient):
                     coerced_lines = 30
                 if coerced_lines < 1:
                     coerced_lines = 1
-                if coerced_lines > 100:
+                if coerced_lines >= 100:
                     coerced_lines = 100
                 entities["lines"] = coerced_lines
                 entities["previous"] = bool(parameters.get("previous", False))
