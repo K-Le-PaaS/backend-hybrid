@@ -50,13 +50,24 @@ class GeminiClient(LLMClient):
 
             # 스케일링 복제수
             if command == "scale":
-                if parameters.get("replicas") is not None:
-                    entities["replicas"] = parameters.get("replicas")
+                raw_replicas = parameters.get("replicas", 1)
+                try:
+                    coerced_replicas = int(raw_replicas)
+                except (TypeError, ValueError):
+                    coerced_replicas = 1
+                if coerced_replicas < 1:
+                    coerced_replicas = 1
+                if coerced_replicas > 100:  # 최대 100개로 제한
+                    coerced_replicas = 100
+                entities["replicas"] = coerced_replicas
 
             # 롤백 버전
             if command == "rollback":
-                if parameters.get("version") is not None:
-                    entities["version"] = parameters.get("version")
+                raw_version = parameters.get("version", "")
+                if raw_version and isinstance(raw_version, str):
+                    entities["version"] = raw_version.strip()
+                else:
+                    entities["version"] = ""
 
             # 로그 관련 옵션: lines, previous
             if command == "logs":
@@ -70,7 +81,15 @@ class GeminiClient(LLMClient):
                 if coerced_lines >= 100:
                     coerced_lines = 100
                 entities["lines"] = coerced_lines
-                entities["previous"] = bool(parameters.get("previous", False))
+                
+                # 이전 파드 로그 여부
+                raw_previous = parameters.get("previous", False)
+                if isinstance(raw_previous, bool):
+                    entities["previous"] = raw_previous
+                elif isinstance(raw_previous, str):
+                    entities["previous"] = raw_previous.lower() in ("true", "1", "yes", "on")
+                else:
+                    entities["previous"] = False
 
             # list_deployments / list_services / list_ingresses / list_namespaces 는 파라미터 없음
             
