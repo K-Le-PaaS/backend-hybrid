@@ -1,5 +1,5 @@
 # Builder stage
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
     curl ca-certificates && \

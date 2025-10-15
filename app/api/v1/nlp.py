@@ -101,7 +101,11 @@ async def process_command(command_data: NaturalLanguageCommand):
             
             req = CommandRequest(
                 command=intent,
-                app_name=entities.get("app_name") or "",
+                # 리소스 타입별 필드 설정
+                pod_name=entities.get("pod_name") or "",
+                deployment_name=entities.get("deployment_name") or "",
+                service_name=entities.get("service_name") or "",
+                # 기타 파라미터들
                 replicas=entities.get("replicas", 1),
                 lines=entities.get("lines", 30),
                 version=entities.get("version") or "",
