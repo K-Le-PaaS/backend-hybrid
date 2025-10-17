@@ -1,12 +1,14 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import logging
 from datetime import datetime
 import uuid
+from sqlalchemy.orm import Session
 
 # commands.py 연동을 위한 import
 from ...services.commands import CommandRequest, plan_command, execute_command
+from ...database import get_db
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -35,24 +37,27 @@ class CommandHistory(BaseModel):
 command_history: List[CommandHistory] = []
 
 @router.post("/nlp/process", response_model=CommandResponse)
-async def process_command(command_data: NaturalLanguageCommand):
+async def process_command(
+    command_data: NaturalLanguageCommand,
+    db: Session = Depends(get_db)
+):
     """
-    자연어 명령을 처리합니다.
+    자연어 명령을 처리합니다 (일반 K8s 명령 + 롤백 명령 지원).
     """
     try:
         command = command_data.command.strip()
         logger.info(f"자연어 명령 처리 시작: {command}")
-        
+
         # 명령 유효성 검사
         if not command:
             raise HTTPException(status_code=400, detail="명령을 입력해주세요.")
-        
+
         if len(command) < 3:
             raise HTTPException(status_code=400, detail="명령이 너무 짧습니다. (최소 3자 이상)")
-        
+
         if len(command) > 500:
             raise HTTPException(status_code=400, detail="명령이 너무 깁니다. (최대 500자)")
-        
+
         # 로그 줄 수 제한 검증 (추가 검증)
         if "줄" in command or "lines" in command.lower():
             # 숫자 추출하여 제한 확인
@@ -62,12 +67,12 @@ async def process_command(command_data: NaturalLanguageCommand):
                 num = int(num_str)
                 if num > 100:
                     raise HTTPException(status_code=400, detail="로그 줄 수는 최대 100줄까지 조회 가능합니다.")
-        
+
         # 위험한 명령어 체크
         dangerous_keywords = ['rm -rf', 'sudo', 'kill', 'format', 'delete all']
         if any(keyword in command.lower() for keyword in dangerous_keywords):
             raise HTTPException(status_code=400, detail="위험한 명령어가 포함되어 있습니다.")
-        
+
         # Gemini API를 통한 자연어 해석 (1회만!)
         try:
             from ...llm.gemini import GeminiClient

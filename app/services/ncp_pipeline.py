@@ -499,9 +499,7 @@ async def create_sourcebuild_project_rest(owner: str, repo: str, branch: str, im
     _dbg("SB-PROJECT-CREATE", owner=owner, repo=repo,
          image_name=ncr_image_name, registry=registry_project)
 
-    # Dockerfile-based schema for apigw REST (guarantees container build & push)
-    # Use cache (not artifact) for NCR push - matches NCP Console behavior
-    # Added cmd.dockerbuild to enable native Docker build commands
+    # EXACT working configuration - matches the version that successfully built with Docker
     body = {
         "name": f"build-{owner}-{repo}",
         "source": {
@@ -1035,6 +1033,7 @@ def mirror_to_sourcecommit(
     sc_password: str | None = None,
     sc_endpoint: str | None = None,
     sc_full_url: str | None = None,
+    commit_sha: str | None = None,
 ) -> dict:
     """Clone from GitHub (with installation token if provided) and mirror push to NCP SourceCommit.
 
@@ -1045,6 +1044,7 @@ def mirror_to_sourcecommit(
     - sc_repo_name: Target repository name to push to
     - sc_username/password: SourceCommit basic auth (or use token as username and 'x' as password)
     - sc_endpoint: e.g., https://sourcecommit.apigw.ntruss.com
+    - commit_sha: Git commit SHA to use as image tag (default: "latest")
     """
     work_dir = Path("/tmp") / f"mirror-{uuid.uuid4().hex[:8]}"
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -1080,19 +1080,27 @@ def mirror_to_sourcecommit(
             pwd = quote(p_raw or "x", safe="")
             sc_url = sc_url.replace("https://", f"https://{user}:{pwd}@", 1)
 
-        # Push refs
+        # Push only main branch (not mirror to avoid syncing master/other branches)
         try:
-            # First try mirror for exact sync
-            subprocess.run(["git", "-C", str(bare_dir), "push", "--mirror", sc_url], check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as e_mirror:
-            # Fallback when remote rejects deletion of current branch
-            _dbg("SC-PUSH-FALLBACK", err=e_mirror.stderr[:200] if getattr(e_mirror, 'stderr', None) else str(e_mirror))
-            subprocess.run(["git", "-C", str(bare_dir), "push", "--all", sc_url], check=True, capture_output=True, text=True)
-            subprocess.run(["git", "-C", str(bare_dir), "push", "--tags", sc_url], check=True, capture_output=True, text=True)
+            # Push main branch only
+            subprocess.run(["git", "-C", str(bare_dir), "push", "-f", sc_url, "main:main"], check=True, capture_output=True, text=True)
+            _dbg("SC-PUSH-MAIN", status="success")
+        except subprocess.CalledProcessError as e_main:
+            _dbg("SC-PUSH-MAIN-ERR", err=e_main.stderr[:200] if getattr(e_main, 'stderr', None) else str(e_main))
+            # Fallback: try pushing all refs if main doesn't exist
+            try:
+                subprocess.run(["git", "-C", str(bare_dir), "push", "--all", sc_url], check=True, capture_output=True, text=True)
+            except subprocess.CalledProcessError:
+                pass
+        # Push tags
+        try:
+            subprocess.run(["git", "-C", str(bare_dir), "push", "--tags", sc_url], check=False, capture_output=True, text=True)
+        except subprocess.CalledProcessError:
+            pass
         # Optional: auto-inject a default Kubernetes manifest into SourceCommit after mirroring
         try:
-            if os.getenv("KLEPAAS_AUTOINJECT_MANIFEST_ON_LINK", "false").lower() in ("1", "true", "yes"):  # opt-in
-                _dbg("SC-INJECT-MANIFEST", repo=sc_full_url)
+            if os.getenv("KLEPAAS_AUTOINJECT_MANIFEST_ON_LINK", "true").lower() in ("1", "true", "yes"):  # enabled by default
+                _dbg("SC-INJECT-MANIFEST", repo=sc_full_url, commit_sha=commit_sha)
                 inj_dir = work_dir / "inject"
                 # ensure parent exists; do NOT pre-create destination for git clone
                 try:
@@ -1132,40 +1140,29 @@ def mirror_to_sourcecommit(
                             pass
                 if not clone_ok:
                     raise RuntimeError("clone failed after retries")
-                # Ensure repository contains latest GitHub contents (fallback in case mirror failed)
-                try:
-                    # add upstream and pull main/master (allow unrelated histories)
-                    subprocess.run(["git", "-C", str(inj_dir), "remote", "add", "upstream", gh_url], check=False, capture_output=True, text=True)
-                    pull_ok = False
-                    for br in ("main", "master"):
-                        pr = subprocess.run(["git", "-C", str(inj_dir), "pull", "upstream", br, "--allow-unrelated-histories"], capture_output=True, text=True)
-                        if pr.returncode == 0:
-                            pull_ok = True
-                            break
-                    _dbg("SC-INJECT-UPSTREAM", pulled=pull_ok)
-                except Exception as _pe:  # noqa: BLE001
-                    _dbg("SC-INJECT-UPSTREAM-ERROR", err=str(_pe))
-                # Select target branch: prefer origin/main, else origin/master
-                target_branch = None
+                # Select target branch: always use main
+                target_branch = "main"
+
+                # Fetch all branches from origin
                 try:
                     subprocess.run(["git", "-C", str(inj_dir), "fetch", "--all"], check=True, capture_output=True, text=True)
-                    chk_main = subprocess.run(["git", "-C", str(inj_dir), "rev-parse", "--verify", "origin/main"], capture_output=True, text=True)
-                    if chk_main.returncode == 0:
-                        target_branch = "main"
-                    else:
-                        chk_master = subprocess.run(["git", "-C", str(inj_dir), "rev-parse", "--verify", "origin/master"], capture_output=True, text=True)
-                        if chk_master.returncode == 0:
-                            target_branch = "master"
                 except Exception:
                     pass
-                if not target_branch:
-                    target_branch = "main"
-                # checkout work branch tracking origin/<target>
-                try:
-                    subprocess.run(["git", "-C", str(inj_dir), "checkout", "-B", target_branch, f"origin/{target_branch}"], check=True, capture_output=True, text=True)
-                except subprocess.CalledProcessError:
-                    subprocess.run(["git", "-C", str(inj_dir), "checkout", "-b", target_branch], check=False, capture_output=True, text=True)
-                _dbg("SC-INJECT-CHECKOUT", branch=target_branch)
+
+                # Check if main branch exists on origin
+                chk_main = subprocess.run(["git", "-C", str(inj_dir), "rev-parse", "--verify", "origin/main"], capture_output=True, text=True)
+                main_exists = (chk_main.returncode == 0)
+
+                if main_exists:
+                    # Main branch exists - checkout tracking origin/main
+                    subprocess.run(["git", "-C", str(inj_dir), "checkout", "-B", target_branch, "origin/main"], check=True, capture_output=True, text=True)
+                    _dbg("SC-INJECT-CHECKOUT", branch=target_branch, source="origin/main")
+                else:
+                    # Main branch doesn't exist - create new orphan branch
+                    subprocess.run(["git", "-C", str(inj_dir), "checkout", "--orphan", target_branch], check=True, capture_output=True, text=True)
+                    # Remove all files from staging (clean slate)
+                    subprocess.run(["git", "-C", str(inj_dir), "rm", "-rf", "."], check=False, capture_output=True, text=True)
+                    _dbg("SC-INJECT-CHECKOUT", branch=target_branch, source="new_orphan")
 
                 k8s_dir = inj_dir / "k8s"
                 k8s_dir.mkdir(parents=True, exist_ok=True)
@@ -1181,8 +1178,10 @@ def mirror_to_sourcecommit(
                     except Exception:
                         registry = None
                     image_name_unified = repo_part
-                    # Use 'latest' tag by default instead of ${TAG} variable
-                    image_full = f"{registry}/{image_name_unified}:latest" if registry else f"{image_name_unified}:latest"
+                    # Use commit SHA as tag if provided, otherwise use 'latest'
+                    image_tag = commit_sha[:7] if commit_sha else "latest"
+                    image_full = f"{registry}/{image_name_unified}:{image_tag}" if registry else f"{image_name_unified}:{image_tag}"
+                    _dbg("SC-INJECT-IMAGE", image=image_full, commit_sha=commit_sha, image_tag=image_tag)
                     manifest = f"""
 apiVersion: apps/v1
 kind: Deployment
@@ -1232,7 +1231,7 @@ spec:
                     subprocess.run(["git", "-C", str(inj_dir), "config", "user.name", "K-Le-PaaS Bot"], check=False, capture_output=True, text=True)
                     subprocess.run(["git", "-C", str(inj_dir), "add", "k8s/deployment.yaml"], check=True, capture_output=True, text=True)
                     subprocess.run(["git", "-C", str(inj_dir), "add", "k8s/service.yaml"], check=True, capture_output=True, text=True)
-                    subprocess.run(["git", "-C", str(inj_dir), "commit", "-m", "chore: add default k8s manifests (deployment, service)"], check=True, capture_output=True, text=True)
+                    subprocess.run(["git", "-C", str(inj_dir), "commit", "-m", f"chore: add default k8s manifests with tag {image_tag}"], check=True, capture_output=True, text=True)
                     # Push to the checked out target branch explicitly
                     r2 = subprocess.run(["git", "-C", str(inj_dir), "push", "origin", f"HEAD:refs/heads/{target_branch}"], capture_output=True, text=True)
                     _dbg("SC-INJECT-PUSH-BR", br=target_branch, rc=r2.returncode, out=r2.stdout[:120])
@@ -1285,8 +1284,8 @@ def mirror_and_update_manifest(
     - dict with status, manifest_updated flag, and deployed image
     """
 
-    # Step 1: Use existing mirror function to sync GitHub → SourceCommit with ${TAG}
-    _dbg("MM-STEP1-MIRROR", github=github_repo_url, sc_repo=sc_repo_name)
+    # Step 1: Use existing mirror function to sync GitHub → SourceCommit with commit SHA tag
+    _dbg("MM-STEP1-MIRROR", github=github_repo_url, sc_repo=sc_repo_name, image_tag=image_tag)
     mirror_result = mirror_to_sourcecommit(
         github_repo_url=github_repo_url,
         installation_or_access_token=installation_or_access_token,
@@ -1295,7 +1294,8 @@ def mirror_and_update_manifest(
         sc_username=sc_username,
         sc_password=sc_password,
         sc_endpoint=sc_endpoint,
-        sc_full_url=sc_full_url
+        sc_full_url=sc_full_url,
+        commit_sha=image_tag  # Pass image_tag as commit SHA for manifest injection
     )
     _dbg("MM-STEP1-SUCCESS", result=mirror_result)
 
@@ -1334,8 +1334,10 @@ def mirror_and_update_manifest(
 
         _dbg("MM-STEP2-CLONE-SUCCESS", dir=str(sc_dir))
 
-        # Update manifest
-        manifest_path = sc_dir / "k8s" / "deployment.yaml"
+        # Update manifest (or create if missing)
+        k8s_dir = sc_dir / "k8s"
+        manifest_path = k8s_dir / "deployment.yaml"
+        service_path = k8s_dir / "service.yaml"
         manifest_updated = False
 
         if manifest_path.exists():
@@ -1403,14 +1405,109 @@ def mirror_and_update_manifest(
                     ["git", "-C", str(sc_dir), "commit", "-m", f"chore: update image tag to {image_tag}"],
                     check=True, capture_output=True, text=True
                 )
+
+                # Check current branch and push
+                branch_result = subprocess.run(
+                    ["git", "-C", str(sc_dir), "branch", "--show-current"],
+                    capture_output=True, text=True
+                )
+                current_branch = branch_result.stdout.strip() or "main"
+                _dbg("MM-GIT-PUSH-UPDATE", branch=current_branch)
+
                 subprocess.run(
-                    ["git", "-C", str(sc_dir), "push", "origin", "main"],
+                    ["git", "-C", str(sc_dir), "push", "origin", current_branch],
                     check=True, capture_output=True, text=True
                 )
 
-                _dbg("MM-STEP2-PUSH-SUCCESS", image_tag=image_tag)
+                _dbg("MM-STEP2-PUSH-SUCCESS", image_tag=image_tag, branch=current_branch)
         else:
-            _dbg("MM-MANIFEST-NOT-FOUND", path=str(manifest_path), warning="manifest should exist after mirror")
+            # Manifest doesn't exist - create it now
+            _dbg("MM-MANIFEST-NOT-FOUND", path=str(manifest_path), action="creating_now")
+
+            k8s_dir.mkdir(parents=True, exist_ok=True)
+
+            # Extract repo name for Kubernetes naming
+            repo_part_raw = sc_repo_name or "app"
+            repo_part = repo_part_raw.lower()
+
+            # Create deployment manifest
+            manifest_content = f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {repo_part}-deploy
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {repo_part}
+  template:
+    metadata:
+      labels:
+        app: {repo_part}
+    spec:
+      imagePullSecrets:
+      - name: ncp-cr
+      containers:
+      - name: {repo_part}
+        image: {image_repo}:{image_tag}
+        ports:
+        - containerPort: 8080
+"""
+
+            # Create service manifest
+            service_content = f"""apiVersion: v1
+kind: Service
+metadata:
+  name: {repo_part}-svc
+  namespace: default
+spec:
+  selector:
+    app: {repo_part}
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+"""
+
+            # Write manifests
+            manifest_path.write_text(manifest_content, encoding="utf-8")
+            service_path.write_text(service_content, encoding="utf-8")
+            _dbg("MM-MANIFESTS-CREATED", deployment=str(manifest_path), service=str(service_path))
+
+            # Git commit and push
+            subprocess.run(
+                ["git", "-C", str(sc_dir), "config", "user.email", "bot@k-le-paas.local"],
+                check=True, capture_output=True, text=True
+            )
+            subprocess.run(
+                ["git", "-C", str(sc_dir), "config", "user.name", "K-Le-PaaS Bot"],
+                check=True, capture_output=True, text=True
+            )
+            subprocess.run(
+                ["git", "-C", str(sc_dir), "add", "k8s/"],
+                check=True, capture_output=True, text=True
+            )
+            subprocess.run(
+                ["git", "-C", str(sc_dir), "commit", "-m", f"chore: add k8s manifests with tag {image_tag}"],
+                check=True, capture_output=True, text=True
+            )
+
+            # Check current branch and push
+            branch_result = subprocess.run(
+                ["git", "-C", str(sc_dir), "branch", "--show-current"],
+                capture_output=True, text=True
+            )
+            current_branch = branch_result.stdout.strip() or "main"
+            _dbg("MM-GIT-PUSH", branch=current_branch)
+
+            subprocess.run(
+                ["git", "-C", str(sc_dir), "push", "origin", current_branch],
+                check=True, capture_output=True, text=True
+            )
+
+            manifest_updated = True
+            _dbg("MM-MANIFESTS-PUSHED", image_tag=image_tag, branch=current_branch)
 
         return {
             "status": "success",
@@ -1802,14 +1899,14 @@ async def run_sourcebuild(
         cache_cfg = (proj_result.get('cache') or {}) if isinstance(proj_result, dict) else {}
         registry_project = cache_cfg.get('registry') or None
         image_name_from_project = cache_cfg.get('image') or None
-        image_tag = cache_cfg.get('tag') or image_tag
-        _dbg("SB-PROJECT-CACHE", registry=registry_project, image=image_name_from_project, image_tag=image_tag)
+        # Only use cache tag if commit_sha wasn't explicitly provided
+        if not commit_sha:
+            image_tag = cache_cfg.get('tag') or image_tag
+        _dbg("SB-PROJECT-CACHE", registry=registry_project, image=image_name_from_project, image_tag=image_tag, commit_sha=commit_sha)
     except Exception as e:
         _dbg("SB-PROJECT-CACHE-ERR", error=str(e)[:200])
 
-    # 1. 빌드 시작
-    _dbg("SB-BUILD-TRIGGER", project_id=build_project_id)
-
+    # 1. Determine final registry and image name FIRST (before cache update)
     # Use image name directly from project cache config (already has timestamp for uniqueness)
     if image_name_from_project:
         # Project cache config has image name with timestamp (created at project creation time)
@@ -1835,7 +1932,39 @@ async def run_sourcebuild(
     else:
         raise HTTPException(status_code=400, detail="빌드 실행 실패: 이미지 이름을 결정할 수 없습니다")
 
-    # Console-compatible trigger body (cmd.dockerbuild) + cache push
+    # 2. 프로젝트 설정 업데이트 - cmd.dockerbuild의 tag 업데이트
+    # IMPORTANT: 프로젝트 생성 시 cmd.dockerbuild를 사용했으므로 동일하게 PATCH
+    _dbg("SB-UPDATE-PROJECT-TAG", project_id=build_project_id, image_tag=image_tag)
+    try:
+        update_body = {
+            "cmd": {
+                "dockerbuild": {
+                    "use": True,
+                    "dockerfile": "Dockerfile",
+                    "registry": final_registry_project,
+                    "image": final_image_name,
+                    "tag": image_tag,
+                    "latest": (image_tag == "latest")
+                }
+            }
+        }
+        await _call_ncp_rest_api('PATCH', base, f"/api/v1/project/{build_project_id}", update_body)
+        _dbg("SB-PROJECT-TAG-UPDATED", image_tag=image_tag)
+    except Exception as e:
+        _dbg("SB-PROJECT-TAG-UPDATE-ERR", error=str(e)[:200])
+        # Continue anyway - tag update failure shouldn't block build (will use trigger body)
+
+    # 3. 빌드 시작
+    _dbg("SB-BUILD-TRIGGER", project_id=build_project_id, image_tag=image_tag)
+
+    # Console-compatible trigger body (cmd.dockerbuild) + explicit artifact push
+    # This matches the PROVEN WORKING configuration from af4b939 commit
+    # Construct full registry URL for artifact config
+    if image_repo:
+        registry_host = image_repo.split("/")[0] if "/" in image_repo else image_repo
+    else:
+        registry_host = f"{final_registry_project}.kr.ncr.ntruss.com"
+
     trigger_body = {
         "env": {
             "docker": {"use": True, "id": 1}
@@ -1859,28 +1988,27 @@ async def run_sourcebuild(
             "use": True,
             "type": "ContainerRegistry",
             "config": {
-                "registry": f"{final_registry_project}.kr.ncr.ntruss.com/{final_image_name}",
+                "registry": f"{registry_host}/{final_image_name}",
                 "tag": image_tag
             }
         },
-        # Ensure image push is retained via cache block
+        # Ensure image push is retained via cache block on tenants that require it
         "cache": {
-            "use": False
+            "use": True,
+            "registry": final_registry_project,
+            "image": final_image_name,
+            "tag": image_tag,
+            "latest": (image_tag == "latest"),
+            "region": 1
         }
     }
 
-    # If commit_sha is specified (for rollback), add it to trigger body
-    # NCP SourceBuild may support building specific commits via 'ref' or 'commit' field
-    if commit_sha:
-        # Try adding commit reference to env or sourcecommit section
-        # Note: This may need adjustment based on actual NCP API behavior
-        trigger_body["sourcecommit"] = {
-            "commit": commit_sha,
-            "ref": commit_sha
-        }
-        _dbg("SB-TRIGGER-COMMIT", commit_sha=commit_sha)
+    # NOTE: Do NOT add sourcecommit field to trigger body
+    # It causes NCP to ignore builder config and use Buildpack instead
+    # The commit SHA is used only for image tagging via cache.tag
+    # SourceCommit integration handles the actual git commit automatically
 
-    _dbg("SB-TRIGGER-BODY", body=trigger_body)
+    _dbg("SB-TRIGGER-BODY", body=trigger_body, commit_sha=commit_sha)
     build_data = await _call_ncp_rest_api('POST', base, f"/api/v1/project/{build_project_id}/build", trigger_body)
     # Accept multiple response shapes
     build_id = (
@@ -2271,7 +2399,12 @@ async def run_sourcedeploy(
                     _dbg("SD-SCENARIO-POLL-ERR", poll_attempt=poll_attempt, code=getattr(e, 'status_code', None))
 
     # Image tag verification and environment variable preparation
-    effective_tag = tag or "latest"
+    # Convert full commit SHA to 7-character short SHA if needed
+    if tag and len(tag) > 7:
+        effective_tag = tag[:7]
+    else:
+        effective_tag = tag or "latest"
+
     if not (owner and repo and sc_repo_name):
         _dbg("SD-DEPLOY-MISSING-PARAMS", owner=owner, repo=repo, sc_repo_name=sc_repo_name)
         raise HTTPException(
@@ -2382,42 +2515,41 @@ async def run_sourcedeploy(
     else:
         _dbg("SC-MIRROR-SKIP", reason="missing_params", owner=owner, repo=repo, sc_repo_name=sc_repo_name)
 
-    # Step 1: SourceBuild (Container Image 생성 및 Registry 푸시)
-    _dbg("SB-BUILD-START", owner=owner, repo=repo)
-    
-    # SourceBuild 프로젝트 확인/생성
-    build_project_id = await ensure_sourcebuild_project(
-        owner=owner or "unknown",
-        repo=repo or "unknown", 
-        branch="main",
-        sc_project_id=sc_project_id,
-        sc_repo_name=sc_repo_name,
-        db=db,
-        user_id=user_id
-    )
-    
-    # SourceBuild 실행 (컨테이너 이미지 빌드 → Container Registry 푸시)
+    # Step 1: 이미지 정보 구성 (빌드는 이미 webhook handler에서 완료됨)
+    # mirror_and_update_manifest에서 이미 매니페스트에 실제 이미지 태그가 설정됨
+    _dbg("SB-BUILD-SKIP", reason="already_built_in_webhook", effective_tag=effective_tag)
+
+    # Get build_project_id from DB for history recording
+    build_project_id = None
+    if db is not None and user_id is not None and owner and repo:
+        try:
+            integ_existing = get_integration(db, user_id=user_id, owner=owner, repo=repo)
+            if integ_existing and getattr(integ_existing, 'build_project_id', None):
+                build_project_id = str(getattr(integ_existing, 'build_project_id'))
+                _dbg("SB-PROJECT-ID-FROM-DB", build_project_id=build_project_id)
+        except Exception:
+            pass
+
+    # Compose image info for downstream deploy (without actually building)
     registry = getattr(settings, "ncp_container_registry_url", None)
-    env_registry = os.environ.get("KLEPAAS_NCP_CONTAINER_REGISTRY_URL")
-    _dbg("SB-ENV", env_registry=env_registry, settings_registry=registry, owner=owner, repo=repo)
-    image_repo, _ = _compose_image_repo(registry, owner, repo, build_project_id=build_project_id)
-    _dbg("SB-IMAGE-REPO", image_repo=image_repo)
-    build_result = await run_sourcebuild(build_project_id, image_repo=image_repo)
-    _dbg("SB-BUILD-RESULT", build_project_id=build_project_id, result=build_result)
-    # If SourceBuild API didn't return artifact registry, compose from settings for downstream deploy
-    if (not build_result.get("image")) and owner and repo:
-        registry = getattr(settings, "ncp_container_registry_url", None)
-        if registry:
-            # Fallback uses lowercase only (no hyphen replacement)
-            def _norm_part_fb(s: str | None) -> str:
-                raw = (s or "").lower()
-                return "".join(ch if (ch.isalnum() or ch == "-") else "-" for ch in raw) or "app"
-            image_name_fb = f"{_norm_part_fb(owner)}-{_norm_part_fb(repo)}"
-            build_result["image"] = f"{registry}/{image_name_fb}:latest"
-            _dbg("SB-IMAGE-FALLBACK", image=build_result["image"]) 
-    
-    # Step 1.5: Manifest already updated in Step 0 (mirror_and_update_manifest)
-    # No additional manifest update needed here - the image tag was set during mirroring
+    if registry and owner and repo:
+        def _norm_part_fb(s: str | None) -> str:
+            raw = (s or "").lower()
+            return "".join(ch if (ch.isalnum() or ch == "-") else "-" for ch in raw) or "app"
+        image_name_fb = f"{_norm_part_fb(owner)}-{_norm_part_fb(repo)}"
+        deployed_image = f"{registry}/{image_name_fb}:{effective_tag}"
+        _dbg("SB-IMAGE-INFO", image=deployed_image, image_tag=effective_tag)
+        build_result = {
+            "status": "skipped",
+            "image": deployed_image,
+            "image_tag": effective_tag,
+            "reason": "already_built_in_webhook_handler"
+        }
+    else:
+        build_result = {
+            "status": "skipped",
+            "reason": "already_built_in_webhook_handler"
+        }
 
     # Step 2: SourceDeploy 실행 (환경변수 없이, manifest에 이미 실제 태그 설정됨)
     # Manifest already contains the actual image tag (e.g., registry/owner_repo:v1.2.3)
@@ -2431,6 +2563,45 @@ async def run_sourcedeploy(
     data = await _call_ncp_rest_api('POST', base, deploy_path, deploy_body)
     result = data.get('result') if isinstance(data, dict) else None
 
+    # Record deployment history
+    deploy_history_id = None
+    if db and user_id and owner and repo:
+        try:
+            from ..models.deployment_history import DeploymentHistory
+            from datetime import datetime
+
+            history_record = DeploymentHistory(
+                user_id=user_id,
+                github_owner=owner,
+                github_repo=repo,
+                github_commit_sha=effective_tag,  # Store the deployed commit SHA/tag
+                sourcecommit_project_id=sc_project_id,
+                sourcecommit_repo_name=sc_repo_name,
+                sourcebuild_project_id=str(build_project_id) if build_project_id else None,
+                sourcedeploy_project_id=deploy_project_id,
+                deploy_id=str((result or {}).get('historyId')) if result else None,
+                status="running",
+                sourcedeploy_status="started",
+                image_name=image_repo,
+                image_tag=effective_tag,
+                image_url=desired_image,
+                cluster_id=getattr(settings, 'ncp_nks_cluster_id', None),
+                namespace="default",
+                started_at=datetime.utcnow(),
+                auto_deploy_enabled=True
+            )
+
+            db.add(history_record)
+            db.commit()
+            db.refresh(history_record)
+            deploy_history_id = history_record.id
+
+            _dbg("SD-HISTORY-RECORDED", history_id=deploy_history_id, image_tag=effective_tag, commit_sha=effective_tag)
+        except Exception as e:
+            _dbg("SD-HISTORY-ERROR", error=str(e)[:500])
+            # Don't fail deployment if history recording fails
+            pass
+
     return {
         "status": "started",
         "deploy_project_id": deploy_project_id,
@@ -2440,6 +2611,7 @@ async def run_sourcedeploy(
         "manifest_updated": manifest_updated,  # True if manifest was updated during mirroring
         "uses_env_var": False,  # No longer using environment variable approach
         "image": desired_image,
+        "deploy_history_id": deploy_history_id,
         "response": (result or {}).get('historyId') or data
     }
 

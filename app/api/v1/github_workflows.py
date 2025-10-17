@@ -1324,7 +1324,10 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
         )
         
         # SourceBuild 실행 (build/run과 동일)
-        build_result = await run_sb(build_id, image_repo=image_repo)
+        # Pass commit SHA to use as image tag (truncate to 7 characters for NCR compatibility)
+        commit_sha_full = head_commit.get("id")
+        commit_sha = commit_sha_full[:7] if commit_sha_full else None
+        build_result = await run_sb(build_id, image_repo=image_repo, commit_sha=commit_sha)
         logger.info(f"SourceBuild completed: {build_result}")
         
         # 50-80%: 빌드 진행 중
@@ -1474,6 +1477,8 @@ spec:
         )
         
         # SourceDeploy 실행 (deploy/run과 동일)
+        # Use commit SHA as image tag
+        commit_sha = head_commit.get("id")
         deploy_result = await run_sourcedeploy(
             deploy_project_id,
             stage_name="production",
@@ -1483,6 +1488,7 @@ spec:
             user_id=integration.user_id,
             owner=integration.github_owner,
             repo=integration.github_repo,
+            tag=commit_sha,  # Pass commit SHA as tag
         )
         
         logger.info(f"SourceDeploy completed: {deploy_result}")

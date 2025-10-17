@@ -17,7 +17,7 @@ class CommandRequest(BaseModel):
     command: str = Field(min_length=1)
     # 리소스 타입별 명확한 필드 분리
     pod_name: str = Field(default="")          # Pod 관련 명령어용
-    deployment_name: str = Field(default="")   # Deployment 관련 명령어용  
+    deployment_name: str = Field(default="")   # Deployment 관련 명령어용
     service_name: str = Field(default="")      # Service 관련 명령어용
     # 기타 파라미터들
     replicas: int = Field(default=1)
@@ -25,6 +25,11 @@ class CommandRequest(BaseModel):
     version: str = Field(default="")
     namespace: str = Field(default="default")
     previous: bool = Field(default=False)  # 이전 파드 로그 여부
+    # NCP 롤백 관련 필드
+    github_owner: str = Field(default="")      # GitHub 저장소 소유자
+    github_repo: str = Field(default="")       # GitHub 저장소 이름
+    target_commit_sha: str = Field(default="") # 롤백할 커밋 SHA
+    steps_back: int = Field(default=0, ge=0)   # 몇 번 전으로 롤백할지
 
 
 @dataclass
@@ -170,6 +175,20 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             tool="k8s_rollback_deployment",
             args={"name": resource_name, "namespace": ns, "version": req.version},
         )
+
+    elif command == "ncp_rollback":
+        # NCP 파이프라인 롤백 (deployment_histories 기반)
+        if not req.github_owner or not req.github_repo:
+            raise ValueError("NCP 롤백 명령어에는 GitHub 저장소 정보가 필요합니다. 예: 'owner/repo를 3번 전으로 롤백'")
+        return CommandPlan(
+            tool="ncp_rollback_deployment",
+            args={
+                "owner": req.github_owner,
+                "repo": req.github_repo,
+                "target_commit_sha": req.target_commit_sha,
+                "steps_back": req.steps_back
+            },
+        )
     
     elif command == "list_pods" or command == "pods":
         return CommandPlan(
@@ -259,6 +278,9 @@ async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
 
     if plan.tool == "k8s_rollback_deployment":
         return await _execute_rollback(plan.args)
+
+    if plan.tool == "ncp_rollback_deployment":
+        return await _execute_ncp_rollback(plan.args)
 
     if plan.tool == "k8s_list_pods":
         return await _execute_list_pods(plan.args)
@@ -714,28 +736,28 @@ async def _execute_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
     name = args["name"]
     namespace = args["namespace"]
     version = args.get("version")
-    
+
     try:
         apps_v1 = get_apps_v1_api()
-        
+
         if version:
             # 특정 버전으로 롤백 (이미지 태그 변경)
             deployment = apps_v1.read_namespaced_deployment(name=name, namespace=namespace)
-            
+
             # 첫 번째 컨테이너의 이미지를 변경
             if deployment.spec.template.spec.containers:
                 current_image = deployment.spec.template.spec.containers[0].image
                 image_base = current_image.rsplit(":", 1)[0]  # 태그 제거
                 new_image = f"{image_base}:{version}"
-                
+
                 deployment.spec.template.spec.containers[0].image = new_image
-                
+
                 apps_v1.patch_namespaced_deployment(
                     name=name,
                     namespace=namespace,
                     body=deployment
                 )
-                
+
                 return {
                     "status": "success",
                     "message": f"Deployment '{name}'을 {version} 버전으로 롤백했습니다.",
@@ -750,13 +772,92 @@ async def _execute_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
                 "status": "error",
                 "message": "버전을 명시해주세요. 예: 'v1.0으로 롤백'"
             }
-        
+
     except ApiException as e:
         if e.status == 404:
             return {"status": "error", "message": f"Deployment '{name}'을 찾을 수 없습니다."}
         return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
     except Exception as e:
         return {"status": "error", "message": f"롤백 실패: {str(e)}"}
+
+
+async def _execute_ncp_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    NCP 파이프라인 롤백 (ncp_rollback 명령어)
+    deployment_histories 테이블 기반으로 이전 배포로 롤백
+    예: "owner/repo를 3번 전으로 롤백", "owner/repo를 커밋 abc1234로 롤백"
+    """
+    from .rollback import rollback_to_commit, rollback_to_previous
+    from ..database import get_db
+
+    owner = args["owner"]
+    repo = args["repo"]
+    target_commit_sha = args.get("target_commit_sha", "")
+    steps_back = args.get("steps_back", 0)
+
+    try:
+        # 데이터베이스 세션 생성
+        db = next(get_db())
+
+        # 커밋 SHA가 지정되었으면 해당 커밋으로 롤백
+        if target_commit_sha:
+            result = await rollback_to_commit(
+                owner=owner,
+                repo=repo,
+                target_commit_sha=target_commit_sha,
+                db=db,
+                user_id="nlp_user"
+            )
+
+            return {
+                "status": "success",
+                "action": "ncp_rollback_to_commit",
+                "message": f"{owner}/{repo}를 커밋 {target_commit_sha[:7]}로 롤백했습니다.",
+                "result": result
+            }
+
+        # steps_back이 지정되었으면 N번 전으로 롤백
+        elif steps_back > 0:
+            result = await rollback_to_previous(
+                owner=owner,
+                repo=repo,
+                steps_back=steps_back,
+                db=db,
+                user_id="nlp_user"
+            )
+
+            return {
+                "status": "success",
+                "action": "ncp_rollback_to_previous",
+                "message": f"{owner}/{repo}를 {steps_back}번 전 배포로 롤백했습니다.",
+                "result": result
+            }
+
+        else:
+            # 기본값: 1번 전으로 롤백
+            result = await rollback_to_previous(
+                owner=owner,
+                repo=repo,
+                steps_back=1,
+                db=db,
+                user_id="nlp_user"
+            )
+
+            return {
+                "status": "success",
+                "action": "ncp_rollback_to_previous",
+                "message": f"{owner}/{repo}를 이전 배포로 롤백했습니다.",
+                "result": result
+            }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "action": "ncp_rollback",
+            "message": f"NCP 롤백 실패: {str(e)}",
+            "owner": owner,
+            "repo": repo
+        }
 
 
 async def _execute_list_pods(args: Dict[str, Any]) -> Dict[str, Any]:

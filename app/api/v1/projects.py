@@ -303,19 +303,43 @@ async def github_push_webhook(
     # 4) 실행
     run_results: Dict[str, Any] = {}
     try:
+        # Extract commit SHA from webhook payload
+        commit_sha = payload.get("after")[:7] if payload.get("after") else None
+
         build_id = integ.build_project_id or (created_pipeline or {}).get("build_project_id")
         if build_id:
             # Construct image_repo from settings for build execution
             registry = getattr(settings, "ncp_container_registry_url", None)
             if registry:
                 image_repo = f"{registry}/{owner}-{repo_name}"
-                run_results["build"] = await run_sourcebuild(str(build_id), image_repo=image_repo)
+                run_results["build"] = await run_sourcebuild(
+                    str(build_id),
+                    image_repo=image_repo,
+                    commit_sha=commit_sha,  # Pass commit SHA for tagging
+                    sc_project_id=integ.sc_project_id,
+                    sc_repo_name=integ.sc_repo_name,
+                    branch=integ.branch or "main"
+                )
             else:
-                run_results["build"] = await run_sourcebuild(str(build_id))
+                run_results["build"] = await run_sourcebuild(
+                    str(build_id),
+                    commit_sha=commit_sha,
+                    sc_project_id=integ.sc_project_id,
+                    sc_repo_name=integ.sc_repo_name,
+                    branch=integ.branch or "main"
+                )
         deploy_id = integ.deploy_project_id or (created_pipeline or {}).get("deploy_project_id")
         if deploy_id:
-            # 커밋 SHA를 이미지 태그로 사용하는 설계는 run_sourcedeploy 시나리오 확장 시 반영 가능
-            run_results["deploy"] = await run_sourcedeploy(str(deploy_id))
+            # Pass commit SHA and other context to deploy for manifest update
+            run_results["deploy"] = await run_sourcedeploy(
+                str(deploy_id),
+                sc_project_id=integ.sc_project_id,
+                db=db,
+                user_id=integ.user_id,
+                owner=owner,
+                repo=repo_name,
+                tag=commit_sha  # Use commit SHA as deployment tag
+            )
     except Exception as e:
         run_results["error"] = str(e)
 
@@ -392,6 +416,7 @@ class RunDeployRequest(BaseModel):
     repo: str | None = None
     stage_name: str | None = "production"
     scenario_name: str | None = "deploy-app"
+    tag: str | None = None  # Image tag (e.g., commit SHA) to deploy
 
 
 @router.post("/deploy/run")
@@ -446,6 +471,7 @@ spec:
         user_id=str(current_user["id"]),
         owner=req.owner,
         repo=req.repo,
+        tag=req.tag,  # Pass tag parameter
     )
 
 
