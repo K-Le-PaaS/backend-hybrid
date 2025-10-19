@@ -729,6 +729,7 @@ async def _execute_ncp_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
     repo = args["repo"]
     target_commit_sha = args.get("target_commit_sha", "")
     steps_back = args.get("steps_back", 0)
+    user_id = args.get("user_id", "nlp_user")  # JWT에서 전달된 user_id 사용, 없으면 기본값
 
     try:
         # 데이터베이스 세션 생성
@@ -741,7 +742,7 @@ async def _execute_ncp_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
                 repo=repo,
                 target_commit_sha=target_commit_sha,
                 db=db,
-                user_id="nlp_user"
+                user_id=user_id  # 실제 사용자 ID 사용
             )
 
             return {
@@ -758,7 +759,7 @@ async def _execute_ncp_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
                 repo=repo,
                 steps_back=steps_back,
                 db=db,
-                user_id="nlp_user"
+                user_id=user_id  # 실제 사용자 ID 사용
             )
 
             return {
@@ -775,7 +776,7 @@ async def _execute_ncp_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
                 repo=repo,
                 steps_back=1,
                 db=db,
-                user_id="nlp_user"
+                user_id=user_id  # 실제 사용자 ID 사용
             )
 
             return {

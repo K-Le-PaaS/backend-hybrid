@@ -1,7 +1,43 @@
 from __future__ import annotations
 
-from typing import Callable, Iterable, List
+from typing import Callable, Iterable, List, Optional
 from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import jwt
+from ..core.config import get_settings
+
+
+security = HTTPBearer(auto_error=False)  # auto_error=False로 설정하여 토큰 없어도 에러 안남
+
+
+def get_current_user_id(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
+) -> Optional[str]:
+    """
+    JWT 토큰에서 사용자 ID를 추출합니다.
+    토큰이 없거나 유효하지 않으면 None을 반환합니다.
+
+    Returns:
+        user_id (Optional[str]): 토큰에서 추출한 사용자 ID, 또는 None
+    """
+    if not credentials:
+        return None
+
+    try:
+        settings = get_settings()
+        token = credentials.credentials
+        payload = jwt.decode(
+            token,
+            settings.secret_key,
+            algorithms=["HS256"]
+        )
+        return payload.get("sub")  # 'sub' 클레임에 user_id 저장
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+    except Exception:
+        return None
 
 
 def get_token_scopes(request: Request) -> List[str]:

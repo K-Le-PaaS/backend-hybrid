@@ -28,7 +28,10 @@ else:
 if DATABASE_URL.startswith("sqlite"):
     engine = create_engine(
         DATABASE_URL,
-        connect_args={"check_same_thread": False},
+        connect_args={
+            "check_same_thread": False,
+            "timeout": 30  # 락 대기 시간 30초로 증가 (기본 5초)
+        },
         poolclass=StaticPool,
         echo=False  # 디버그 모드 비활성화
     )
@@ -99,14 +102,26 @@ def init_services(db_session: Session):
     """서비스들을 초기화합니다."""
     from .services.audit_logger import init_audit_logger
     from .services.deployment_history import init_deployment_history_service
-    from .services.kubernetes_watcher import init_kubernetes_watcher
+    from .services.kubernetes_watcher import (
+        init_kubernetes_watcher,
+        get_kubernetes_watcher,
+        update_deployment_history_on_success
+    )
     from .websocket.deployment_monitor import init_deployment_monitor_manager
-    
+
     # 서비스 초기화
     init_audit_logger(db_session)
     init_deployment_history_service(db_session)
     init_kubernetes_watcher()
     init_deployment_monitor_manager()
+
+    # Kubernetes Watcher 이벤트 핸들러 등록
+    try:
+        watcher = get_kubernetes_watcher()
+        watcher.add_event_handler('deployment', update_deployment_history_on_success)
+    except RuntimeError:
+        # Watcher 초기화 실패 시 (kubeconfig 없는 경우 등)
+        pass
 
 
 def _ensure_user_slack_config_columns() -> None:

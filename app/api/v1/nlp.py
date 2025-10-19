@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 # commands.py 연동을 위한 import
 from ...services.commands import CommandRequest, plan_command, execute_command
 from ...database import get_db
+from ...services.security import get_current_user_id
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -39,14 +40,20 @@ command_history: List[CommandHistory] = []
 @router.post("/nlp/process", response_model=CommandResponse)
 async def process_command(
     command_data: NaturalLanguageCommand,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user_id: Optional[str] = Depends(get_current_user_id)
 ):
     """
     자연어 명령을 처리합니다 (일반 K8s 명령 + 롤백 명령 지원).
+
+    JWT 토큰이 있으면 인증된 사용자로, 없으면 'api_user'로 처리합니다.
     """
     try:
+        # 사용자 ID 결정 (JWT 토큰 있으면 사용, 없으면 기본값)
+        effective_user_id = user_id or "api_user"
+
         command = command_data.command.strip()
-        logger.info(f"자연어 명령 처리 시작: {command}")
+        logger.info(f"자연어 명령 처리 시작: {command} (user_id: {effective_user_id})")
 
         # 명령 유효성 검사
         if not command:
@@ -81,7 +88,7 @@ async def process_command(
             # Gemini로 명령 해석
             gemini_result = await gemini_client.interpret(
                 prompt=command,
-                user_id="api_user",
+                user_id=effective_user_id,  # 실제 사용자 ID 사용
                 project_name=command_data.context.get("project_name", "default") if command_data.context else "default"
             )
             
@@ -129,7 +136,12 @@ async def process_command(
             try:
                 plan = plan_command(req)
                 logger.info(f"CommandPlan 생성: {plan}")
-                
+
+                # user_id를 plan.args에 추가
+                if not plan.args:
+                    plan.args = {}
+                plan.args["user_id"] = effective_user_id
+
                 k8s_result = await execute_command(plan)
                 logger.info(f"K8s 실행 결과: {k8s_result}")
                 

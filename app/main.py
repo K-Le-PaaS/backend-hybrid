@@ -152,13 +152,51 @@ def create_app() -> FastAPI:
         # 데이터베이스 초기화
         init_database()
         logger.info("Database initialized successfully")
-        
+
         # 서비스 초기화
         db_session = next(get_db())
         init_services(db_session)
         logger.info("All services initialized successfully")
+
+        # Kubernetes Watcher 시작 (K8s 설정이 있는 경우)
+        try:
+            from .services.kubernetes_watcher import get_kubernetes_watcher
+            from .core.config import get_settings
+
+            settings = get_settings()
+            if settings.k8s_config_file:
+                watcher = get_kubernetes_watcher()
+                import asyncio
+                # namespace는 설정에서 가져오거나 기본값 사용
+                namespace = getattr(settings, 'k8s_namespace', 'default')
+
+                # 백그라운드에서 Watcher 시작
+                asyncio.create_task(watcher.start_watching_deployments(namespace))
+                logger.info(f"Kubernetes Watcher started for namespace: {namespace}")
+            else:
+                logger.info("Kubernetes Watcher not started (KLEPAAS_K8S_CONFIG_FILE not configured)")
+        except Exception as e:
+            logger.warning(f"Failed to start Kubernetes Watcher: {e}")
+
     except Exception as e:
         logger.warning("Failed to initialize database or services", error=str(e))
+
+    # Shutdown 이벤트 핸들러 추가
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        """애플리케이션 종료 시 정리 작업"""
+        logger.info("Shutting down application...")
+        
+        # Kubernetes Watcher 중지
+        try:
+            from .services.kubernetes_watcher import get_kubernetes_watcher
+            watcher = get_kubernetes_watcher()
+            await watcher.stop_all_watches()
+            logger.info("Kubernetes Watcher stopped successfully")
+        except Exception as e:
+            logger.warning(f"Failed to stop Kubernetes Watcher: {e}")
+        
+        logger.info("Application shutdown complete")
 
     return app
 

@@ -14,7 +14,8 @@ from ...database import get_db
 from ...services.rollback import (
     rollback_to_commit,
     rollback_to_previous,
-    get_rollback_candidates
+    get_rollback_candidates,
+    diagnose_rollback_readiness
 )
 
 router = APIRouter()
@@ -59,6 +60,24 @@ class RollbackCandidatesResponse(BaseModel):
     repo: str
     total_candidates: int
     candidates: List[Dict[str, Any]]
+
+
+class DiagnoseRequest(BaseModel):
+    """롤백 준비 상태 진단 요청"""
+    owner: str = Field(..., description="GitHub 저장소 소유자")
+    repo: str = Field(..., description="GitHub 저장소 이름")
+    user_id: str = Field(default="api_user", description="사용자 ID")
+
+
+class DiagnoseResponse(BaseModel):
+    """롤백 준비 상태 진단 응답"""
+    ready: bool
+    owner: str
+    repo: str
+    issues: List[str]
+    warnings: List[str]
+    deployment_count: Optional[int] = None
+    latest_deployment: Optional[Dict[str, Any]] = None
 
 
 # API Endpoints
@@ -241,6 +260,76 @@ async def get_candidates(
         )
 
 
+@router.post("/rollback/diagnose", response_model=DiagnoseResponse)
+async def diagnose_rollback(
+    request: DiagnoseRequest,
+    db: Session = Depends(get_db)
+) -> DiagnoseResponse:
+    """
+    롤백 준비 상태 진단
+
+    프로젝트 설정, 배포 히스토리, 이미지 가용성 등을 확인하여
+    롤백이 가능한 상태인지 진단합니다.
+
+    Example:
+        POST /api/v1/rollback/diagnose
+        {
+            "owner": "K-Le-PaaS",
+            "repo": "test01",
+            "user_id": "user123"
+        }
+
+    Response:
+        {
+            "ready": false,
+            "owner": "K-Le-PaaS",
+            "repo": "test01",
+            "issues": [
+                "No project integration found. Set up the project first."
+            ],
+            "warnings": [],
+            "deployment_count": null,
+            "latest_deployment": null
+        }
+    """
+    try:
+        logger.info(
+            "diagnose_rollback_start",
+            owner=request.owner,
+            repo=request.repo,
+            user_id=request.user_id
+        )
+
+        diagnosis = await diagnose_rollback_readiness(
+            owner=request.owner,
+            repo=request.repo,
+            db=db,
+            user_id=request.user_id
+        )
+
+        logger.info(
+            "diagnose_rollback_success",
+            owner=request.owner,
+            repo=request.repo,
+            ready=diagnosis["ready"],
+            issues_count=len(diagnosis["issues"])
+        )
+
+        return DiagnoseResponse(**diagnosis)
+
+    except Exception as e:
+        logger.error(
+            "diagnose_rollback_error",
+            error=str(e),
+            owner=request.owner,
+            repo=request.repo
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"진단 중 오류가 발생했습니다: {str(e)}"
+        )
+
+
 # Convenience GET endpoints (query parameters)
 @router.get("/rollback/candidates/{owner}/{repo}")
 async def get_candidates_by_path(
@@ -257,3 +346,20 @@ async def get_candidates_by_path(
     """
     request = RollbackCandidatesRequest(owner=owner, repo=repo, limit=limit)
     return await get_candidates(request, db)
+
+
+@router.get("/rollback/diagnose/{owner}/{repo}")
+async def diagnose_rollback_by_path(
+    owner: str,
+    repo: str,
+    user_id: str = "api_user",
+    db: Session = Depends(get_db)
+) -> DiagnoseResponse:
+    """
+    롤백 준비 상태 진단 (GET 버전)
+
+    Example:
+        GET /api/v1/rollback/diagnose/K-Le-PaaS/test01?user_id=user123
+    """
+    request = DiagnoseRequest(owner=owner, repo=repo, user_id=user_id)
+    return await diagnose_rollback(request, db)
