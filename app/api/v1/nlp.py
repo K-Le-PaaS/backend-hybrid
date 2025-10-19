@@ -194,16 +194,29 @@ async def get_command_suggestions(context: Optional[str] = None):
     """
     try:
         suggestions = [
-            "nginx deployment 생성해줘",
-            "모든 pod 상태 확인해줘",
-            "frontend-app replicas 3개로 늘려줘",
-            "test-deployment 삭제해줘",
-            "configmap 목록 보여줘",
-            "service 생성해줘",
-            "secret 업데이트해줘",
-            "namespace 생성해줘",
-            "리소스 사용량 확인해줘",
-            "로그 확인해줘"
+            # Pod 관련 명령어
+            "nginx pod 상태 확인해줘",
+            "frontend-app pod 로그 50줄 보여줘",
+            "api-service pod 재시작해줘",
+            
+            # Deployment 관련 명령어  
+            "nginx deployment 스케일 3개로 늘려줘",
+            "frontend-app deployment 롤백해줘",
+            "backend deployment 배포해줘",
+            
+            # Service 관련 명령어
+            "api-service endpoint 확인해줘",
+            "web-service 정보 보여줘",
+            
+            # 리소스 목록 조회
+            "모든 pod 목록 보여줘",
+            "deployment 목록 확인해줘",
+            "service 목록 보여줘",
+            "namespace 목록 확인해줘",
+            
+            # 시스템 상태
+            "클러스터 상태 확인해줘",
+            "앱 목록 보여줘"
         ]
         
         # 컨텍스트에 따른 필터링
