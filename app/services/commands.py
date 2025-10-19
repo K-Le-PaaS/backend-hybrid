@@ -168,20 +168,11 @@ def plan_command(req: CommandRequest) -> CommandPlan:
         )
     
     elif command == "rollback":
-        # 리소스 이름이 명시되지 않았을 때 유효성 검사
-        if not req.deployment_name or req.deployment_name.strip() == "":
-            raise ValueError("롤백 명령어에는 배포 이름을 명시해야 합니다. 예: 'nginx-deployment v1.0으로 롤백'")
-        return CommandPlan(
-            tool="k8s_rollback_deployment",
-            args={"name": resource_name, "namespace": ns, "version": req.version},
-        )
-
-    elif command == "ncp_rollback":
         # NCP 파이프라인 롤백 (deployment_histories 기반)
         if not req.github_owner or not req.github_repo:
             raise ValueError("NCP 롤백 명령어에는 GitHub 저장소 정보가 필요합니다. 예: 'owner/repo를 3번 전으로 롤백'")
         return CommandPlan(
-            tool="ncp_rollback_deployment",
+            tool="rollback_deployment",
             args={
                 "owner": req.github_owner,
                 "repo": req.github_repo,
@@ -276,10 +267,7 @@ async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
     if plan.tool == "k8s_restart_deployment":
         return await _execute_restart(plan.args)
 
-    if plan.tool == "k8s_rollback_deployment":
-        return await _execute_rollback(plan.args)
-
-    if plan.tool == "ncp_rollback_deployment":
+    if plan.tool == "rollback_deployment":
         return await _execute_ncp_rollback(plan.args)
 
     if plan.tool == "k8s_list_pods":
@@ -726,59 +714,6 @@ async def _execute_scale(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
     except Exception as e:
         return {"status": "error", "message": f"스케일링 실패: {str(e)}"}
-
-
-async def _execute_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Deployment 롤백 (rollback 명령어)
-    예: "v1.1 버전으로 롤백해줘", "이전 배포로 되돌려"
-    """
-    name = args["name"]
-    namespace = args["namespace"]
-    version = args.get("version")
-
-    try:
-        apps_v1 = get_apps_v1_api()
-
-        if version:
-            # 특정 버전으로 롤백 (이미지 태그 변경)
-            deployment = apps_v1.read_namespaced_deployment(name=name, namespace=namespace)
-
-            # 첫 번째 컨테이너의 이미지를 변경
-            if deployment.spec.template.spec.containers:
-                current_image = deployment.spec.template.spec.containers[0].image
-                image_base = current_image.rsplit(":", 1)[0]  # 태그 제거
-                new_image = f"{image_base}:{version}"
-
-                deployment.spec.template.spec.containers[0].image = new_image
-
-                apps_v1.patch_namespaced_deployment(
-                    name=name,
-                    namespace=namespace,
-                    body=deployment
-                )
-
-                return {
-                    "status": "success",
-                    "message": f"Deployment '{name}'을 {version} 버전으로 롤백했습니다.",
-                    "deployment": name,
-                    "version": version,
-                    "image": new_image
-                }
-        else:
-            # 이전 ReplicaSet으로 롤백 (kubectl rollout undo와 동일)
-            # Kubernetes API는 직접적인 undo를 지원하지 않으므로, 이전 ReplicaSet을 찾아서 이미지를 변경
-            return {
-                "status": "error",
-                "message": "버전을 명시해주세요. 예: 'v1.0으로 롤백'"
-            }
-
-    except ApiException as e:
-        if e.status == 404:
-            return {"status": "error", "message": f"Deployment '{name}'을 찾을 수 없습니다."}
-        return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
-    except Exception as e:
-        return {"status": "error", "message": f"롤백 실패: {str(e)}"}
 
 
 async def _execute_ncp_rollback(args: Dict[str, Any]) -> Dict[str, Any]:

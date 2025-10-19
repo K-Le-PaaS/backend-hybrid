@@ -574,50 +574,30 @@ def _extract_project_name(obj: dict) -> str | None:
     return None
 
 async def _find_sourcebuild_project_id_by_name(base: str, name: str) -> str | None:
-    # Prefer documented list endpoint: POST /api/v1/project/list
-    try:
-        data = await _call_ncp_rest_api('POST', base, ['/api/v1/project/list'], {})
-        items = []
-        if isinstance(data, dict):
-            result = data.get('result') or {}
-            if isinstance(result, dict):
-                items = result.get('projectList') or result.get('projects') or []
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            it_name = _extract_project_name(it)
-            if it_name and it_name.strip().lower() == name.strip().lower():
-                pid = _extract_project_id(it) or _extract_project_id(it.get('project', {}) if isinstance(it.get('project'), dict) else {})
-                if pid:
-                    return pid
-    except HTTPException:
-        pass
-    # fallback: filtered GET
-    try:
-        data = await _call_ncp_rest_api('GET', base, ['/api/v1/project'], None, {"projectName": name})
-        if isinstance(data, dict):
-            result = data.get('result') or {}
-            items = []
-            if isinstance(result, dict):
-                items = result.get('projectList') or result.get('projects') or []
-            for it in items:
-                if not isinstance(it, dict):
-                    continue
-                it_name = _extract_project_name(it)
-                if it_name and it_name.strip().lower() == name.strip().lower():
-                    pid = _extract_project_id(it) or _extract_project_id(it.get('project', {}) if isinstance(it.get('project'), dict) else {})
-                    if pid:
-                        return pid
-    except HTTPException:
-        pass
-    # last resort: unfiltered GET
+    # Use only the working endpoint: GET /api/v1/project (no query params to avoid 401)
     try:
         data = await _call_ncp_rest_api('GET', base, ['/api/v1/project'], None)
+        _dbg("SB-FIND-BY-NAME", target_name=name, response_keys=list(data.keys()) if isinstance(data, dict) else None)
+
+        # Log full response structure for debugging
         if isinstance(data, dict):
-            result = data.get('result') or {}
+            result = data.get('result')
+            _dbg("SB-FIND-RESULT-TYPE", result_type=type(result).__name__, result_keys=list(result.keys()) if isinstance(result, dict) else None)
+
+            # Try multiple possible structures
             items = []
             if isinstance(result, dict):
-                items = result.get('projectList') or result.get('projects') or []
+                items = result.get('project') or result.get('projectList') or result.get('projects') or result.get('items') or []
+            elif isinstance(result, list):
+                items = result
+
+            _dbg("SB-FIND-ITEMS", count=len(items), names=[_extract_project_name(it) for it in items if isinstance(it, dict)])
+
+            # If still no items, log the full result structure (first 500 chars)
+            if len(items) == 0:
+                import json
+                _dbg("SB-FIND-EMPTY-RESULT", full_result=json.dumps(result, default=str)[:500] if result else None)
+
             for it in items:
                 if not isinstance(it, dict):
                     continue
@@ -625,8 +605,11 @@ async def _find_sourcebuild_project_id_by_name(base: str, name: str) -> str | No
                 if it_name and it_name.strip().lower() == name.strip().lower():
                     pid = _extract_project_id(it) or _extract_project_id(it.get('project', {}) if isinstance(it.get('project'), dict) else {})
                     if pid:
+                        _dbg("SB-FIND-MATCH", name=it_name, project_id=pid)
                         return pid
-    except HTTPException:
+            _dbg("SB-FIND-NO-MATCH", target=name, available=[_extract_project_name(it) for it in items if isinstance(it, dict)])
+    except HTTPException as e:
+        _dbg("SB-FIND-ERROR", error=str(e)[:200])
         return None
     return None
 

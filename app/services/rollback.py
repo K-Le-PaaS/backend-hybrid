@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 
 from ..models.deployment_history import DeploymentHistory
+from ..core.config import get_settings
 from .ncp_pipeline import run_sourcebuild, _generate_ncr_image_name, _verify_ncr_manifest_exists
 from .user_project_integration import get_integration
 from .deployment_history import get_deployment_history_service
@@ -50,7 +51,7 @@ async def rollback_to_commit(
     history = db.query(DeploymentHistory).filter(
         DeploymentHistory.github_owner == owner,
         DeploymentHistory.github_repo == repo,
-        DeploymentHistory.commit_sha == target_commit_sha,
+        DeploymentHistory.github_commit_sha == target_commit_sha,
         DeploymentHistory.status == "success"
     ).first()
 
@@ -120,7 +121,7 @@ async def rollback_to_commit(
         app_name=f"{owner}/{repo}",
         environment="production",
         image=image_url,
-        commit_sha=target_commit_sha,
+        git_commit_sha=target_commit_sha,
         deployed_by=user_id,
         deployment_reason=f"Rollback to commit {target_commit_sha[:7]}",
         is_rollback=True,
@@ -144,7 +145,7 @@ async def rollback_to_commit(
         "rebuilt": build_result is not None,
         "previous_deployment": {
             "deployed_at": history.deployed_at,
-            "deployed_by": history.deployed_by,
+            "deployed_by": getattr(history, 'deployed_by', None),
             "image": history.image_name
         }
     }
@@ -178,13 +179,14 @@ async def rollback_to_previous(
         Rollback result
     """
     # 1. Get recent successful deployments (excluding rollbacks)
+    # Use created_at for sorting if deployed_at is null
     recent_deployments = db.query(DeploymentHistory).filter(
         DeploymentHistory.github_owner == owner,
         DeploymentHistory.github_repo == repo,
         DeploymentHistory.status == "success",
         DeploymentHistory.is_rollback == False  # Exclude rollbacks
     ).order_by(
-        DeploymentHistory.deployed_at.desc()
+        DeploymentHistory.created_at.desc()  # Use created_at instead of deployed_at
     ).limit(steps_back + 5).all()  # Get extra for safety
 
     if len(recent_deployments) <= steps_back:
@@ -197,7 +199,7 @@ async def rollback_to_previous(
     target_deployment = recent_deployments[steps_back]
 
     # 3. Check if target is too old (safety check)
-    if target_deployment.deployed_at < datetime.utcnow() - timedelta(days=30):
+    if target_deployment.deployed_at and target_deployment.deployed_at < datetime.utcnow() - timedelta(days=30):
         raise HTTPException(
             status_code=400,
             detail=f"Cannot rollback to deployment older than 30 days (target: {target_deployment.deployed_at})"
@@ -207,7 +209,7 @@ async def rollback_to_previous(
     return await rollback_to_commit(
         owner=owner,
         repo=repo,
-        target_commit_sha=target_deployment.commit_sha,
+        target_commit_sha=target_deployment.github_commit_sha,
         db=db,
         user_id=user_id
     )
@@ -239,26 +241,26 @@ async def get_rollback_candidates(
         DeploymentHistory.status == "success",
         DeploymentHistory.is_rollback == False
     ).order_by(
-        DeploymentHistory.deployed_at.desc()
+        DeploymentHistory.created_at.desc()  # Use created_at instead of deployed_at
     ).limit(limit).all()
 
     candidates = []
     for idx, dep in enumerate(deployments):
         # Check if NCR image still exists
         image_name = _generate_ncr_image_name(owner, repo)
-        image_url = f"klepaas-test.kr.ncr.ntruss.com/{image_name}:{dep.commit_sha}"
+        image_url = f"klepaas-test.kr.ncr.ntruss.com/{image_name}:{dep.github_commit_sha}"
 
         # Don't await verification for listing (too slow), just construct URL
         candidates.append({
             "steps_back": idx,
-            "commit_sha": dep.commit_sha,
-            "commit_sha_short": dep.commit_sha[:7] if dep.commit_sha else "unknown",
+            "commit_sha": dep.github_commit_sha,
+            "commit_sha_short": dep.github_commit_sha[:7] if dep.github_commit_sha else "unknown",
             "deployed_at": dep.deployed_at.isoformat() if dep.deployed_at else None,
-            "deployed_by": dep.deployed_by,
+            "deployed_by": getattr(dep, 'deployed_by', None),
             "image": image_url,
             "can_rollback": True,  # Assume true, verify on actual rollback
             "is_current": idx == 0,
-            "deployment_reason": dep.deployment_reason
+            "deployment_reason": getattr(dep, 'deployment_reason', None)
         })
 
     return {

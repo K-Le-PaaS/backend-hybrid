@@ -83,6 +83,11 @@ def init_database():
             _ensure_user_slack_config_columns()
         except Exception as e:
             logger.warning(f"UserSlackConfig column ensure failed: {e}")
+
+        try:
+            _ensure_deployment_history_columns()
+        except Exception as e:
+            logger.warning(f"DeploymentHistory column ensure failed: {e}")
         logger.info("Database tables created successfully")
         
     except Exception as e:

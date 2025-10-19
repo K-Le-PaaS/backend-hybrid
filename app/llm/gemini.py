@@ -35,7 +35,7 @@ class GeminiClient(LLMClient):
                 # Pod 관련 명령어
                 if parameters.get("podName") is not None:
                     entities["pod_name"] = parameters.get("podName")
-            elif command in ("scale", "rollback", "deploy", "get_deployment"):
+            elif command in ("scale", "deploy", "get_deployment"):
                 # Deployment 관련 명령어
                 if parameters.get("deploymentName") is not None:
                     entities["deployment_name"] = parameters.get("deploymentName")
@@ -61,13 +61,29 @@ class GeminiClient(LLMClient):
                     coerced_replicas = 100
                 entities["replicas"] = coerced_replicas
 
-            # 롤백 버전
+            # NCP 롤백 파라미터
             if command == "rollback":
-                raw_version = parameters.get("version", "")
-                if raw_version and isinstance(raw_version, str):
-                    entities["version"] = raw_version.strip()
+                # GitHub 저장소 정보 (필수)
+                entities["github_owner"] = parameters.get("owner", "")
+                entities["github_repo"] = parameters.get("repo", "")
+
+                # 커밋 SHA (선택: commitSha가 있으면 커밋 기반 롤백)
+                commit_sha = parameters.get("commitSha")
+                if commit_sha and isinstance(commit_sha, str):
+                    entities["target_commit_sha"] = commit_sha.strip()
                 else:
-                    entities["version"] = ""
+                    entities["target_commit_sha"] = None
+
+                # N번째 전 (선택: stepsBack이 있으면 N번째 전 롤백)
+                steps_back = parameters.get("stepsBack")
+                if steps_back is not None:
+                    try:
+                        steps = int(steps_back)
+                        entities["steps_back"] = max(1, min(steps, 10))  # 1~10 제한
+                    except (TypeError, ValueError):
+                        entities["steps_back"] = 1  # 기본값
+                else:
+                    entities["steps_back"] = None
 
             # 로그 관련 옵션: lines, previous
             if command == "logs":
@@ -213,13 +229,55 @@ class GeminiClient(LLMClient):
 - 다양한 뉘앙스: "서버 개수 3개로", "deployment를 5개로 늘려줘", "인스턴스 2개로 줄여", "복제본 4개로 설정", "서버 수를 3개로 조정", "deployment 개수 늘려줘", "서버 추가해줘", "인스턴스 줄여줘", "스케일 업해줘", "스케일 다운", "deployment 확장", "서버 축소", "복제본 늘려줘", "파드 개수 조정"
 필수 JSON 형식: { "command": "scale", "parameters": { "deploymentName": "<추출된_배포이름_없으면_null>", "replicas": <추출된_숫자> } }
 
-6. 이미지 롤백 (command: "rollback")
-설명: 애플리케이션을 이전 버전으로 되돌리는 명령입니다.
+6. NCP 배포 롤백 (command: "rollback")
+설명: NCP SourceBuild/SourceDeploy 기반으로 이전 배포 버전으로 되돌리는 명령입니다.
+중요: GitHub 저장소(owner/repo) 정보가 반드시 필요합니다.
+
+롤백 방식 2가지:
+A) 커밋 해시로 롤백: 특정 커밋 SHA를 지정하여 해당 버전으로 롤백
+B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포로 롤백
+
 사용자 입력 예시:
-- 기본 표현: "v1.1 버전으로 롤백해줘", "이전 배포로 되돌려"
-- 자연스러운 표현: "앱 이전 버전으로 되돌려줘", "서비스 롤백"
-- 다양한 뉘앙스: "이전 버전으로 복구", "앱 되돌리기", "서비스 리셋", "이전 상태로 복원", "버전 되돌리기", "배포 취소", "앱 복구", "이전 이미지로 변경"
-필수 JSON 형식: { "command": "rollback", "parameters": { "deploymentName": "<추출된_배포이름_없으면_null>", "version": "<추출된_버전_태그>" } }
+- **커밋 해시 패턴**:
+  * "owner/repo를 커밋 abc1234로 롤백해줘"
+  * "myorg/myapp을 abc1234 커밋으로 되돌려"
+  * "K-Le-PaaS/backend-hybrid 커밋 a1b2c3d로 복구"
+  * "저장소 owner/repo 커밋 해시 abc1234로 롤백"
+
+- **N번째 전 패턴**:
+  * "owner/repo를 3번 전으로 롤백해줘"
+  * "myorg/myapp 2번 전 배포로 되돌려"
+  * "K-Le-PaaS/backend-hybrid 이전 배포로 복구" (1번 전으로 해석)
+  * "저장소 owner/repo를 5번 전으로 롤백"
+  * "owner/repo 바로 이전 버전으로 되돌려" (1번 전)
+
+- **자연스러운 표현**:
+  * "myorg/myapp 롤백해줘" (기본: 1번 전)
+  * "owner/repo 예전 버전으로 되돌려"
+  * "저장소 복구해줘"
+
+추출 규칙:
+1. **owner/repo 패턴 추출**: "owner/repo", "저장소명", "myorg/myapp" 등에서 GitHub 저장소 정보 추출
+2. **커밋 해시 추출**: "커밋", "commit", "해시", "hash" 키워드 뒤의 영숫자 조합 (최소 7자)
+3. **숫자 추출**: "N번 전", "N개 전", "N번째 전", "previous N" 등에서 숫자 추출
+4. **이전/previous**: 숫자 없이 "이전", "바로 전", "previous"만 있으면 1로 간주
+5. **기본값**: owner/repo만 있고 커밋/숫자 없으면 stepsBack=1
+
+필수 JSON 형식:
+{
+  "command": "rollback",
+  "parameters": {
+    "owner": "<추출된_GitHub_owner>",
+    "repo": "<추출된_GitHub_repo>",
+    "commitSha": "<커밋_해시_패턴이면_추출_없으면_null>",
+    "stepsBack": <N번째_전_패턴이면_숫자_없으면_null>
+  }
+}
+
+예시 변환:
+- "myorg/myapp을 abc1234로 롤백" → { "command": "rollback", "parameters": { "owner": "myorg", "repo": "myapp", "commitSha": "abc1234", "stepsBack": null } }
+- "owner/repo 3번 전으로 롤백" → { "command": "rollback", "parameters": { "owner": "owner", "repo": "repo", "commitSha": null, "stepsBack": 3 } }
+- "K-Le-PaaS/backend 이전 배포로" → { "command": "rollback", "parameters": { "owner": "K-Le-PaaS", "repo": "backend", "commitSha": null, "stepsBack": 1 } }
 
 7. 배포 (command: "deploy")
 설명: 사용자의 최신 코드를 빌드하고 클러스터에 배포합니다.
@@ -289,6 +347,10 @@ class GeminiClient(LLMClient):
   * "app", "앱"이라는 호칭은 Pod 관련 명령어(status, logs, restart)에서 사용
   * Deployment 관련 명령어(scale, get_deployment)에서는 "deployment", "배포" 등의 명시적 표현 사용
   * Service 관련 명령어(endpoint, get_service)에서는 "service", "서비스" 등의 명시적 표현 사용
+- **롤백 명령 우선순위**:
+  * commitSha와 stepsBack이 둘 다 있으면 commitSha 우선 (커밋 기반 롤백)
+  * 둘 다 없으면 stepsBack=1로 기본 설정 (1번 전 배포로 롤백)
+  * owner/repo가 없으면 롤백 명령으로 인식하지 않음 (저장소 정보 필수)
 - 오직 JSON 객체만 반환하며, 추가 설명이나 대화는 포함하지 않습니다."""
         
         payload = {

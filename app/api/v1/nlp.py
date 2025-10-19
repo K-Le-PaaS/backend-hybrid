@@ -115,7 +115,12 @@ async def process_command(
                 lines=entities.get("lines", 30),
                 version=entities.get("version") or "",
                 namespace=entities.get("namespace") or "default",
-                previous=bool(entities.get("previous", False))
+                previous=bool(entities.get("previous", False)),
+                # NCP 롤백 관련 필드
+                github_owner=entities.get("github_owner") or "",
+                github_repo=entities.get("github_repo") or "",
+                target_commit_sha=entities.get("target_commit_sha") or "",
+                steps_back=entities.get("steps_back", 0)
             )
             
             logger.info(f"CommandRequest 생성: {req}")

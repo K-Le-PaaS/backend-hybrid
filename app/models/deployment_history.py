@@ -103,6 +103,7 @@ class DeploymentHistory(Base):
     # 시간 정보
     started_at = Column(DateTime, nullable=False, default=func.now())
     completed_at = Column(DateTime, nullable=True)
+    deployed_at = Column(DateTime, nullable=True)  # 배포 완료 시점 (롤백용)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     
@@ -119,7 +120,11 @@ class DeploymentHistory(Base):
     # 메타데이터
     webhook_payload = Column(Text, nullable=True)  # 원본 웹훅 페이로드 (디버깅용)
     auto_deploy_enabled = Column(Boolean, default=True)
-    
+
+    # 롤백 정보
+    is_rollback = Column(Boolean, default=False, nullable=False)  # 롤백 배포 여부
+    rollback_from_id = Column(Integer, nullable=True)  # 어느 배포에서 롤백했는지
+
     def __repr__(self):
         return f"<DeploymentHistory(id={self.id}, user_id={self.user_id}, repo={self.github_owner}/{self.github_repo}, status={self.status})>"
     
