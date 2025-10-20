@@ -89,6 +89,26 @@ def create_app() -> FastAPI:
         )
         # Explicitly set the spec version key
         openapi_schema["openapi"] = "3.1.0"
+
+        # Add JWT Bearer security scheme for Swagger UI
+        if "components" not in openapi_schema:
+            openapi_schema["components"] = {}
+        openapi_schema["components"]["securitySchemes"] = {
+            "BearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "JWT",
+                "description": "Enter your JWT token (obtained from /api/v1/oauth2/google or /api/v1/oauth2/github)"
+            }
+        }
+
+        # Apply BearerAuth to all paths (optional for each endpoint)
+        for path_data in openapi_schema.get("paths", {}).values():
+            for operation in path_data.values():
+                if isinstance(operation, dict) and "operationId" in operation:
+                    # Add optional security to all endpoints
+                    operation["security"] = [{"BearerAuth": []}]
+
         app.openapi_schema = openapi_schema
         return app.openapi_schema
 
@@ -157,26 +177,6 @@ def create_app() -> FastAPI:
         db_session = next(get_db())
         init_services(db_session)
         logger.info("All services initialized successfully")
-
-        # Kubernetes Watcher 시작 (K8s 설정이 있는 경우)
-        try:
-            from .services.kubernetes_watcher import get_kubernetes_watcher
-            from .core.config import get_settings
-
-            settings = get_settings()
-            if settings.k8s_config_file:
-                watcher = get_kubernetes_watcher()
-                import asyncio
-                # namespace는 설정에서 가져오거나 기본값 사용
-                namespace = getattr(settings, 'k8s_namespace', 'default')
-
-                # 백그라운드에서 Watcher 시작
-                asyncio.create_task(watcher.start_watching_deployments(namespace))
-                logger.info(f"Kubernetes Watcher started for namespace: {namespace}")
-            else:
-                logger.info("Kubernetes Watcher not started (KLEPAAS_K8S_CONFIG_FILE not configured)")
-        except Exception as e:
-            logger.warning(f"Failed to start Kubernetes Watcher: {e}")
 
     except Exception as e:
         logger.warning("Failed to initialize database or services", error=str(e))

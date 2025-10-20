@@ -2148,6 +2148,7 @@ async def run_sourcedeploy(
     owner: str | None = None,
     repo: str | None = None,
     tag: str | None = None,
+    is_rollback: bool = False,
 ) -> dict:
     """Run SourceDeploy project via REST only using scenario deploy endpoint.
 
@@ -2558,6 +2559,7 @@ async def run_sourcedeploy(
                 github_owner=owner,
                 github_repo=repo,
                 github_commit_sha=effective_tag,  # Store the deployed commit SHA/tag
+                github_commit_message=f"Rollback to commit {effective_tag[:7]}" if is_rollback else None,
                 sourcecommit_project_id=sc_project_id,
                 sourcecommit_repo_name=sc_repo_name,
                 sourcebuild_project_id=str(build_project_id) if build_project_id else None,
@@ -2571,7 +2573,8 @@ async def run_sourcedeploy(
                 cluster_id=getattr(settings, 'ncp_nks_cluster_id', None),
                 namespace="default",
                 started_at=datetime.utcnow(),
-                auto_deploy_enabled=True
+                auto_deploy_enabled=True,
+                is_rollback=is_rollback
             )
 
             db.add(history_record)

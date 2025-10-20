@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Security
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import logging
@@ -9,7 +10,7 @@ from sqlalchemy.orm import Session
 # commands.py 연동을 위한 import
 from ...services.commands import CommandRequest, plan_command, execute_command
 from ...database import get_db
-from ...services.security import get_current_user_id
+from ...services.security import get_current_user_id, security
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -37,10 +38,21 @@ class CommandHistory(BaseModel):
 # 메모리 기반 명령 히스토리 (실제 환경에서는 데이터베이스 사용)
 command_history: List[CommandHistory] = []
 
-@router.post("/nlp/process", response_model=CommandResponse)
+@router.post(
+    "/nlp/process",
+    response_model=CommandResponse,
+    summary="Process natural language command",
+    description="Processes a natural language command and executes the corresponding K8s or NCP operation. JWT token optional but recommended for user-specific operations.",
+    responses={
+        200: {"description": "Command processed successfully"},
+        400: {"description": "Invalid command"},
+        404: {"description": "Resource not found"},
+    },
+)
 async def process_command(
     command_data: NaturalLanguageCommand,
     db: Session = Depends(get_db),
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security),
     user_id: Optional[str] = Depends(get_current_user_id)
 ):
     """
@@ -49,6 +61,11 @@ async def process_command(
     JWT 토큰이 있으면 인증된 사용자로, 없으면 'api_user'로 처리합니다.
     """
     try:
+        # 디버깅: credentials 확인
+        logger.info(f"Credentials received: {credentials is not None}")
+        if credentials:
+            logger.info(f"Token (first 20 chars): {credentials.credentials[:20]}...")
+
         # 사용자 ID 결정 (JWT 토큰 있으면 사용, 없으면 기본값)
         effective_user_id = user_id or "api_user"
 

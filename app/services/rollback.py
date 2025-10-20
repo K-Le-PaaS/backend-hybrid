@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
-import logging
+import structlog
 
 from ..models.deployment_history import DeploymentHistory
 from ..core.config import get_settings
@@ -18,7 +18,7 @@ from .ncp_pipeline import run_sourcebuild, _generate_ncr_image_name, _verify_ncr
 from .user_project_integration import get_integration
 from .deployment_history import get_deployment_history_service
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 async def diagnose_rollback_readiness(
@@ -137,10 +137,17 @@ async def rollback_to_commit(
     # 1. Get integration first for better error messages
     integ = get_integration(db, user_id=user_id, owner=owner, repo=repo)
     if not integ:
-        logger.error(f"No project integration found for {owner}/{repo}")
+        logger.error(f"No project integration found for {owner}/{repo} (user_id: {user_id})")
         raise HTTPException(
             status_code=404,
-            detail=f"No project integration found for {owner}/{repo}. Please set up the project first using the deployment API."
+            detail=(
+                f"프로젝트 통합 정보를 찾을 수 없습니다: {owner}/{repo}\n"
+                f"롤백을 하려면 먼저 프로젝트를 배포하여 통합 정보를 생성해야 합니다.\n"
+                f"해결 방법:\n"
+                f"1. POST /api/v1/deployments 엔드포인트를 사용하여 최초 배포를 실행하세요.\n"
+                f"2. 또는 프로젝트 설정 API를 사용하여 NCP SourceBuild/SourceDeploy 프로젝트 ID를 등록하세요.\n"
+                f"사용자 ID: {user_id}, 저장소: {owner}/{repo}"
+            )
         )
 
     logger.info(f"Project integration found: build_project_id={integ.build_project_id}, deploy_project_id={integ.deploy_project_id}")
@@ -200,6 +207,11 @@ async def rollback_to_commit(
 
     logger.info(f"NCR image verification result: exists={image_exists}, code={verification_code}")
 
+    # Commit the read transaction to avoid SQLite lock issues
+    # This allows run_sourcedeploy to start a new transaction for INSERT operations
+    db.commit()
+    logger.info("Database transaction committed after queries, ready for deployment")
+
     # 4. Rebuild if image doesn't exist in NCR
     registry = "klepaas-test.kr.ncr.ntruss.com"
     image_repo = f"{registry}/{image_name}"
@@ -236,26 +248,18 @@ async def rollback_to_commit(
         user_id=user_id,
         owner=owner,
         repo=repo,
-        tag=target_commit_sha  # Pass specific commit SHA as tag for rollback
+        tag=target_commit_sha,  # Pass specific commit SHA as tag for rollback
+        is_rollback=True  # Mark this as a rollback deployment
     )
 
-    # 7. Record rollback in deployment history
-    history_service = get_deployment_history_service()
-    await history_service.create_deployment_record(
-        app_name=f"{owner}/{repo}",
-        environment="production",
-        image=image_url,
-        git_commit_sha=target_commit_sha,
-        deployed_by=user_id,
-        deployment_reason=f"Rollback to commit {target_commit_sha[:7]}",
-        is_rollback=True,
-        rollback_reason=f"Manual rollback to commit {target_commit_sha[:7]}",
-        extra_metadata={
-            "rollback_from": "latest",
-            "target_commit": target_commit_sha,
-            "build_id": build_result.get("build_id") if build_result else None,
-            "deploy_id": deploy_result.get("deploy_id") if deploy_result else None
-        }
+    # 7. Rollback history is automatically recorded by run_sourcedeploy() with is_rollback=True
+    # No need for duplicate recording here - ncp_pipeline.py already handles it
+    logger.info(
+        "rollback_deployment_initiated",
+        owner=owner,
+        repo=repo,
+        target_commit=target_commit_sha[:7],
+        deploy_history_id=deploy_result.get("deploy_history_id")
     )
 
     return {
@@ -319,7 +323,14 @@ async def rollback_to_previous(
         logger.error(f"No deployment history found for {owner}/{repo}")
         raise HTTPException(
             status_code=404,
-            detail=f"No deployment history found for {owner}/{repo}. Deploy the application first before attempting rollback."
+            detail=(
+                f"배포 이력을 찾을 수 없습니다: {owner}/{repo}\n"
+                f"롤백을 하려면 먼저 배포 이력이 있어야 합니다.\n"
+                f"해결 방법:\n"
+                f"1. POST /api/v1/deployments 엔드포인트를 사용하여 최초 배포를 실행하세요.\n"
+                f"2. 배포가 성공적으로 완료되면 배포 이력이 자동으로 기록됩니다.\n"
+                f"저장소: {owner}/{repo}"
+            )
         )
 
     logger.info(f"Found {len(recent_deployments)} successful deployment(s) for {owner}/{repo}")
@@ -342,6 +353,10 @@ async def rollback_to_previous(
             status_code=400,
             detail=f"Cannot rollback to deployment older than 30 days (target: {target_deployment.deployed_at})"
         )
+
+    # Commit the read transaction to avoid SQLite lock issues
+    db.commit()
+    logger.info("Database transaction committed after deployment history query")
 
     # 4. Call commit-based rollback
     return await rollback_to_commit(

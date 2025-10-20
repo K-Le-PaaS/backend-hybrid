@@ -731,10 +731,10 @@ async def _execute_ncp_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
     steps_back = args.get("steps_back", 0)
     user_id = args.get("user_id", "nlp_user")  # JWT에서 전달된 user_id 사용, 없으면 기본값
 
-    try:
-        # 데이터베이스 세션 생성
-        db = next(get_db())
+    # 데이터베이스 세션 생성
+    db = next(get_db())
 
+    try:
         # 커밋 SHA가 지정되었으면 해당 커밋으로 롤백
         if target_commit_sha:
             result = await rollback_to_commit(
@@ -794,6 +794,9 @@ async def _execute_ncp_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
             "owner": owner,
             "repo": repo
         }
+    finally:
+        # 데이터베이스 세션 정리
+        db.close()
 
 
 async def _execute_list_pods(args: Dict[str, Any]) -> Dict[str, Any]:

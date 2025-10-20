@@ -7,7 +7,7 @@ SQLAlchemy 엔진, 세션, 그리고 모델 초기화를 관리합니다.
 import os
 from typing import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
 from sqlalchemy import text
@@ -30,11 +30,21 @@ if DATABASE_URL.startswith("sqlite"):
         DATABASE_URL,
         connect_args={
             "check_same_thread": False,
-            "timeout": 30  # 락 대기 시간 30초로 증가 (기본 5초)
+            "timeout": 30  # 30초 대기 (기본값: 5초)
         },
         poolclass=StaticPool,
         echo=False  # 디버그 모드 비활성화
     )
+
+    # SQLite PRAGMA 설정 (동시성 개선)
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_conn, connection_record):
+        """SQLite 연결 시 WAL 모드와 busy_timeout을 설정합니다."""
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")  # WAL 모드 활성화 (동시성 크게 개선)
+        cursor.execute("PRAGMA busy_timeout = 30000")  # 30초 (밀리초 단위)
+        cursor.execute("PRAGMA synchronous = NORMAL")  # 성능 향상
+        cursor.close()
 else:
     # PostgreSQL용 엔진 설정
     engine = create_engine(
