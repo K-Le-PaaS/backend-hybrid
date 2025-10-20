@@ -151,11 +151,12 @@ class DeploymentHistoryService:
             if progress is not None:
                 deployment.progress = progress
             
-            # 배포 완료 시간 설정
+            # 배포 완료 시간 설정 (KST)
+            from ..models.deployment_history import get_kst_now
             if status == DeploymentStatus.SUCCESS:
-                deployment.deployed_at = datetime.now(timezone.utc)
+                deployment.deployed_at = get_kst_now()
             elif status == DeploymentStatus.FAILED:
-                deployment.updated_at = datetime.now(timezone.utc)
+                deployment.updated_at = get_kst_now()
             
             # 추가 메타데이터 업데이트
             if extra_metadata:

@@ -8,10 +8,17 @@ GitHub Push 이벤트부터 SourceCommit, SourceBuild, SourceDeploy까지의
 
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text
 from sqlalchemy.sql import func
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from enum import Enum
 from .base import Base
+
+# 한국 표준시 (KST) 타임존
+KST = timezone(timedelta(hours=9))
+
+def get_kst_now():
+    """현재 한국 시간(KST) 반환"""
+    return datetime.now(KST).replace(tzinfo=None)  # SQLite는 timezone-naive datetime 사용
 
 
 class ImageTagType(Enum):
@@ -100,12 +107,12 @@ class DeploymentHistory(Base):
     cluster_name = Column(String(255), nullable=True)
     namespace = Column(String(255), nullable=True, default="default")
     
-    # 시간 정보
-    started_at = Column(DateTime, nullable=False, default=func.now())
+    # 시간 정보 (모두 한국 시간 KST로 저장)
+    started_at = Column(DateTime, nullable=False, default=get_kst_now)
     completed_at = Column(DateTime, nullable=True)
     deployed_at = Column(DateTime, nullable=True)  # 배포 완료 시점 (롤백용)
-    created_at = Column(DateTime, default=func.now())
-    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime, default=get_kst_now)
+    updated_at = Column(DateTime, default=get_kst_now, onupdate=get_kst_now)
     
     # 소요 시간 (초)
     total_duration = Column(Integer, nullable=True)  # 전체 소요 시간

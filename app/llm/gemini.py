@@ -85,6 +85,12 @@ class GeminiClient(LLMClient):
                 else:
                     entities["steps_back"] = None
 
+            # 롤백 목록 조회 파라미터
+            if command == "list_rollback":
+                # GitHub 저장소 정보 (필수)
+                entities["github_owner"] = parameters.get("owner", "")
+                entities["github_repo"] = parameters.get("repo", "")
+
             # 로그 관련 옵션: lines, previous
             if command == "logs":
                 raw_lines = parameters.get("lines", 30)
@@ -113,6 +119,7 @@ class GeminiClient(LLMClient):
             messages = {
                 "deploy": "배포 명령을 해석했습니다.",
                 "rollback": "롤백 명령을 해석했습니다.",
+                "list_rollback": "롤백 목록 조회 명령을 해석했습니다.",
                 "scale": "스케일링 명령을 해석했습니다.",
                 "status": "상태 확인 명령을 해석했습니다.",
                 "logs": "로그 조회 명령을 해석했습니다.",
@@ -278,6 +285,19 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 - "myorg/myapp을 abc1234로 롤백" → { "command": "rollback", "parameters": { "owner": "myorg", "repo": "myapp", "commitSha": "abc1234", "stepsBack": null } }
 - "owner/repo 3번 전으로 롤백" → { "command": "rollback", "parameters": { "owner": "owner", "repo": "repo", "commitSha": null, "stepsBack": 3 } }
 - "K-Le-PaaS/backend 이전 배포로" → { "command": "rollback", "parameters": { "owner": "K-Le-PaaS", "repo": "backend", "commitSha": null, "stepsBack": 1 } }
+
+6-1. 롤백 목록 조회 (command: "list_rollback")
+설명: 프로젝트의 현재 배포 상태, 롤백 가능한 버전 목록, 최근 롤백 히스토리를 조회하는 명령입니다.
+사용자 입력 예시:
+  * "K-Le-PaaS/test01 롤백 목록 보여줘"
+  * "owner/repo 배포 이력 확인"
+  * "myorg/myapp 롤백 가능한 버전 보여줘"
+  * "배포 히스토리 확인"
+  * "롤백 리스트 조회"
+필수 JSON 형식: { "command": "list_rollback", "parameters": { "owner": "<저장소_소유자>", "repo": "<저장소_이름>" } }
+예시:
+- "K-Le-PaaS/test01 롤백 목록" → { "command": "list_rollback", "parameters": { "owner": "K-Le-PaaS", "repo": "test01" } }
+- "myorg/myapp 배포 이력" → { "command": "list_rollback", "parameters": { "owner": "myorg", "repo": "myapp" } }
 
 7. 배포 (command: "deploy")
 설명: 사용자의 최신 코드를 빌드하고 클러스터에 배포합니다.

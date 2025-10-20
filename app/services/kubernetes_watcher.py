@@ -549,21 +549,17 @@ class KubernetesWatcher:
                     break
 
         if history:
-            # deployed_at 업데이트
-            now = datetime.now(timezone.utc)
+            # deployed_at 업데이트 (KST)
+            from ..models.deployment_history import get_kst_now
+            now = get_kst_now()
             history.status = "success"
             history.sourcedeploy_status = "success"
             history.deployed_at = now
             history.completed_at = now
 
-            # duration 계산
+            # duration 계산 (timezone-naive로 계산)
             if history.started_at:
-                # started_at이 timezone-naive이면 UTC timezone 추가
-                started_at = history.started_at
-                if started_at.tzinfo is None:
-                    started_at = started_at.replace(tzinfo=timezone.utc)
-                
-                delta = now - started_at
+                delta = now - history.started_at
                 history.total_duration = int(delta.total_seconds())
 
             db.commit()
@@ -655,14 +651,103 @@ def init_kubernetes_watcher() -> None:
 async def update_deployment_history_on_success(event_data: Dict[str, Any]) -> None:
     """
     K8s Deployment 성공 시 deployment_histories의 deployed_at을 업데이트합니다.
-    
-    임시로 큐 시스템을 비활성화하고 직접 처리합니다.
+
+    SQLite WAL 모드 활성화로 DB 락 문제가 해결되어 다시 활성화합니다.
     """
-    # 임시로 아무 작업도 하지 않음 (DB 락 문제로 인해)
-    logger.debug(
-        "deployment_history_update_skipped",
-        deployment=event_data.get("name"),
-        namespace=event_data.get("namespace"),
-        reason="db_lock_issue"
-    )
-    return
+    from ..database import SessionLocal
+    from datetime import datetime, timezone
+    from ..models.deployment_history import DeploymentHistory
+
+    # 배포 완료 여부 확인
+    phase = event_data.get('phase')
+    if phase != 'Complete':
+        return
+
+    # 필요한 정보 추출
+    namespace = event_data.get('namespace')
+    image = event_data.get('image')
+    deployment_name = event_data.get('name')
+
+    if not namespace or not image:
+        logger.warning(
+            "deployment_history_update_skipped_missing_info",
+            namespace=namespace,
+            image=image
+        )
+        return
+
+    # 이미지 이름 정규화 (태그/다이제스트 제거)
+    def normalize_image_name(image_url: str) -> str:
+        """이미지 URL에서 레포지토리+이름만 추출 (태그/다이제스트 제거)"""
+        if '@' in image_url:
+            return image_url.split('@')[0]
+        elif ':' in image_url:
+            return image_url.split(':')[0]
+        return image_url
+
+    normalized_k8s_image = normalize_image_name(image)
+
+    # 새 데이터베이스 세션 생성
+    db = SessionLocal()
+    try:
+        # 모든 running 상태의 배포 히스토리를 가져와서 이미지 이름으로 필터링
+        running_histories = db.query(DeploymentHistory).filter(
+            DeploymentHistory.namespace == namespace,
+            DeploymentHistory.status == "running"
+        ).order_by(DeploymentHistory.started_at.desc()).all()
+
+        # 이미지 이름이 일치하는 것 찾기
+        history = None
+        for h in running_histories:
+            if h.image_url:
+                normalized_db_image = normalize_image_name(h.image_url)
+                if normalized_db_image == normalized_k8s_image:
+                    history = h
+                    break
+
+        if history:
+            # deployed_at 업데이트
+            from ..models.deployment_history import get_kst_now
+            now = get_kst_now()
+            history.status = "success"
+            history.sourcedeploy_status = "success"
+            history.deployed_at = now
+            history.completed_at = now
+
+            # duration 계산 (timezone-naive로 계산)
+            if history.started_at:
+                delta = now - history.started_at
+                history.total_duration = int(delta.total_seconds())
+
+            db.commit()
+
+            logger.info(
+                "deployment_history_updated_on_k8s_success",
+                history_id=history.id,
+                namespace=namespace,
+                deployment_name=deployment_name,
+                k8s_image=image,
+                db_image=history.image_url,
+                normalized_image=normalized_k8s_image,
+                deployed_at=history.deployed_at.isoformat(),
+                duration_seconds=history.total_duration
+            )
+        else:
+            logger.warning(
+                "no_matching_deployment_history_found",
+                namespace=namespace,
+                k8s_image=image,
+                normalized_k8s_image=normalized_k8s_image,
+                deployment_name=deployment_name,
+                running_histories_count=len(running_histories)
+            )
+    except Exception as e:
+        db.rollback()
+        logger.error(
+            "deployment_history_update_failed",
+            error=str(e),
+            namespace=namespace,
+            image=image
+        )
+    finally:
+        db.close()

@@ -54,6 +54,7 @@ else:
 
 from ..core.config import get_settings
 from ..services.user_project_integration import upsert_integration, get_integration
+from ..models.deployment_history import get_kst_now
 from sqlalchemy.orm import Session
 
 # Initialize NCP client from settings (expects env vars configured)
@@ -2572,7 +2573,7 @@ async def run_sourcedeploy(
                 image_url=desired_image,
                 cluster_id=getattr(settings, 'ncp_nks_cluster_id', None),
                 namespace="default",
-                started_at=datetime.utcnow(),
+                started_at=get_kst_now(),
                 auto_deploy_enabled=True,
                 is_rollback=is_rollback
             )
@@ -2583,6 +2584,20 @@ async def run_sourcedeploy(
             deploy_history_id = history_record.id
 
             _dbg("SD-HISTORY-RECORDED", history_id=deploy_history_id, image_tag=effective_tag, commit_sha=effective_tag)
+
+            # 백그라운드에서 배포 상태 폴링 시작 (공식 API 경로 사용)
+            # GET /api/v1/project/{projectId}/history
+            from .ncp_deployment_status_poller import poll_deployment_status
+            asyncio.create_task(
+                poll_deployment_status(
+                    deploy_history_id=deploy_history_id,
+                    deploy_project_id=deploy_project_id,
+                    stage_id=str(stage_id)
+                )
+            )
+            _dbg("SD-STATUS-POLLING-STARTED", history_id=deploy_history_id,
+                 project_id=deploy_project_id, stage_id=stage_id)
+
         except Exception as e:
             _dbg("SD-HISTORY-ERROR", error=str(e)[:500])
             # Don't fail deployment if history recording fails

@@ -222,7 +222,16 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             tool="k8s_list_deployments",
             args={"namespace": ns},
         )
-    
+
+    elif command == "list_rollback":
+        # 롤백 목록 조회 명령어
+        if not req.github_owner or not req.github_repo:
+            raise ValueError("롤백 목록 조회에는 프로젝트 정보가 필요합니다. 예: 'K-Le-PaaS/test01 롤백 목록'")
+        return CommandPlan(
+            tool="get_rollback_list",
+            args={"owner": req.github_owner, "repo": req.github_repo},
+        )
+
     elif command == "get_service":
         # 리소스 이름이 명시되지 않았을 때 유효성 검사
         if not req.service_name or req.service_name.strip() == "":
@@ -269,6 +278,9 @@ async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
 
     if plan.tool == "rollback_deployment":
         return await _execute_ncp_rollback(plan.args)
+
+    if plan.tool == "get_rollback_list":
+        return await _execute_get_rollback_list(plan.args)
 
     if plan.tool == "k8s_list_pods":
         return await _execute_list_pods(plan.args)
@@ -1188,6 +1200,59 @@ async def _execute_list_deployments(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
     except Exception as e:
         return {"status": "error", "message": f"Deployment 목록 조회 실패: {str(e)}"}
+
+
+async def _execute_get_rollback_list(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    롤백 목록 조회 (list_rollback 명령어)
+    예: "K-Le-PaaS/test01 롤백 목록 보여줘", "배포 이력 확인"
+    """
+    owner = args.get("owner")
+    repo = args.get("repo")
+    
+    if not owner or not repo:
+        return {"status": "error", "message": "프로젝트 정보가 필요합니다. 예: 'K-Le-PaaS/test01 롤백 목록'"}
+    
+    try:
+        from ..database import SessionLocal
+        from .rollback import get_rollback_list
+        
+        db = SessionLocal()
+        try:
+            result = await get_rollback_list(owner, repo, db, limit=10)
+            
+            if not result.get("current_state"):
+                return {
+                    "status": "success",
+                    "message": f"{owner}/{repo} 프로젝트에 배포 이력이 없습니다.",
+                    "data": result
+                }
+            
+            # 사용자 친화적인 메시지 구성
+            current = result["current_state"]
+            current_msg = f"현재: {current['commit_sha_short']} - {current['commit_message'][:50]}"
+            if current["is_rollback"]:
+                current_msg += " (롤백됨)"
+            
+            available_count = result["total_available"]
+            rollback_count = result["total_rollbacks"]
+            
+            message = f"{owner}/{repo} 롤백 목록을 조회했습니다.\n"
+            message += f"{current_msg}\n"
+            message += f"롤백 가능한 버전: {available_count}개, 최근 롤백: {rollback_count}개"
+            
+            return {
+                "status": "success",
+                "message": message,
+                "data": result
+            }
+            
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"롤백 목록 조회 실패: {str(e)}", exc_info=True)
+        return {"status": "error", "message": f"롤백 목록 조회 실패: {str(e)}"}
 
 
 async def _execute_get_service(args: Dict[str, Any]) -> Dict[str, Any]:

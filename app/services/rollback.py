@@ -196,39 +196,19 @@ async def rollback_to_commit(
 
     logger.info(f"Found deployment history: deployed_at={history.deployed_at}, image={history.image_name}")
 
-    # 3. Check if NCR image exists for this commit
-    image_name = _generate_ncr_image_name(owner, repo)
-    image_url = f"{get_settings().ncp_container_registry_url}/{image_name}:{target_commit_sha}"
-
-    logger.info(f"Verifying NCR image: {image_url}")
-    verified = await _verify_ncr_manifest_exists(image_url)
-    image_exists = verified.get("exists", False)
-    verification_code = verified.get("code")
-
-    logger.info(f"NCR image verification result: exists={image_exists}, code={verification_code}")
+    # 3. For rollback, skip NCR image verification and rebuild
+    # Rationale: If deployment history exists, the image was already built and exists in NCR
+    # NCR verification may fail due to permission issues (403), causing unnecessary rebuilds
+    logger.info(f"Rollback to commit {target_commit_sha[:7]}: skipping NCR verification and rebuild")
+    logger.info("Image exists in NCR from previous deployment, reusing existing image")
 
     # Commit the read transaction to avoid SQLite lock issues
     # This allows run_sourcedeploy to start a new transaction for INSERT operations
     db.commit()
     logger.info("Database transaction committed after queries, ready for deployment")
 
-    # 4. Rebuild if image doesn't exist in NCR
-    registry = "klepaas-test.kr.ncr.ntruss.com"
-    image_repo = f"{registry}/{image_name}"
-
-    # Check if we need to rebuild (image might already exist)
+    # 4. Skip rebuild for rollback - reuse existing image from NCR
     build_result = None
-    if not image_exists:
-        # Image doesn't exist, need to rebuild from commit
-        from .ncp_pipeline import run_sourcebuild
-        build_result = await run_sourcebuild(
-            build_project_id=integ.build_project_id,
-            image_repo=image_repo,
-            commit_sha=target_commit_sha,  # Build this specific commit
-            sc_project_id=integ.sc_project_id,
-            sc_repo_name=integ.sc_repo_name,
-            branch=integ.branch or "main"
-        )
 
     # 5. Deploy with specific rollback tag
     # Manifest will be updated during mirror_and_update_manifest in run_sourcedeploy
@@ -267,7 +247,7 @@ async def rollback_to_commit(
         "action": "rollback",
         "target_commit": target_commit_sha,
         "target_commit_short": target_commit_sha[:7],
-        "image": image_url,
+        "image": history.image_name,  # Use image from deployment history
         "build_result": build_result,
         "deploy_result": deploy_result,
         "rebuilt": build_result is not None,
@@ -292,9 +272,11 @@ async def rollback_to_previous(
     This is for general users who want to rollback without knowing exact commit SHA.
 
     Process:
-    1. Get recent successful deployments (excluding rollbacks)
-    2. Select N-th previous deployment
-    3. Call rollback_to_commit with that commit SHA
+    1. Get the most recent successful deployment (including rollbacks) as current version
+    2. Get recent successful original deployments (excluding rollbacks)
+    3. Find current version's original commit in history
+    4. Select N-th previous deployment from current
+    5. Call rollback_to_commit with that commit SHA
 
     Args:
         owner: GitHub repository owner
@@ -308,18 +290,16 @@ async def rollback_to_previous(
     """
     logger.info(f"Starting rollback to previous deployment: {owner}/{repo}, steps_back={steps_back}")
 
-    # 1. Get recent successful deployments (excluding rollbacks)
-    # Use created_at for sorting if deployed_at is null
-    recent_deployments = db.query(DeploymentHistory).filter(
+    # 1. Get the most recent successful deployment (including rollbacks) to determine current version
+    current_deployment = db.query(DeploymentHistory).filter(
         DeploymentHistory.github_owner == owner,
         DeploymentHistory.github_repo == repo,
-        DeploymentHistory.status == "success",
-        DeploymentHistory.is_rollback == False  # Exclude rollbacks
+        DeploymentHistory.status == "success"
     ).order_by(
-        DeploymentHistory.created_at.desc()  # Use created_at instead of deployed_at
-    ).limit(steps_back + 5).all()  # Get extra for safety
+        DeploymentHistory.created_at.desc()
+    ).first()
 
-    if not recent_deployments:
+    if not current_deployment:
         logger.error(f"No deployment history found for {owner}/{repo}")
         raise HTTPException(
             status_code=404,
@@ -333,32 +313,89 @@ async def rollback_to_previous(
             )
         )
 
-    logger.info(f"Found {len(recent_deployments)} successful deployment(s) for {owner}/{repo}")
+    current_commit_sha = current_deployment.github_commit_sha
+    logger.info(f"Current deployment: commit={current_commit_sha[:7]}, is_rollback={current_deployment.is_rollback}")
 
-    if len(recent_deployments) <= steps_back:
-        available = len(recent_deployments) - 1
+    # 2. Get all successful ORIGINAL deployments (excluding rollbacks) to build version timeline
+    original_deployments = db.query(DeploymentHistory).filter(
+        DeploymentHistory.github_owner == owner,
+        DeploymentHistory.github_repo == repo,
+        DeploymentHistory.status == "success",
+        DeploymentHistory.is_rollback == False  # Exclude rollbacks from timeline
+    ).order_by(
+        DeploymentHistory.created_at.desc()  # Newest first
+    ).all()
+
+    if not original_deployments:
+        logger.error(f"No original deployment history found for {owner}/{repo}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"원본 배포 이력을 찾을 수 없습니다: {owner}/{repo}"
+        )
+
+    logger.info(f"Found {len(original_deployments)} original deployment(s) for {owner}/{repo}")
+
+    # DEBUG: Print all original deployments for debugging
+    logger.info("=== ORIGINAL DEPLOYMENTS TIMELINE ===")
+    for idx, dep in enumerate(original_deployments):
+        logger.info(f"  [{idx}] commit={dep.github_commit_sha[:7]}, created_at={dep.created_at}")
+    logger.info("=====================================")
+
+    # 3. Find current commit in original deployment timeline
+    # Compare using first 7 characters (short SHA) for robustness
+    current_index = None
+    current_commit_short = current_commit_sha[:7] if current_commit_sha else ""
+
+    for idx, dep in enumerate(original_deployments):
+        dep_commit_short = dep.github_commit_sha[:7] if dep.github_commit_sha else ""
+        if dep_commit_short == current_commit_short:
+            current_index = idx
+            logger.info(f"FOUND: Current commit {current_commit_short} matches index {current_index} in original timeline")
+            break
+
+    if current_index is None:
+        logger.warning(f"WARNING: Current commit {current_commit_short} not found in original deployments, using index 0")
+        current_index = 0
+
+    # 4. Calculate target index (current + steps_back)
+    target_index = current_index + steps_back
+    logger.info(f"CALCULATION: current_index={current_index} + steps_back={steps_back} = target_index={target_index}")
+
+    if target_index >= len(original_deployments):
+        available = len(original_deployments) - current_index - 1
         logger.error(f"Not enough deployment history: available={available}, requested={steps_back}")
         raise HTTPException(
             status_code=400,
-            detail=f"Not enough deployment history. Only {available} previous deployment(s) available, but requested rollback to {steps_back} steps back."
+            detail=(
+                f"배포 이력이 부족합니다.\n"
+                f"현재 버전({current_commit_sha[:7]})에서 {available}개의 이전 버전만 사용 가능하지만, "
+                f"{steps_back}단계 이전으로 롤백을 요청했습니다.\n"
+                f"사용 가능한 롤백 범위: 1~{available}단계"
+            )
         )
 
-    # 2. Get target deployment (current is 0, previous is 1, etc.)
-    target_deployment = recent_deployments[steps_back]
-    logger.info(f"Target deployment: commit={target_deployment.github_commit_sha[:7]}, deployed_at={target_deployment.deployed_at}")
+    # 5. Get target deployment
+    target_deployment = original_deployments[target_index]
+    logger.info(
+        f"TARGET SELECTED: "
+        f"commit={target_deployment.github_commit_sha[:7]} (full: {target_deployment.github_commit_sha}), "
+        f"deployed_at={target_deployment.deployed_at}, "
+        f"index={target_index}"
+    )
 
-    # 3. Check if target is too old (safety check)
-    if target_deployment.deployed_at and target_deployment.deployed_at < datetime.utcnow() - timedelta(days=30):
+    # 6. Check if target is too old (safety check)
+    from ..models.deployment_history import get_kst_now
+    if target_deployment.deployed_at and target_deployment.deployed_at < get_kst_now() - timedelta(days=30):
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot rollback to deployment older than 30 days (target: {target_deployment.deployed_at})"
+            detail=f"30일 이상 된 배포로는 롤백할 수 없습니다 (target: {target_deployment.deployed_at})"
         )
 
     # Commit the read transaction to avoid SQLite lock issues
     db.commit()
     logger.info("Database transaction committed after deployment history query")
 
-    # 4. Call commit-based rollback
+    # 7. Call commit-based rollback
     return await rollback_to_commit(
         owner=owner,
         repo=repo,
@@ -421,4 +458,98 @@ async def get_rollback_candidates(
         "repo": repo,
         "total_candidates": len(candidates),
         "candidates": candidates
+    }
+
+
+async def get_rollback_list(
+    owner: str,
+    repo: str,
+    db: Session,
+    limit: int = 10
+) -> Dict[str, Any]:
+    """
+    롤백 목록 조회: 현재 배포 상태, 롤백 가능한 버전, 최근 롤백 히스토리
+    
+    Args:
+        owner: GitHub repository owner
+        repo: GitHub repository name
+        db: Database session
+        limit: 조회할 최대 버전 수
+    
+    Returns:
+        현재 상태, 롤백 가능 버전, 롤백 히스토리를 포함한 딕셔너리
+    """
+    # 1. 현재 배포 상태 조회 (가장 최근 성공한 배포, 롤백 포함)
+    current_deployment = db.query(DeploymentHistory).filter(
+        DeploymentHistory.github_owner == owner,
+        DeploymentHistory.github_repo == repo,
+        DeploymentHistory.status == "success"
+    ).order_by(
+        DeploymentHistory.deployed_at.desc()
+    ).first()
+    
+    current_state = None
+    if current_deployment:
+        current_state = {
+            "commit_sha": current_deployment.github_commit_sha,
+            "commit_sha_short": current_deployment.github_commit_sha[:7] if current_deployment.github_commit_sha else "unknown",
+            "commit_message": current_deployment.github_commit_message or "메시지 없음",
+            "deployed_at": current_deployment.deployed_at.isoformat() if current_deployment.deployed_at else None,
+            "is_rollback": current_deployment.is_rollback,
+            "deployment_id": current_deployment.id
+        }
+    
+    # 2. 롤백 가능한 버전 목록 (원본 배포만, is_rollback=False)
+    original_deployments = db.query(DeploymentHistory).filter(
+        DeploymentHistory.github_owner == owner,
+        DeploymentHistory.github_repo == repo,
+        DeploymentHistory.status == "success",
+        DeploymentHistory.is_rollback == False
+    ).order_by(
+        DeploymentHistory.created_at.desc()
+    ).limit(limit).all()
+    
+    available_versions = []
+    current_commit_short = current_deployment.github_commit_sha[:7] if current_deployment and current_deployment.github_commit_sha else ""
+    
+    for idx, dep in enumerate(original_deployments):
+        dep_commit_short = dep.github_commit_sha[:7] if dep.github_commit_sha else ""
+        is_current = (dep_commit_short == current_commit_short)
+        
+        available_versions.append({
+            "steps_back": idx,
+            "commit_sha": dep.github_commit_sha,
+            "commit_sha_short": dep_commit_short,
+            "commit_message": dep.github_commit_message or "메시지 없음",
+            "deployed_at": dep.deployed_at.isoformat() if dep.deployed_at else None,
+            "is_current": is_current
+        })
+    
+    # 3. 최근 롤백 히스토리 (is_rollback=True, 최대 5개)
+    recent_rollbacks = db.query(DeploymentHistory).filter(
+        DeploymentHistory.github_owner == owner,
+        DeploymentHistory.github_repo == repo,
+        DeploymentHistory.status == "success",
+        DeploymentHistory.is_rollback == True
+    ).order_by(
+        DeploymentHistory.created_at.desc()
+    ).limit(5).all()
+    
+    rollback_history = []
+    for rb in recent_rollbacks:
+        rollback_history.append({
+            "commit_sha_short": rb.github_commit_sha[:7] if rb.github_commit_sha else "unknown",
+            "commit_message": rb.github_commit_message or "메시지 없음",
+            "rolled_back_at": rb.deployed_at.isoformat() if rb.deployed_at else None,
+            "rollback_from_id": rb.rollback_from_id
+        })
+    
+    return {
+        "owner": owner,
+        "repo": repo,
+        "current_state": current_state,
+        "available_versions": available_versions,
+        "total_available": len(available_versions),
+        "rollback_history": rollback_history,
+        "total_rollbacks": len(rollback_history)
     }
