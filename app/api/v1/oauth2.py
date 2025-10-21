@@ -9,7 +9,7 @@ from fastapi.responses import RedirectResponse
 from typing import Optional, Dict, Any
 import httpx
 import secrets
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 import jwt
 from datetime import datetime, timedelta
 from pydantic import BaseModel
@@ -144,26 +144,28 @@ class OAuth2Manager:
         """OAuth2 인증 URL 생성"""
         # state 파라미터에 provider 정보 포함
         state = f"provider={provider}"
-        
+
         if provider == "google":
-            return (
-                f"https://accounts.google.com/o/oauth2/v2/auth"
-                f"?client_id={self.google_client_id}"
-                f"&redirect_uri={redirect_uri}"
-                f"&scope=openid email profile"
-                f"&response_type=code"
-                f"&access_type=offline"
-                f"&state={state}"
-            )
+            # URL 파라미터를 딕셔너리로 구성하고 urlencode 사용
+            params = {
+                "client_id": self.google_client_id,
+                "redirect_uri": redirect_uri,
+                "scope": "openid email profile",
+                "response_type": "code",
+                "access_type": "offline",
+                "state": state
+            }
+            return f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
         elif provider == "github":
-            return (
-                f"https://github.com/login/oauth/authorize"
-                f"?client_id={self.github_client_id}"
-                f"&redirect_uri={redirect_uri}"
-                f"&scope=user:email"
-                f"&response_type=code"
-                f"&state={state}"
-            )
+            # URL 파라미터를 딕셔너리로 구성하고 urlencode 사용
+            params = {
+                "client_id": self.github_client_id,
+                "redirect_uri": redirect_uri,
+                "scope": "user:email",
+                "response_type": "code",
+                "state": state
+            }
+            return f"https://github.com/login/oauth/authorize?{urlencode(params)}"
         else:
             raise HTTPException(
                 status_code=400,
