@@ -5,12 +5,16 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from datetime import datetime, timezone
 
+import structlog
 from pydantic import BaseModel, Field
 from kubernetes import client
 from kubernetes.client.rest import ApiException
+from fastapi import HTTPException
 
 from .deployments import DeployApplicationInput, perform_deploy
 from .k8s_client import get_apps_v1_api, get_core_v1_api, get_networking_v1_api
+
+logger = structlog.get_logger(__name__)
 
 
 class CommandRequest(BaseModel):
@@ -30,6 +34,8 @@ class CommandRequest(BaseModel):
     github_repo: str = Field(default="")       # GitHub 저장소 이름
     target_commit_sha: str = Field(default="") # 롤백할 커밋 SHA
     steps_back: int = Field(default=0, ge=0)   # 몇 번 전으로 롤백할지
+    # 비용 분석 관련 필드
+    analysis_type: str = Field(default="usage")  # usage, optimization, forecast   # 몇 번 전으로 롤백할지
 
 
 @dataclass
@@ -118,12 +124,18 @@ def plan_command(req: CommandRequest) -> CommandPlan:
         )
     
     elif command == "scale":
-        # 리소스 이름이 명시되지 않았을 때 유효성 검사
-        if not req.deployment_name or req.deployment_name.strip() == "":
-            raise ValueError("스케일링 명령어에는 배포 이름을 명시해야 합니다. 예: 'nginx-deployment 3개로 늘려줘'")
+        # NCP SourceCommit 기반 스케일링만 지원
+        if not req.github_owner or not req.github_repo:
+            raise ValueError("스케일링 명령어에는 GitHub 저장소 정보가 필요합니다. 예: 'K-Le-PaaS/test01을 3개로 늘려줘'")
         return CommandPlan(
-            tool="k8s_scale_deployment",
-            args={"name": resource_name, "namespace": ns, "replicas": req.replicas},
+            tool="scale",
+            args={
+                "owner": req.github_owner,
+                "repo": req.github_repo,
+                "github_owner": req.github_owner,
+                "github_repo": req.github_repo,
+                "replicas": req.replicas
+            },
         )
     
     elif command == "status":
@@ -250,7 +262,86 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             args={"name": resource_name, "namespace": ns},
         )
 
+    elif command == "cost_analysis":
+        # 비용 분석 명령어
+        return CommandPlan(
+            tool="cost_analysis",
+            args={
+                "namespace": ns,
+                "analysis_type": req.analysis_type or "usage"
+            },
+        )
+
     raise ValueError("해석할 수 없는 명령입니다.")
+
+
+async def _execute_cost_analysis(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    클러스터 비용 분석 실행
+    """
+    namespace = args.get("namespace", "default")
+    analysis_type = args.get("analysis_type", "usage")
+    
+    # TODO: 실제 비용 분석 로직 구현
+    # 현재는 mock 데이터 반환
+    
+    if analysis_type == "optimization":
+        return {
+            "message": f"{namespace} 네임스페이스의 비용 최적화 제안을 생성했습니다.",
+            "cost_estimate": {
+                "current_cost": 150000,
+                "estimated_cost": 105000,
+                "savings": 45000,
+                "currency": "KRW",
+                "period": "월간",
+                "breakdown": {
+                    "compute": 80000,
+                    "storage": 30000,
+                    "network": 25000,
+                    "idle_resources": -45000
+                }
+            },
+            "recommendations": [
+                "미사용 Pod 3개 제거 시 월 20,000원 절감",
+                "스토리지 최적화로 월 15,000원 절감",
+                "인스턴스 다운사이징으로 월 10,000원 절감"
+            ]
+        }
+    elif analysis_type == "forecast":
+        return {
+            "message": f"{namespace} 네임스페이스의 월간 예상 비용을 계산했습니다.",
+            "cost_estimate": {
+                "estimated_cost": 150000,
+                "currency": "KRW",
+                "period": "월간 예상",
+                "breakdown": {
+                    "compute": 85000,
+                    "storage": 35000,
+                    "network": 30000
+                }
+            },
+            "trend": "지난달 대비 5% 증가 예상"
+        }
+    else:  # usage
+        return {
+            "message": f"{namespace} 네임스페이스의 현재 비용 현황입니다.",
+            "cost_estimate": {
+                "current_cost": 150000,
+                "currency": "KRW",
+                "period": "이번 달",
+                "breakdown": {
+                    "compute": 85000,
+                    "storage": 35000,
+                    "network": 30000
+                }
+            },
+            "resource_usage": {
+                "pods": 12,
+                "deployments": 5,
+                "services": 8,
+                "storage_gb": 150
+            }
+        }
 
 
 async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
@@ -261,7 +352,7 @@ async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
         payload = DeployApplicationInput(**plan.args)
         return await perform_deploy(payload)
 
-    if plan.tool == "k8s_scale_deployment":
+    if plan.tool == "scale":
         return await _execute_scale(plan.args)
 
     if plan.tool == "k8s_get_status":
@@ -308,6 +399,9 @@ async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
 
     if plan.tool == "k8s_get_deployment":
         return await _execute_get_deployment(plan.args)
+
+    if plan.tool == "cost_analysis":
+        return await _execute_cost_analysis(plan.args)
 
     raise ValueError("지원하지 않는 실행 계획입니다.")
 
@@ -691,41 +785,58 @@ async def _execute_restart(args: Dict[str, Any]) -> Dict[str, Any]:
 async def _execute_scale(args: Dict[str, Any]) -> Dict[str, Any]:
     """
     Deployment 스케일링 (scale 명령어)
-    예: "서버 3대로 늘려줘", "chat-app 스케일 아웃"
+    NCP SourceCommit 매니페스트 기반 스케일링
+    예: "K-Le-PaaS/test01을 3개로 늘려줘", "test01 스케일 5로"
     """
-    name = args["name"]
-    namespace = args["namespace"]
-    replicas = args["replicas"]
-    
-    try:
-        apps_v1 = get_apps_v1_api()
-        
-        # Deployment의 replicas 값만 업데이트
-        body = {
-            "spec": {
-                "replicas": replicas
-            }
-        }
-        
-        apps_v1.patch_namespaced_deployment_scale(
-            name=name,
-            namespace=namespace,
-            body=body
-        )
-        
+    from .rollback import scale_deployment
+    from ..database import get_db
+
+    owner = args.get("owner") or args.get("github_owner", "")
+    repo = args.get("repo") or args.get("github_repo", "")
+    replicas = args.get("replicas", 1)
+    user_id = args.get("user_id", "nlp_user")
+
+    # Validation
+    if not owner or not repo:
         return {
-            "status": "success",
-            "message": f"Deployment '{name}'의 replicas를 {replicas}개로 변경했습니다.",
-            "deployment": name,
-            "replicas": replicas
+            "status": "error",
+            "message": "GitHub 저장소 정보가 필요합니다 (예: K-Le-PaaS/test01을 3개로 늘려줘)"
         }
-        
-    except ApiException as e:
-        if e.status == 404:
-            return {"status": "error", "message": f"Deployment '{name}'을 찾을 수 없습니다."}
-        return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
+
+    try:
+        # 데이터베이스 세션 생성
+        db = next(get_db())
+
+        try:
+            # scale_deployment 호출
+            result = await scale_deployment(
+                owner=owner,
+                repo=repo,
+                replicas=replicas,
+                db=db,
+                user_id=user_id
+            )
+
+            return {
+                "status": "success",
+                "message": f"{owner}/{repo}의 레플리카를 {result['old_replicas']}개에서 {replicas}개로 변경했습니다.",
+                "data": result
+            }
+
+        finally:
+            db.close()
+
+    except HTTPException as e:
+        return {
+            "status": "error",
+            "message": e.detail
+        }
     except Exception as e:
-        return {"status": "error", "message": f"스케일링 실패: {str(e)}"}
+        logger.error(f"Scaling failed: {str(e)}", exc_info=True)
+        return {
+            "status": "error",
+            "message": f"스케일링 실패: {str(e)}"
+        }
 
 
 async def _execute_ncp_rollback(args: Dict[str, Any]) -> Dict[str, Any]:

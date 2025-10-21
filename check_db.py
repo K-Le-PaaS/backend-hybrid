@@ -66,13 +66,27 @@ if deployment_table:
     for col in columns:
         print(f"  {col[1]}: {col[2]}")
 
-    # 데이터 확인 (최근 10개)
-    cursor.execute(f"SELECT github_owner, github_repo, github_commit_sha, status, deployed_at, is_rollback FROM {deployment_table} ORDER BY created_at DESC LIMIT 10")
+    # 전체 레코드 수 확인
+    cursor.execute(f"SELECT COUNT(*) FROM {deployment_table}")
+    total_count = cursor.fetchone()[0]
+    print(f"\nTotal deployment records: {total_count}")
+    
+    # 데이터 확인 (최근 20개)
+    cursor.execute(f"SELECT id, github_owner, github_repo, github_commit_sha, status, deployed_at, completed_at, started_at, is_rollback FROM {deployment_table} ORDER BY id DESC LIMIT 20")
     rows = cursor.fetchall()
-    print(f"\nTotal rows shown: {len(rows)}")
-    print("\nRecent deployments:")
+    print(f"\nRecent {len(rows)} deployments:")
+    print(f"{'ID':<5} {'Repository':<25} {'Commit':<10} {'Status':<10} {'Started':<20} {'Deployed':<20} {'Completed':<20} {'RB'}")
+    print("-" * 130)
     for row in rows:
-        print(f"  {row[0]}/{row[1]} | commit={row[2][:7] if row[2] else 'None'} | status={row[3]} | deployed_at={row[4]} | is_rollback={row[5]}")
+        id_val = row[0]
+        repo = f"{row[1]}/{row[2]}"
+        commit = (row[3] or "")[:7]
+        status = row[4] or ""
+        deployed = str(row[5]) if row[5] else "NULL"
+        completed = str(row[6]) if row[6] else "NULL"
+        started = str(row[7]) if row[7] else ""
+        is_rb = "✓" if row[8] else ""
+        print(f"{id_val:<5} {repo:<25} {commit:<10} {status:<10} {started:<20} {deployed:<20} {completed:<20} {is_rb}")
 
     # K-Le-PaaS/test01 특정 조회
     print("\n" + "-" * 80)

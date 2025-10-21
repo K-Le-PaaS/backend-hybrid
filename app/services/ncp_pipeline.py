@@ -1247,11 +1247,12 @@ def mirror_and_update_manifest(
     sc_password: str | None = None,
     sc_endpoint: str | None = None,
     sc_full_url: str | None = None,
+    replicas: int | None = None,
 ) -> dict:
-    """Mirror GitHub to SourceCommit, then update manifest with specific image tag.
+    """Mirror GitHub to SourceCommit, then update manifest with specific image tag and optionally replicas.
 
     This function uses the existing mirror_to_sourcecommit to do the heavy lifting,
-    then clones SourceCommit to update the manifest with actual image tag.
+    then clones SourceCommit to update the manifest with actual image tag and replicas.
 
     Parameters:
     - github_repo_url: https URL of GitHub repo
@@ -1287,6 +1288,7 @@ def mirror_and_update_manifest(
     work_dir = Path("/tmp") / f"manifest-update-{uuid.uuid4().hex[:8]}"
     work_dir.mkdir(parents=True, exist_ok=True)
     sc_dir = work_dir / "sc_repo"
+    old_replicas = None  # Track old replicas value if updated
 
     try:
         # Compose SourceCommit URL with auth
@@ -1362,6 +1364,16 @@ def mirror_and_update_manifest(
                      has_spec='spec' in manifest,
                      has_template='template' in manifest.get('spec', {}))
 
+            # Update replicas if specified (독립적으로 처리)
+            _dbg("MM-REPLICAS-CHECK", replicas_param=replicas, has_spec='spec' in manifest)
+            if replicas is not None and 'spec' in manifest:
+                old_replicas = manifest['spec'].get('replicas', 1)
+                manifest['spec']['replicas'] = replicas
+                _dbg("MM-REPLICAS-UPDATE", old=old_replicas, new=replicas)
+                manifest_updated = True
+            elif replicas is not None:
+                _dbg("MM-REPLICAS-SKIP", reason="no_spec_in_manifest")
+
             if manifest_updated:
                 # Write updated manifest (preserve formatting)
                 with open(manifest_path, 'w', encoding='utf-8') as f:
@@ -1385,8 +1397,16 @@ def mirror_and_update_manifest(
                     ["git", "-C", str(sc_dir), "add", "k8s/deployment.yaml"],
                     check=True, capture_output=True, text=True
                 )
+                
+                # Build commit message based on what was updated
+                commit_parts = []
+                if replicas is not None:
+                    commit_parts.append(f"replicas={replicas}")
+                commit_parts.append(f"tag={image_tag}")
+                commit_msg = f"chore: update {', '.join(commit_parts)}"
+                
                 subprocess.run(
-                    ["git", "-C", str(sc_dir), "commit", "-m", f"chore: update image tag to {image_tag}"],
+                    ["git", "-C", str(sc_dir), "commit", "-m", commit_msg],
                     check=True, capture_output=True, text=True
                 )
 
@@ -1414,6 +1434,10 @@ def mirror_and_update_manifest(
             repo_part_raw = sc_repo_name or "app"
             repo_part = repo_part_raw.lower()
 
+            # Use provided replicas or default to 1
+            target_replicas = replicas if replicas is not None else 1
+            _dbg("MM-CREATE-MANIFEST", replicas_param=replicas, target_replicas=target_replicas)
+
             # Create deployment manifest
             manifest_content = f"""apiVersion: apps/v1
 kind: Deployment
@@ -1421,7 +1445,7 @@ metadata:
   name: {repo_part}-deploy
   namespace: default
 spec:
-  replicas: 1
+  replicas: {target_replicas}
   selector:
     matchLabels:
       app: {repo_part}
@@ -1457,7 +1481,10 @@ spec:
             # Write manifests
             manifest_path.write_text(manifest_content, encoding="utf-8")
             service_path.write_text(service_content, encoding="utf-8")
-            _dbg("MM-MANIFESTS-CREATED", deployment=str(manifest_path), service=str(service_path))
+            _dbg("MM-MANIFESTS-CREATED", deployment=str(manifest_path), service=str(service_path), replicas=target_replicas)
+            
+            # Track old_replicas (was None, now created with target_replicas)
+            old_replicas = None
 
             # Git commit and push
             subprocess.run(
@@ -1472,8 +1499,15 @@ spec:
                 ["git", "-C", str(sc_dir), "add", "k8s/"],
                 check=True, capture_output=True, text=True
             )
+            
+            # Build commit message for new manifest
+            new_manifest_msg_parts = [f"tag={image_tag}"]
+            if replicas is not None:
+                new_manifest_msg_parts.append(f"replicas={target_replicas}")
+            new_manifest_msg = f"chore: add k8s manifests with {', '.join(new_manifest_msg_parts)}"
+            
             subprocess.run(
-                ["git", "-C", str(sc_dir), "commit", "-m", f"chore: add k8s manifests with tag {image_tag}"],
+                ["git", "-C", str(sc_dir), "commit", "-m", new_manifest_msg],
                 check=True, capture_output=True, text=True
             )
 
@@ -1498,7 +1532,8 @@ spec:
             "source": github_repo_url,
             "target": sc_url.replace(f"{user}:{pwd}@", "") if (sc_username or sc_password) else sc_url,
             "manifest_updated": manifest_updated,
-            "image": f"{image_repo}:{image_tag}"
+            "image": f"{image_repo}:{image_tag}",
+            "old_replicas": old_replicas  # Include old replicas if updated
         }
 
     except subprocess.CalledProcessError as e:
@@ -2150,6 +2185,8 @@ async def run_sourcedeploy(
     repo: str | None = None,
     tag: str | None = None,
     is_rollback: bool = False,
+    skip_mirror: bool = False,  # Skip mirror if manifest was already updated
+    deployment_history_id: int | None = None,  # Use existing history instead of creating new one
 ) -> dict:
     """Run SourceDeploy project via REST only using scenario deploy endpoint.
 
@@ -2443,7 +2480,10 @@ async def run_sourcedeploy(
     # SourceBuild는 SourceCommit의 코드를 사용하므로, 먼저 최신 코드를 미러링해야 함
     # 이 단계에서 k8s/deployment.yaml의 이미지 태그도 함께 업데이트
     manifest_updated = False
-    if owner and repo and sc_repo_name:
+    if skip_mirror:
+        _dbg("SC-MIRROR-SKIP", reason="skip_mirror_flag_enabled")
+        manifest_updated = True  # Assume already updated by caller
+    elif owner and repo and sc_repo_name:
         _dbg("SC-MIRROR-START", owner=owner, repo=repo, sc_repo=sc_repo_name, image_tag=effective_tag)
         try:
             # Get GitHub Installation Token from DB
@@ -2549,54 +2589,87 @@ async def run_sourcedeploy(
     result = data.get('result') if isinstance(data, dict) else None
 
     # Record deployment history
-    deploy_history_id = None
+    deploy_history_id = deployment_history_id  # Use provided ID if available
     if db and user_id and owner and repo:
         try:
             from ..models.deployment_history import DeploymentHistory
             from datetime import datetime
 
-            history_record = DeploymentHistory(
-                user_id=user_id,
-                github_owner=owner,
-                github_repo=repo,
-                github_commit_sha=effective_tag,  # Store the deployed commit SHA/tag
-                github_commit_message=f"Rollback to commit {effective_tag[:7]}" if is_rollback else None,
-                sourcecommit_project_id=sc_project_id,
-                sourcecommit_repo_name=sc_repo_name,
-                sourcebuild_project_id=str(build_project_id) if build_project_id else None,
-                sourcedeploy_project_id=deploy_project_id,
-                deploy_id=str((result or {}).get('historyId')) if result else None,
-                status="running",
-                sourcedeploy_status="started",
-                image_name=image_repo,
-                image_tag=effective_tag,
-                image_url=desired_image,
-                cluster_id=getattr(settings, 'ncp_nks_cluster_id', None),
-                namespace="default",
-                started_at=get_kst_now(),
-                auto_deploy_enabled=True,
-                is_rollback=is_rollback
-            )
+            # Check if we should update existing history or create new one
+            if deployment_history_id:
+                # Update existing history record
+                history_record = db.query(DeploymentHistory).filter(
+                    DeploymentHistory.id == deployment_history_id
+                ).first()
+                
+                if history_record:
+                    # Update existing record with deploy info
+                    history_record.sourcecommit_project_id = sc_project_id
+                    history_record.sourcecommit_repo_name = sc_repo_name
+                    history_record.sourcebuild_project_id = str(build_project_id) if build_project_id else None
+                    history_record.sourcedeploy_project_id = deploy_project_id
+                    history_record.deploy_id = str((result or {}).get('historyId')) if result else None
+                    history_record.sourcedeploy_status = "started"
+                    history_record.image_name = image_repo
+                    history_record.image_tag = effective_tag
+                    history_record.image_url = desired_image
+                    history_record.cluster_id = getattr(settings, 'ncp_nks_cluster_id', None)
+                    history_record.namespace = "default"
+                    if is_rollback:
+                        history_record.is_rollback = True
+                    
+                    db.commit()
+                    db.refresh(history_record)
+                    deploy_history_id = history_record.id
+                    _dbg("SD-HISTORY-UPDATED", history_id=deploy_history_id, image_tag=effective_tag, mode="update_existing")
+                else:
+                    _dbg("SD-HISTORY-NOT-FOUND", requested_id=deployment_history_id)
+                    deployment_history_id = None  # Fall through to create new
+            
+            if not deployment_history_id:
+                # Create new history record
+                history_record = DeploymentHistory(
+                    user_id=user_id,
+                    github_owner=owner,
+                    github_repo=repo,
+                    github_commit_sha=effective_tag,  # Store the deployed commit SHA/tag
+                    github_commit_message=f"Rollback to commit {effective_tag[:7]}" if is_rollback else None,
+                    sourcecommit_project_id=sc_project_id,
+                    sourcecommit_repo_name=sc_repo_name,
+                    sourcebuild_project_id=str(build_project_id) if build_project_id else None,
+                    sourcedeploy_project_id=deploy_project_id,
+                    deploy_id=str((result or {}).get('historyId')) if result else None,
+                    status="running",
+                    sourcedeploy_status="started",
+                    image_name=image_repo,
+                    image_tag=effective_tag,
+                    image_url=desired_image,
+                    cluster_id=getattr(settings, 'ncp_nks_cluster_id', None),
+                    namespace="default",
+                    started_at=get_kst_now(),
+                    auto_deploy_enabled=True,
+                    is_rollback=is_rollback
+                )
 
-            db.add(history_record)
-            db.commit()
-            db.refresh(history_record)
-            deploy_history_id = history_record.id
-
-            _dbg("SD-HISTORY-RECORDED", history_id=deploy_history_id, image_tag=effective_tag, commit_sha=effective_tag)
+                db.add(history_record)
+                db.commit()
+                db.refresh(history_record)
+                deploy_history_id = history_record.id
+                _dbg("SD-HISTORY-CREATED", history_id=deploy_history_id, image_tag=effective_tag, mode="create_new")
 
             # 백그라운드에서 배포 상태 폴링 시작 (공식 API 경로 사용)
-            # GET /api/v1/project/{projectId}/history
-            from .ncp_deployment_status_poller import poll_deployment_status
-            asyncio.create_task(
-                poll_deployment_status(
-                    deploy_history_id=deploy_history_id,
-                    deploy_project_id=deploy_project_id,
-                    stage_id=str(stage_id)
+            # Only start polling if we have a valid history_id
+            if deploy_history_id:
+                from .ncp_deployment_status_poller import poll_deployment_status
+                asyncio.create_task(
+                    poll_deployment_status(
+                        deploy_history_id=deploy_history_id,
+                        deploy_project_id=deploy_project_id,
+                        stage_id=str(stage_id)
+                    )
                 )
-            )
-            _dbg("SD-STATUS-POLLING-STARTED", history_id=deploy_history_id,
-                 project_id=deploy_project_id, stage_id=stage_id)
+                _dbg("SD-STATUS-POLLING-STARTED", history_id=deploy_history_id,
+                     project_id=deploy_project_id, stage_id=stage_id)
 
         except Exception as e:
             _dbg("SD-HISTORY-ERROR", error=str(e)[:500])
@@ -2646,6 +2719,177 @@ def _compose_image_repo(
     return (image_repo if image_repo else None), "owner_repo_underscore"
 
 # Export _dbg function for use in other modules
+def update_replicas_in_sourcecommit(
+    sc_project_id: str,
+    sc_repo_name: str,
+    replicas: int,
+    sc_username: str | None = None,
+    sc_password: str | None = None,
+    sc_endpoint: str | None = None,
+    sc_full_url: str | None = None,
+) -> dict:
+    """Update only replicas in SourceCommit k8s/deployment.yaml manifest.
+
+    This function clones SourceCommit, updates the replicas field, and pushes back.
+    Used for scaling operations where only pod count needs to change.
+
+    Parameters:
+    - sc_project_id: SourceCommit project id
+    - sc_repo_name: Repository name
+    - replicas: Target replica count
+    - sc_username/password: SourceCommit basic auth
+    - sc_endpoint: e.g., https://sourcecommit.apigw.ntruss.com
+    - sc_full_url: Full SourceCommit git URL (optional)
+
+    Returns:
+    - dict with status, old_replicas, new_replicas
+    """
+    import subprocess
+    import shutil
+    import uuid
+    import yaml
+    from pathlib import Path
+    from urllib.parse import quote
+
+    work_dir = Path("/tmp") / f"scale-{uuid.uuid4().hex[:8]}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    sc_dir = work_dir / "sc_repo"
+
+    try:
+        # Compose SourceCommit URL with auth
+        if sc_full_url:
+            sc_url = sc_full_url
+        else:
+            try:
+                resolved = get_sourcecommit_repo_public_url(sc_project_id, sc_repo_name)
+            except Exception:
+                resolved = None
+            sc_url = resolved or f"https://devtools.ncloud.com/{sc_project_id}/{sc_repo_name}.git"
+
+        u_raw = (sc_username or "").strip()
+        p_raw = (sc_password or "").strip()
+        if u_raw or p_raw:
+            user = quote(u_raw or "token", safe="")
+            pwd = quote(p_raw or "x", safe="")
+            sc_url = sc_url.replace("https://", f"https://{user}:{pwd}@", 1)
+
+        _dbg("SCALE-CLONE-SC", sc_url_masked=sc_url.replace(f"{user}:{pwd}@", "***@") if (u_raw or p_raw) else sc_url)
+
+        # Clone SourceCommit with retry (permission propagation may take time)
+        clone_ok = False
+        last_error = None
+        for attempt in range(1, 4):  # 3 attempts max
+            try:
+                # Ensure destination doesn't exist
+                if sc_dir.exists():
+                    shutil.rmtree(sc_dir, ignore_errors=True)
+
+                subprocess.run(
+                    ["git", "clone", sc_url, str(sc_dir)],
+                    check=True,
+                    capture_output=True,
+                    text=True
+                )
+                clone_ok = True
+                _dbg("SCALE-CLONE-SUCCESS", dir=str(sc_dir), attempt=attempt)
+                break
+            except subprocess.CalledProcessError as e:
+                last_error = e
+                _dbg("SCALE-CLONE-RETRY", attempt=attempt, err=e.stderr[:200] if hasattr(e, 'stderr') else str(e))
+                if attempt < 3:  # Wait before retry (except last attempt)
+                    import time
+                    time.sleep(2 * attempt)  # Progressive backoff: 2s, 4s
+
+        if not clone_ok:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Failed to clone SourceCommit after 3 attempts: {last_error.stderr if hasattr(last_error, 'stderr') else str(last_error)}"
+            )
+
+        # Update manifest replicas
+        k8s_dir = sc_dir / "k8s"
+        manifest_path = k8s_dir / "deployment.yaml"
+
+        if not manifest_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"매니페스트 파일을 찾을 수 없습니다: k8s/deployment.yaml"
+            )
+
+        # Read and parse manifest
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            manifest = yaml.safe_load(f)
+
+        # Update replicas
+        if 'spec' not in manifest:
+            raise HTTPException(
+                status_code=400,
+                detail="매니페스트에 spec이 없습니다"
+            )
+
+        old_replicas = manifest['spec'].get('replicas', 1)
+        manifest['spec']['replicas'] = replicas
+
+        _dbg("SCALE-UPDATE-REPLICAS", old=old_replicas, new=replicas)
+
+        # Write updated manifest
+        with open(manifest_path, 'w', encoding='utf-8') as f:
+            yaml.dump(manifest, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+        # Git commit and push
+        subprocess.run(
+            ["git", "-C", str(sc_dir), "config", "user.email", "bot@k-le-paas.local"],
+            check=True, capture_output=True, text=True
+        )
+        subprocess.run(
+            ["git", "-C", str(sc_dir), "config", "user.name", "K-Le-PaaS Bot"],
+            check=True, capture_output=True, text=True
+        )
+        subprocess.run(
+            ["git", "-C", str(sc_dir), "add", "k8s/deployment.yaml"],
+            check=True, capture_output=True, text=True
+        )
+        subprocess.run(
+            ["git", "-C", str(sc_dir), "commit", "-m", f"chore: scale replicas to {replicas}"],
+            check=True, capture_output=True, text=True
+        )
+
+        # Check current branch and push
+        branch_result = subprocess.run(
+            ["git", "-C", str(sc_dir), "branch", "--show-current"],
+            capture_output=True, text=True
+        )
+        current_branch = branch_result.stdout.strip() or "main"
+
+        subprocess.run(
+            ["git", "-C", str(sc_dir), "push", "origin", current_branch],
+            check=True, capture_output=True, text=True
+        )
+
+        _dbg("SCALE-PUSH-SUCCESS", replicas=replicas, branch=current_branch)
+
+        return {
+            "status": "success",
+            "old_replicas": old_replicas,
+            "new_replicas": replicas,
+            "manifest_updated": True
+        }
+
+    except subprocess.CalledProcessError as e:
+        error_detail = e.stderr if hasattr(e, 'stderr') else str(e)
+        _dbg("SCALE-ERROR", error=error_detail[:500])
+        raise HTTPException(status_code=400, detail=f"git error during scaling: {error_detail}")
+    except Exception as e:
+        _dbg("SCALE-UNEXPECTED-ERROR", error=str(e)[:500])
+        raise HTTPException(status_code=500, detail=f"Unexpected error during scaling: {str(e)}")
+    finally:
+        try:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            _dbg("SCALE-CLEANUP", work_dir=str(work_dir))
+        except Exception:
+            pass
+
+
 __all__ = [
     "ensure_sourcecommit_repo",
     "create_sourcebuild_project_rest",
@@ -2656,6 +2900,7 @@ __all__ = [
     "ensure_sourcedeploy_project",
     "mirror_to_sourcecommit",
     "update_sourcecommit_manifest",
+    "update_replicas_in_sourcecommit",
     "_dbg",
     "_compose_image_repo",
 ]

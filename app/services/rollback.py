@@ -166,12 +166,15 @@ async def rollback_to_commit(
             detail=f"Deploy project ID not configured for {owner}/{repo}. Please complete project setup."
         )
 
-    # 2. Find deployment history for target commit
+    # 2. Find deployment history for target commit (support both full and short SHA)
     history = db.query(DeploymentHistory).filter(
         DeploymentHistory.github_owner == owner,
         DeploymentHistory.github_repo == repo,
-        DeploymentHistory.github_commit_sha == target_commit_sha,
         DeploymentHistory.status == "success"
+    ).filter(
+        # Support both full SHA and short SHA (7+ characters)
+        (DeploymentHistory.github_commit_sha == target_commit_sha) |
+        (DeploymentHistory.github_commit_sha.like(f"{target_commit_sha}%"))
     ).first()
 
     if not history:
@@ -552,4 +555,166 @@ async def get_rollback_list(
         "total_available": len(available_versions),
         "rollback_history": rollback_history,
         "total_rollbacks": len(rollback_history)
+    }
+
+
+async def scale_deployment(
+    owner: str,
+    repo: str,
+    replicas: int,
+    db: Session,
+    user_id: str
+) -> Dict[str, Any]:
+    """
+    Scale deployment by updating replicas in SourceCommit manifest and redeploying.
+
+    Process:
+    1. Get project integration and current deployment
+    2. Update replicas in SourceCommit k8s/deployment.yaml (using ncp_pipeline)
+    3. Trigger SourceDeploy with same image tag
+
+    Args:
+        owner: GitHub repository owner
+        repo: GitHub repository name
+        replicas: Target number of replicas
+        db: Database session
+        user_id: Current user ID
+
+    Returns:
+        Scaling result with deploy status and metadata
+    """
+    logger.info(f"Starting scaling for {owner}/{repo} to {replicas} replicas")
+
+    # Validation
+    if replicas < 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"레플리카 수는 0 이상이어야 합니다: {replicas}"
+        )
+
+    if replicas > 10:
+        raise HTTPException(
+            status_code=400,
+            detail=f"레플리카 수는 최대 10개까지 가능합니다: {replicas}"
+        )
+
+    # 1. Get integration
+    integ = get_integration(db, user_id=user_id, owner=owner, repo=repo)
+    if not integ:
+        logger.error(f"No project integration found for {owner}/{repo} (user_id: {user_id})")
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"프로젝트 통합 정보를 찾을 수 없습니다: {owner}/{repo}\n"
+                f"스케일링을 하려면 먼저 프로젝트를 배포하여 통합 정보를 생성해야 합니다.\n"
+                f"해결 방법:\n"
+                f"1. POST /api/v1/deployments 엔드포인트를 사용하여 최초 배포를 실행하세요.\n"
+                f"사용자 ID: {user_id}, 저장소: {owner}/{repo}"
+            )
+        )
+
+    if not integ.sc_project_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"SourceCommit project ID not configured for {owner}/{repo}"
+        )
+
+    if not integ.deploy_project_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Deploy project ID not configured for {owner}/{repo}"
+        )
+
+    # 2. Get current deployment to find current image tag
+    current_deployment = db.query(DeploymentHistory).filter(
+        DeploymentHistory.github_owner == owner,
+        DeploymentHistory.github_repo == repo,
+        DeploymentHistory.status == "success"
+    ).order_by(
+        DeploymentHistory.created_at.desc()
+    ).first()
+
+    if not current_deployment:
+        raise HTTPException(
+            status_code=404,
+            detail=f"배포 이력을 찾을 수 없습니다: {owner}/{repo}. 먼저 배포를 실행하세요."
+        )
+
+    current_image_tag = current_deployment.github_commit_sha
+    logger.info(f"Current deployment image tag: {current_image_tag[:7]}")
+
+    # 3. Update manifest using deployment logic (mirror + update)
+    settings = get_settings()
+    from .ncp_pipeline import mirror_and_update_manifest, run_sourcedeploy, _generate_ncr_image_name
+
+    # Get GitHub token for mirror operation
+    from .github_app import github_app_auth
+    github_token, _ = await github_app_auth.get_installation_token_for_repo(owner, repo, db)
+    github_repo_url = f"https://github.com/{owner}/{repo}.git"
+
+    # Generate image repo URL
+    image_name = _generate_ncr_image_name(owner, repo)
+    image_repo = f"{settings.ncp_container_registry_url}/{image_name}"
+    actual_sc_repo_name = integ.sc_repo_name or repo
+
+    logger.info(
+        f"Scaling: Updating manifest with replicas={replicas}, "
+        f"image_tag={current_image_tag[:7]}, sc_repo={actual_sc_repo_name}"
+    )
+
+    # Mirror GitHub to SourceCommit and update manifest (image + replicas)
+    mirror_result = mirror_and_update_manifest(
+        github_repo_url=github_repo_url,
+        installation_or_access_token=github_token,
+        sc_project_id=integ.sc_project_id,
+        sc_repo_name=actual_sc_repo_name,
+        image_repo=image_repo,
+        image_tag=current_image_tag,  # Keep same image
+        sc_endpoint=settings.ncp_sourcecommit_endpoint,
+        replicas=replicas  # Update replicas
+    )
+
+    old_replicas = mirror_result.get("old_replicas", 1)
+    logger.info(f"Manifest updated via mirror_and_update_manifest")
+
+    # Commit DB transaction before triggering deploy
+    db.commit()
+    logger.info("Database transaction committed, ready for deployment")
+
+    # 4. Trigger SourceDeploy with same image tag
+    # Skip mirror since we already updated the manifest above
+
+    deploy_result = await run_sourcedeploy(
+        deploy_project_id=integ.deploy_project_id,
+        stage_name="production",
+        scenario_name="deploy-app",
+        sc_project_id=integ.sc_project_id,
+        db=db,
+        user_id=user_id,
+        owner=owner,
+        repo=repo,
+        tag=current_image_tag,  # Use same image, just update replicas
+        is_rollback=False,  # This is scaling, not rollback
+        skip_mirror=True  # Skip mirror since manifest was already updated above
+    )
+
+    logger.info(
+        "scaling_deployment_completed",
+        owner=owner,
+        repo=repo,
+        replicas=replicas,
+        old_replicas=old_replicas,
+        deploy_history_id=deploy_result.get("deploy_history_id")
+    )
+
+    return {
+        "status": "success",
+        "action": "scale",
+        "owner": owner,
+        "repo": repo,
+        "old_replicas": old_replicas,
+        "new_replicas": replicas,
+        "image_tag": current_image_tag[:7],
+        "deploy_result": deploy_result,
+        "message": f"Deployment scaled from {old_replicas} to {replicas} replicas"
     }

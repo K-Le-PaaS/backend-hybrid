@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ...services.github_workflow import create_or_update_workflow, DEFAULT_CI_YAML
 from ...services.github_app import github_app_auth
-from ...models.deployment_history import DeploymentHistory
+from ...models.deployment_history import DeploymentHistory, get_kst_now
 from datetime import datetime
 from ...services.user_repository import get_user_repositories, add_user_repository, remove_user_repository
 from ...database import get_db
@@ -1191,7 +1191,7 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
             deployment_history.status = "failed"
             deployment_history.error_message = sourcecommit_result.get("message", "SourceCommit failed")
             deployment_history.error_stage = "sourcecommit"
-            deployment_history.completed_at = datetime.utcnow()
+            deployment_history.completed_at = get_kst_now()
             db.commit()
             
             # WebSocket으로 실패 알림
@@ -1246,7 +1246,7 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
         # SourceCommit 성공 시 배포 히스토리 업데이트
         deployment_history.sourcecommit_status = "success"
         # 실제 소요 시간 계산
-        sourcecommit_duration = (datetime.utcnow() - deployment_history.started_at).total_seconds()
+        sourcecommit_duration = (get_kst_now() - deployment_history.started_at).total_seconds()
         deployment_history.sourcecommit_duration = int(sourcecommit_duration)
         db.commit()
         
@@ -1282,7 +1282,7 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
         logger.info(f"Image repo: {image_repo}")
         
         # SourceBuild 시작 시간 기록
-        sourcebuild_start_time = datetime.utcnow()
+        sourcebuild_start_time = get_kst_now()
         
         # SourceBuild 시작 알림
         await deployment_monitor_manager.send_stage_progress(
@@ -1352,7 +1352,7 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
         if build_result.get("status") == "success":
             deployment_history.sourcebuild_status = "success"
             # 실제 소요 시간 계산
-            sourcebuild_duration = (datetime.utcnow() - sourcebuild_start_time).total_seconds()
+            sourcebuild_duration = (get_kst_now() - sourcebuild_start_time).total_seconds()
             deployment_history.sourcebuild_duration = int(sourcebuild_duration)
             deployment_history.sourcebuild_project_id = str(build_id)
             deployment_history.build_id = build_result.get("build_id")
@@ -1363,12 +1363,12 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
             deployment_history.status = "failed"
             deployment_history.error_message = build_result.get("message", "SourceBuild failed")
             deployment_history.error_stage = "sourcebuild"
-            deployment_history.completed_at = datetime.utcnow()
+            deployment_history.completed_at = get_kst_now()
         
         db.commit()
         
         # SourceBuild 완료 진행률 전송
-        sourcebuild_duration = (datetime.utcnow() - sourcebuild_start_time).total_seconds()
+        sourcebuild_duration = (get_kst_now() - sourcebuild_start_time).total_seconds()
         await deployment_monitor_manager.send_stage_progress(
             deployment_id=str(deployment_history.id),
             user_id=integration.user_id,
@@ -1401,7 +1401,7 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
         from ...services.ncp_pipeline import ensure_sourcedeploy_project, run_sourcedeploy
         
         # SourceDeploy 시작 시간 기록
-        sourcedeploy_start_time = datetime.utcnow()
+        sourcedeploy_start_time = get_kst_now()
         
         # SourceDeploy 시작 알림
         await deployment_monitor_manager.send_stage_progress(
@@ -1489,6 +1489,7 @@ spec:
             owner=integration.github_owner,
             repo=integration.github_repo,
             tag=commit_sha,  # Pass commit SHA as tag
+            deployment_history_id=deployment_history.id  # Use existing history to avoid duplicates
         )
         
         logger.info(f"SourceDeploy completed: {deploy_result}")
@@ -1503,28 +1504,40 @@ spec:
         )
         
         # SourceDeploy 결과에 따른 배포 히스토리 업데이트
+        # run_sourcedeploy()가 이미 히스토리를 업데이트했으므로 다시 조회
+        db.refresh(deployment_history)
+        
         if deploy_result.get("status") in ["started", "success"]:
-            # NCP SourceDeploy는 비동기 실행이므로 "started"도 성공으로 간주
+            # NCP SourceDeploy는 비동기 실행이므로 "started"도 일단 성공으로 간주
             deployment_history.sourcedeploy_status = "success"
             # 실제 소요 시간 계산
-            sourcedeploy_duration = (datetime.utcnow() - sourcedeploy_start_time).total_seconds()
+            sourcedeploy_duration = (get_kst_now() - sourcedeploy_start_time).total_seconds()
             deployment_history.sourcedeploy_duration = int(sourcedeploy_duration)
-            deployment_history.sourcedeploy_project_id = str(deploy_project_id)
-            deployment_history.deploy_id = deploy_result.get("response") or deploy_result.get("deploy_id")
+            
+            # run_sourcedeploy()에서 이미 업데이트한 값들을 덮어쓰지 않도록 조건부 업데이트
+            if not deployment_history.sourcedeploy_project_id:
+                deployment_history.sourcedeploy_project_id = str(deploy_project_id)
+            if not deployment_history.deploy_id:
+                deployment_history.deploy_id = deploy_result.get("response") or deploy_result.get("deploy_id")
+            
+            # 폴러가 최종 상태를 업데이트하지만, 여기서도 기본값 설정
+            # (폴러가 실패하거나 타임아웃될 경우를 대비)
+            now = get_kst_now()
             deployment_history.status = "success"
-            deployment_history.completed_at = datetime.utcnow()
+            deployment_history.deployed_at = now
+            deployment_history.completed_at = now
             deployment_history.calculate_duration()  # 총 소요 시간 계산
         else:
             deployment_history.sourcedeploy_status = "failed"
             deployment_history.status = "failed"
             deployment_history.error_message = deploy_result.get("message", "SourceDeploy failed")
             deployment_history.error_stage = "sourcedeploy"
-            deployment_history.completed_at = datetime.utcnow()
+            deployment_history.completed_at = get_kst_now()
         
         db.commit()
         
         # SourceDeploy 완료 진행률 전송
-        sourcedeploy_duration = (datetime.utcnow() - sourcedeploy_start_time).total_seconds()
+        sourcedeploy_duration = (get_kst_now() - sourcedeploy_start_time).total_seconds()
         await deployment_monitor_manager.send_stage_progress(
             deployment_id=str(deployment_history.id),
             user_id=integration.user_id,

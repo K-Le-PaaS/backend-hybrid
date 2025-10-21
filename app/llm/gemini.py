@@ -45,11 +45,20 @@ class GeminiClient(LLMClient):
                     entities["service_name"] = parameters.get("serviceName")
 
             # namespace 기본값 포함이 필요한 명령어들
-            if command in ("status", "endpoint", "restart", "overview", "list_pods", "list_apps", "logs", "get_service", "get_deployment"):
+            if command in ("status", "endpoint", "restart", "overview", "list_pods", "list_apps", "logs", "get_service", "get_deployment", "cost_analysis"):
                 entities["namespace"] = parameters.get("namespace", "default")
 
-            # 스케일링 복제수
+            # 비용 분석 파라미터
+            if command == "cost_analysis":
+                entities["analysis_type"] = parameters.get("analysis_type", "usage")
+
+            # 스케일링 복제수 및 GitHub 저장소 정보
             if command == "scale":
+                # GitHub 저장소 정보 (필수)
+                entities["github_owner"] = parameters.get("owner", "")
+                entities["github_repo"] = parameters.get("repo", "")
+
+                # 복제수 파싱
                 raw_replicas = parameters.get("replicas", 1)
                 try:
                     coerced_replicas = int(raw_replicas)
@@ -228,13 +237,22 @@ class GeminiClient(LLMClient):
 필수 JSON 형식: { "command": "restart", "parameters": { "podName": "<추출된_파드이름_없으면_null>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
 5. 스케일링 (command: "scale")
-설명: Deployment의 서버(파드) 개수를 조절하는 명령입니다.
-중요: "app", "앱"이라는 호칭은 Pod를 의미하므로, 스케일링은 "deployment", "배포" 등의 명시적 표현을 사용합니다.
+설명: NCP SourceCommit 매니페스트 기반으로 배포의 replicas를 조절하는 명령입니다.
+중요: GitHub 저장소(owner/repo) 정보가 반드시 필요합니다.
+
 사용자 입력 예시:
-- 기본 표현: "서버 3대로 늘려줘", "chat-app 스케일 아웃", "서버 1개로 줄여"
-- 자연스러운 표현: "nginx-deployment 5개로 늘려줘", "frontend-deployment 2개로 줄여줘", "백엔드 서버 4개로 스케일", "deployment 복제본 3개로 조정"
-- 다양한 뉘앙스: "서버 개수 3개로", "deployment를 5개로 늘려줘", "인스턴스 2개로 줄여", "복제본 4개로 설정", "서버 수를 3개로 조정", "deployment 개수 늘려줘", "서버 추가해줘", "인스턴스 줄여줘", "스케일 업해줘", "스케일 다운", "deployment 확장", "서버 축소", "복제본 늘려줘", "파드 개수 조정"
-필수 JSON 형식: { "command": "scale", "parameters": { "deploymentName": "<추출된_배포이름_없으면_null>", "replicas": <추출된_숫자> } }
+- **저장소 지정 패턴** (권장):
+  * "K-Le-PaaS/test01을 3개로 늘려줘"
+  * "owner/repo 레플리카 5개로 스케일"
+  * "myorg/myapp 서버 2개로 줄여"
+  * "저장소 K-Le-PaaS/backend-hybrid을 4개로 확장"
+  * "test01 저장소 3개로 스케일 아웃"
+
+- **간단한 패턴** (저장소 정보 필수):
+  * "test01을 3개로 늘려줘" → owner는 컨텍스트에서 추론
+  * "backend 5개로 스케일" → owner는 컨텍스트에서 추론
+
+필수 JSON 형식: { "command": "scale", "parameters": { "owner": "<GitHub_저장소_소유자>", "repo": "<GitHub_저장소_이름>", "replicas": <추출된_숫자> } }
 
 6. NCP 배포 롤백 (command: "rollback")
 설명: NCP SourceBuild/SourceDeploy 기반으로 이전 배포 버전으로 되돌리는 명령입니다.
@@ -359,8 +377,18 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 - 다양한 뉘앙스: "deployment 어떻게 설정되어 있어?", "배포 설정 확인해줘", "deployment 정보 자세히", "배포 구성 체크", "deployment 상세 분석", "배포 설정 파악", "deployment 정보 분석", "배포 상태 상세히"
 필수 JSON 형식: { "command": "get_deployment", "parameters": { "deploymentName": "<추출된_배포_이름>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
+17. 비용 분석 및 최적화 (command: "cost_analysis")
+설명: 클러스터의 비용 현황을 분석하고 최적화 제안을 제공하는 명령입니다.
+사용자 입력 예시:
+- 기본 표현: "비용 분석해줘", "현재 클러스터 비용 확인", "비용 현황 보여줘", "얼마나 나와?"
+- 최적화 요청: "비용 줄일 방법 알려줘", "비용 절감 방안", "저렴하게 운영하는 방법", "비용 최적화 제안"
+- 상세 분석: "사용하지 않는 리소스 찾아줘", "낭비되는 비용 확인", "불필요한 리소스 확인"
+- 예상 비용: "월간 예상 비용", "이번 달 예상 비용", "비용 예측해줘"
+- 다양한 뉘앙스: "비용 얼마나 드나?", "클러스터 운영 비용", "요금 확인", "비용 체크", "지출 현황", "예산 확인", "리소스 비용", "인프라 비용", "운영 비용 분석"
+필수 JSON 형식: { "command": "cost_analysis", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>", "analysis_type": "<optimization|usage|forecast>" } }
+
 일반 규칙:
-- 사용자의 의도가 불분명하거나 위 16가지 명령어 중 어느 것과도 일치하지 않으면: { "command": "unknown", "parameters": { "query": "<사용자_원본_입력>" } }
+- 사용자의 의도가 불분명하거나 위 17가지 명령어 중 어느 것과도 일치하지 않으면: { "command": "unknown", "parameters": { "query": "<사용자_원본_입력>" } }
 - 리소스 이름이 명시되지 않은 경우, 컨텍스트상 기본 리소스가 있다면 그 이름을 사용하거나 null을 반환합니다.
 - 리소스 타입별 파라미터 사용: podName(파드), deploymentName(배포), serviceName(서비스)
 - **중요한 리소스 타입 구분 규칙:**
