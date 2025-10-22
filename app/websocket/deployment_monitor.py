@@ -114,18 +114,16 @@ class DeploymentMonitorManager:
     async def handle_message(self, connection_id: str, data: dict):
         """기존 API와 호환성을 위한 메시지 처리 메서드"""
         message_type = data.get("type")
-        logger.info(f"Handling message type '{message_type}' for connection {connection_id}")
+        # logger.info(f"Handling message type '{message_type}' for connection {connection_id}")
         
         if message_type == "ping":
             # ping/pong 처리 - pong 응답 전송
             try:
-                logger.info(f"Processing ping from {connection_id}")
                 # 해당 연결 ID의 웹소켓 찾기
                 if connection_id in self.connections:
                     ws = self.connections[connection_id]
-                    logger.info(f"Sending pong to {connection_id}")
                     await ws.send_json({"type": "pong", "data": {"message": "pong"}})
-                    logger.info(f"Pong sent successfully to {connection_id}")
+                    # logger.info(f"Pong sent successfully to {connection_id}")
                 else:
                     logger.warning(f"Connection {connection_id} not found in connections")
             except Exception as e:
@@ -281,7 +279,7 @@ class DeploymentMonitorManager:
                 return False
                 
             await websocket.send_text(json.dumps(message, ensure_ascii=False))
-            logger.info(f"Message sent to WebSocket: {message.get('type', 'unknown')}")
+            # logger.info(f"Message sent to WebSocket: {message.get('type', 'unknown')}")
             return True
         except Exception as e:
             logger.error(f"Failed to send message to WebSocket: {e}")
@@ -303,15 +301,15 @@ class DeploymentMonitorManager:
     
     async def broadcast_to_user(self, user_id: str, message: dict):
         """특정 사용자의 모든 연결에 메시지 브로드캐스트"""
-        logger.info(f"Broadcasting to user {user_id}")
-        logger.info(f"Available user connections: {list(self.user_connections.keys())}")
+        # logger.info(f"Broadcasting to user {user_id}")
+        # logger.info(f"Available user connections: {list(self.user_connections.keys())}")
         
         if user_id not in self.user_connections:
             logger.warning(f"User {user_id} not found in user_connections")
             return
             
         connections = self.user_connections[user_id].copy()
-        logger.info(f"Found {len(connections)} connections for user {user_id}")
+        # logger.info(f"Found {len(connections)} connections for user {user_id}")
         
         for websocket in connections:
             success = await self.send_to_websocket(websocket, message)
@@ -440,8 +438,8 @@ class DeploymentMonitorManager:
             "timestamp": self._utcnow_iso()
         }
         
-        logger.info(f"Sending stage_progress: {stage} - {progress}% for deployment {deployment_id}")
-        logger.info(f"Stage progress message: {websocket_message}")
+        # logger.info(f"Sending stage_progress: {stage} - {progress}% for deployment {deployment_id}")
+        # logger.info(f"Stage progress message: {websocket_message}")
         self._record_deployment_event(deployment_id, websocket_message)
         await self.broadcast_to_deployment(deployment_id, websocket_message)
         await self.broadcast_to_user(user_id, websocket_message)

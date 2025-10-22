@@ -30,6 +30,7 @@ from .api.v1.github_oauth import router as github_oauth_router
 from .api.v1.projects import router as projects_router
 from .api.v1.deployment_histories import router as deployment_histories_router
 from .api.v1.rollback import router as rollback_router
+from .api.v1.ncp_pipeline_api import router as ncp_pipeline_router
 from .mcp.external.api import router as mcp_external_router
 from .core.error_handler import setup_error_handlers
 from .core.logging_config import setup_logging
@@ -147,6 +148,7 @@ def create_app() -> FastAPI:
     app.include_router(rollback_router, prefix="/api/v1", tags=["rollback"])
     app.include_router(auth_verify_router, prefix="/api/v1", tags=["auth"])
     app.include_router(github_workflows_router, prefix="/api/v1", tags=["github"])
+    app.include_router(ncp_pipeline_router, prefix="/api/v1/ncp/pipeline", tags=["ncp-pipeline"])
     app.include_router(mcp_external_router, tags=["mcp-external"])
 
     @app.get("/")

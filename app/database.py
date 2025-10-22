@@ -174,3 +174,45 @@ def _ensure_user_slack_config_columns() -> None:
     except Exception:
         # Best-effort; do not crash app on migration failure
         raise
+
+
+def _ensure_deployment_history_columns() -> None:
+    """Ensure recently added columns exist for DeploymentHistory.
+
+    This is a minimal, safe migration for SQLite/Postgres: add pipeline_id (VARCHAR) and pipeline_history_id (INTEGER)
+    columns if they are missing. It does nothing if the table doesn't exist yet or columns already exist.
+    """
+    try:
+        with engine.connect() as conn:
+            # Detect columns (SQLite: PRAGMA; Postgres: information_schema)
+            dialect = engine.dialect.name
+            existing_cols: set[str] = set()
+            if dialect == "sqlite":
+                res = conn.execute(text("PRAGMA table_info('deployment_histories')"))
+                existing_cols = {row[1] for row in res.fetchall()}
+            else:
+                res = conn.execute(
+                    text(
+                        """
+                        SELECT column_name FROM information_schema.columns
+                        WHERE table_name = 'deployment_histories'
+                        """
+                    )
+                )
+                existing_cols = {row[0] for row in res.fetchall()}
+
+            # Add missing columns
+            if "pipeline_id" not in existing_cols:
+                if dialect == "sqlite":
+                    conn.execute(text("ALTER TABLE deployment_histories ADD COLUMN pipeline_id VARCHAR(255)"))
+                else:
+                    conn.execute(text("ALTER TABLE deployment_histories ADD COLUMN pipeline_id VARCHAR(255)"))
+            if "pipeline_history_id" not in existing_cols:
+                if dialect == "sqlite":
+                    conn.execute(text("ALTER TABLE deployment_histories ADD COLUMN pipeline_history_id INTEGER"))
+                else:
+                    conn.execute(text("ALTER TABLE deployment_histories ADD COLUMN pipeline_history_id INTEGER"))
+            conn.commit()
+    except Exception:
+        # Best-effort; do not crash app on migration failure
+        raise

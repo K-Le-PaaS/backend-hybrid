@@ -1258,7 +1258,79 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
             status="success",
             data=sourcecommit_result
         )
-        
+
+        # Check if SourcePipeline already exists
+        from ...services.ncp_pipeline import ensure_sourcepipeline_project, execute_sourcepipeline_rest
+
+        pipeline_id = getattr(integration, 'pipeline_id', None)
+        # logger.info(f"Initial pipeline check: pipeline_id={pipeline_id}")
+
+        # Execute pipeline if already available
+        if pipeline_id:
+            logger.info(f"Using SourcePipeline mode: {pipeline_id}")
+
+            try:
+                # Update deployment history for pipeline mode
+                deployment_history.status = "running"
+                deployment_history.sourcebuild_status = "running"
+                deployment_history.sourcedeploy_status = "pending"
+                db.commit()
+
+                # Execute SourcePipeline (Build -> Deploy workflow)
+                pipeline_result = await execute_sourcepipeline_rest(pipeline_id)
+
+                logger.info(f"Pipeline execution started: {pipeline_result}")
+
+                # Update deployment history with pipeline info
+                deployment_history.pipeline_id = pipeline_id
+                deployment_history.pipeline_history_id = pipeline_result.get("history_id")
+                db.commit()
+
+                # Send pipeline execution notification via WebSocket
+                await deployment_monitor_manager.send_stage_progress(
+                    deployment_id=str(deployment_history.id),
+                    user_id=integration.user_id,
+                    stage="pipeline",
+                    progress=0,
+                    elapsed_time=0,
+                    message=f"SourcePipeline execution started (history_id: {pipeline_result.get('history_id')})"
+                )
+
+                # Slack notification for pipeline execution
+                short_sha = (head_commit.get("id") or "")[:7]
+                pipeline_msg = (
+                    f"[SourcePipeline] Execution started for {integration.github_owner}/{integration.github_repo}\n"
+                    f"Commit: {short_sha}\n"
+                    f"Pipeline ID: {pipeline_id}\n"
+                    f"History ID: {pipeline_result.get('history_id', 'N/A')}\n"
+                    f"Deployment ID: {deployment_history.id}"
+                )
+                await _send_user_slack_message(db, integration.user_id, pipeline_msg)
+
+                # Return early - pipeline handles build and deploy
+                return {
+                    "status": "pipeline_triggered",
+                    "mode": "sourcepipeline",
+                    "event": "push",
+                    "repository": f"{integration.github_owner}/{integration.github_repo}",
+                    "deployment_id": deployment_history.id,
+                    "pipeline_id": pipeline_id,
+                    "history_id": pipeline_result.get("history_id"),
+                    "sourcecommit": sourcecommit_result
+                }
+
+            except Exception as pipeline_error:
+                logger.error(f"Pipeline execution failed: {str(pipeline_error)}")
+                logger.info("Falling back to direct SourceBuild and SourceDeploy")
+
+                # Update deployment history - pipeline failed, try direct deployment
+                deployment_history.status = "running"
+                deployment_history.sourcebuild_status = "pending"
+                deployment_history.sourcedeploy_status = "pending"
+                db.commit()
+
+                # Continue to direct build/deploy below
+
         # Step 2: SourceBuild 실행 (build/run 방식 사용)
         from ...services.ncp_pipeline import ensure_sourcebuild_project, run_sourcebuild as run_sb
         from ...core.config import get_settings
@@ -1466,6 +1538,8 @@ spec:
             db=db,
             user_id=integration.user_id,
         )
+
+        # SourcePipeline 자동 생성은 SourceDeploy 실행 후 실제 stage_id, scenario_id를 사용하여 수행
         
         # 50-75%: 배포 실행 API 호출
         await simulate_progress(
@@ -1493,6 +1567,39 @@ spec:
         )
         
         logger.info(f"SourceDeploy completed: {deploy_result}")
+        
+        # SourcePipeline 자동 생성 (SourceDeploy 실행 후 실제 stage_id, scenario_id 사용)
+        if not pipeline_id and build_id and deploy_project_id:
+            logger.info(f"Auto-creating SourcePipeline for {integration.github_owner}/{integration.github_repo}")
+            # logger.info(f"Build ID: {build_id}, Deploy ID: {deploy_project_id}")
+            # logger.info(f"Stage ID: {deploy_result.get('stage_id')}, Scenario ID: {deploy_result.get('scenario_id')}")
+            
+            try:
+                pipeline_id = await ensure_sourcepipeline_project(
+                    owner=integration.github_owner,
+                    repo=integration.github_repo,
+                    build_project_id=str(build_id),
+                    deploy_project_id=str(deploy_project_id),
+                    deploy_stage_id=int(deploy_result.get('stage_id', 1)),
+                    deploy_scenario_id=int(deploy_result.get('scenario_id', 1)),
+                    branch="main",
+                    sc_repo_name=getattr(integration, 'sc_repo_name', None),
+                    db=db,
+                    user_id=integration.user_id
+                )
+                logger.info(f"SourcePipeline auto-created: {pipeline_id}")
+                
+                # 다음 배포부터는 SourcePipeline을 사용할 수 있도록 DB에 저장
+                integration.pipeline_id = pipeline_id
+                db.commit()
+                
+            except Exception as e:
+                logger.error(f"SourcePipeline creation failed: {str(e)}")
+                logger.error(f"SourcePipeline creation error details: {type(e).__name__}: {str(e)}")
+                import traceback
+                logger.error(f"SourcePipeline creation traceback: {traceback.format_exc()}")
+                logger.warning("Continuing with direct build/deploy due to SourcePipeline creation failure")
+                # SourcePipeline 생성 실패해도 직접 배포는 계속 진행
         
         # 75-100%: 배포 완료 대기
         await simulate_progress(

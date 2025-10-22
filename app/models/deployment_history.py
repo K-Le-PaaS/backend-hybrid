@@ -88,6 +88,8 @@ class DeploymentHistory(Base):
     sourcecommit_repo_name = Column(String(255), nullable=True)
     sourcebuild_project_id = Column(String(255), nullable=True)
     sourcedeploy_project_id = Column(String(255), nullable=True)
+    pipeline_id = Column(String(255), nullable=True)
+    pipeline_history_id = Column(Integer, nullable=True)
     build_id = Column(String(255), nullable=True)
     deploy_id = Column(String(255), nullable=True)
     

@@ -180,16 +180,13 @@ async def _call_ncp_rest_api(method: str, base_url: str, path: str | list[str], 
                 resp = await client.request(method, url, headers=headers, params=query_params)
             else:
                 resp = await client.request(method, url, headers=headers, json=json_body)
-            _dbg("REST", method=method, url=url, code=resp.status_code)
+            # _dbg("REST", method=method, url=url, code=resp.status_code)
             if resp.status_code < 400:
                 return resp.json() if resp.text else {}
             # remember last error and continue to next candidate
             last_status = resp.status_code
             last_text = resp.text
-            try:
-                _dbg("REST-ERR", method=method, url=url, code=resp.status_code, text=(resp.text or "")[:500])
-            except Exception:
-                pass
+            # _dbg("REST-ERR", method=method, url=url, code=resp.status_code, text=(resp.text or "")[:500])
     raise HTTPException(status_code=last_status or 500, detail=f"NCP REST error {last_status}: {last_text}")
 
 
@@ -1068,9 +1065,9 @@ def mirror_to_sourcecommit(
         try:
             # Push main branch only
             subprocess.run(["git", "-C", str(bare_dir), "push", "-f", sc_url, "main:main"], check=True, capture_output=True, text=True)
-            _dbg("SC-PUSH-MAIN", status="success")
+            # _dbg("SC-PUSH-MAIN", status="success")
         except subprocess.CalledProcessError as e_main:
-            _dbg("SC-PUSH-MAIN-ERR", err=e_main.stderr[:200] if getattr(e_main, 'stderr', None) else str(e_main))
+            # _dbg("SC-PUSH-MAIN-ERR", err=e_main.stderr[:200] if getattr(e_main, 'stderr', None) else str(e_main))
             # Fallback: try pushing all refs if main doesn't exist
             try:
                 subprocess.run(["git", "-C", str(bare_dir), "push", "--all", sc_url], check=True, capture_output=True, text=True)
@@ -1127,26 +1124,22 @@ def mirror_to_sourcecommit(
                 # Select target branch: always use main
                 target_branch = "main"
 
-                # Fetch all branches from origin
+                # Force checkout main branch (create if doesn't exist)
                 try:
-                    subprocess.run(["git", "-C", str(inj_dir), "fetch", "--all"], check=True, capture_output=True, text=True)
-                except Exception:
-                    pass
-
-                # Check if main branch exists on origin
-                chk_main = subprocess.run(["git", "-C", str(inj_dir), "rev-parse", "--verify", "origin/main"], capture_output=True, text=True)
-                main_exists = (chk_main.returncode == 0)
-
-                if main_exists:
-                    # Main branch exists - checkout tracking origin/main
-                    subprocess.run(["git", "-C", str(inj_dir), "checkout", "-B", target_branch, "origin/main"], check=True, capture_output=True, text=True)
-                    _dbg("SC-INJECT-CHECKOUT", branch=target_branch, source="origin/main")
-                else:
-                    # Main branch doesn't exist - create new orphan branch
-                    subprocess.run(["git", "-C", str(inj_dir), "checkout", "--orphan", target_branch], check=True, capture_output=True, text=True)
-                    # Remove all files from staging (clean slate)
-                    subprocess.run(["git", "-C", str(inj_dir), "rm", "-rf", "."], check=False, capture_output=True, text=True)
-                    _dbg("SC-INJECT-CHECKOUT", branch=target_branch, source="new_orphan")
+                    # First try to checkout existing main branch
+                    subprocess.run(["git", "-C", str(inj_dir), "checkout", "-B", target_branch], check=True, capture_output=True, text=True)
+                    # _dbg("SC-INJECT-CHECKOUT", branch=target_branch, source="force_checkout")
+                except subprocess.CalledProcessError:
+                    # If main doesn't exist, create it from the current branch or as orphan
+                    try:
+                        subprocess.run(["git", "-C", str(inj_dir), "checkout", "-B", target_branch], check=True, capture_output=True, text=True)
+                        # _dbg("SC-INJECT-CHECKOUT", branch=target_branch, source="force_create")
+                    except subprocess.CalledProcessError:
+                        # Last resort: create orphan branch
+                        subprocess.run(["git", "-C", str(inj_dir), "checkout", "--orphan", target_branch], check=True, capture_output=True, text=True)
+                        # Remove all files from staging (clean slate)
+                        subprocess.run(["git", "-C", str(inj_dir), "rm", "-rf", "."], check=False, capture_output=True, text=True)
+                        _dbg("SC-INJECT-CHECKOUT", branch=target_branch, source="orphan")
 
                 k8s_dir = inj_dir / "k8s"
                 k8s_dir.mkdir(parents=True, exist_ok=True)
@@ -1319,6 +1312,15 @@ def mirror_and_update_manifest(
         )
 
         _dbg("MM-STEP2-CLONE-SUCCESS", dir=str(sc_dir))
+
+        # Force checkout main branch to ensure we're working on main
+        try:
+            subprocess.run(["git", "-C", str(sc_dir), "checkout", "-B", "main"], check=True, capture_output=True, text=True)
+            _dbg("MM-FORCE-MAIN", branch="main", source="force_checkout")
+        except subprocess.CalledProcessError:
+            # If main doesn't exist, create it from current branch
+            subprocess.run(["git", "-C", str(sc_dir), "checkout", "-B", "main"], check=True, capture_output=True, text=True)
+            _dbg("MM-FORCE-MAIN", branch="main", source="force_create")
 
         # Update manifest (or create if missing)
         k8s_dir = sc_dir / "k8s"
@@ -1854,22 +1856,25 @@ spec:
     if not build_project_id or not deploy_project_id:
         raise HTTPException(status_code=400, detail=f"Invalid build/deploy project id (build={build_project_id}, deploy={deploy_project_id}). Ensure both IDs exist and are numeric.")
 
-    if SourcePipelineApi is None:
-        pipeline_id = await create_sourcepipeline_rest(pipeline_name, str(build_project_id), str(deploy_project_id))
-    else:
-        pipeline_api = SourcePipelineApi(ncloud_client.api_client)
-        try:
-            pipe_req = {
-                "name": pipeline_name,
-                "stages": [
-                    {"name": "Build", "type": "BUILD", "project_id": build_project_id},
-                    {"name": "Deploy", "type": "DEPLOY", "project_id": deploy_project_id, "stage_name": "production", "scenario_name": "deploy-app"},
-                ],
-            }
-            p = pipeline_api.create_pipeline(**pipe_req)
-            pipeline_id = getattr(p, "id", None)
-        except ApiException as e:
-            raise HTTPException(status_code=getattr(e, "status", 500), detail=f"SourcePipeline API Exception: {getattr(e, 'body', str(e))}")
+    # 🆕 Create SourcePipeline using REST API (more reliable than SDK)
+    # Use default stage_id=1, scenario_id=1 (first stage/scenario created by ensure_sourcedeploy_project)
+    _dbg("PIPELINE-CREATE-START", owner=owner, repo=repo, build_id=build_project_id, deploy_id=deploy_project_id)
+
+    pipeline_id = await ensure_sourcepipeline_project(
+        owner=owner,
+        repo=repo,
+        build_project_id=str(build_project_id),
+        deploy_project_id=str(deploy_project_id),
+        deploy_stage_id=1,  # Default: first stage
+        deploy_scenario_id=1,  # Default: first scenario
+        branch=branch,
+        sc_repo_name=sc_repo_name,
+        db=db,
+        user_id=user_id
+    )
+
+    _dbg("PIPELINE-CREATE-SUCCESS", pipeline_id=pipeline_id, name=pipeline_name)
+
     # persist mapping if db/user provided
     if db is not None and user_id is not None:
         upsert_integration(
@@ -2205,7 +2210,7 @@ async def run_sourcedeploy(
     # honor the provided deploy_project_id without overriding
     
     # Use public endpoint for better accessibility during development
-    _dbg("SD-ENDPOINT", endpoint=base, deploy_project_id=deploy_project_id, stage_name=stage_name, scenario_name=scenario_name, sc_project_id=sc_project_id)
+    # _dbg("SD-ENDPOINT", endpoint=base, deploy_project_id=deploy_project_id, stage_name=stage_name, scenario_name=scenario_name, sc_project_id=sc_project_id)
 
     async def _get_stage_scenario_ids() -> tuple[str | None, str | None]:
         try:
@@ -2265,7 +2270,7 @@ async def run_sourcedeploy(
                 for it in items:
                     if it.get('name') == stage_name:
                         stage_id = it.get('id') or it.get('stageId')
-                        _dbg("SD-STAGE-FOUND", stage_id=stage_id, attempt=attempt, delay=delay)
+                        # _dbg("SD-STAGE-FOUND", stage_id=stage_id, attempt=attempt, delay=delay)
                         break
                 if stage_id:
                     break
@@ -2686,7 +2691,9 @@ async def run_sourcedeploy(
         "uses_env_var": False,  # No longer using environment variable approach
         "image": desired_image,
         "deploy_history_id": deploy_history_id,
-        "response": (result or {}).get('historyId') or data
+        "response": (result or {}).get('historyId') or data,
+        "stage_id": stage_id,
+        "scenario_id": scenario_id
     }
 
 # Helper: compose NCR image repo path using repo + optional build_project_id digits
@@ -2806,6 +2813,15 @@ def update_replicas_in_sourcecommit(
                 detail=f"Failed to clone SourceCommit after 3 attempts: {last_error.stderr if hasattr(last_error, 'stderr') else str(last_error)}"
             )
 
+        # Force checkout main branch to ensure we're working on main
+        try:
+            subprocess.run(["git", "-C", str(sc_dir), "checkout", "-B", "main"], check=True, capture_output=True, text=True)
+            _dbg("SCALE-FORCE-MAIN", branch="main", source="force_checkout")
+        except subprocess.CalledProcessError:
+            # If main doesn't exist, create it from current branch
+            subprocess.run(["git", "-C", str(sc_dir), "checkout", "-B", "main"], check=True, capture_output=True, text=True)
+            _dbg("SCALE-FORCE-MAIN", branch="main", source="force_create")
+
         # Update manifest replicas
         k8s_dir = sc_dir / "k8s"
         manifest_path = k8s_dir / "deployment.yaml"
@@ -2890,6 +2906,311 @@ def update_replicas_in_sourcecommit(
             pass
 
 
+# --- SourcePipeline REST API Functions ---
+
+async def _find_sourcepipeline_project_by_name(base: str, name: str) -> str | None:
+    """Find SourcePipeline project ID by name.
+
+    Args:
+        base: API base URL (e.g., https://vpcsourcepipeline.apigw.ntruss.com)
+        name: Pipeline project name to search for
+
+    Returns:
+        Project ID if found, None otherwise
+    """
+    try:
+        # GET /api/v1/project returns list of all pipeline projects
+        data = await _call_ncp_rest_api('GET', base, ['/api/v1/project'], None)
+        _dbg("SP-FIND-BY-NAME", target_name=name, response_keys=list(data.keys()) if isinstance(data, dict) else None)
+
+        if isinstance(data, dict):
+            result = data.get('result')
+
+            # Try multiple possible structures
+            items = []
+            if isinstance(result, dict):
+                items = result.get('project') or result.get('projectList') or result.get('projects') or result.get('items') or []
+            elif isinstance(result, list):
+                items = result
+
+            _dbg("SP-FIND-ITEMS", count=len(items), names=[_extract_project_name(it) for it in items if isinstance(it, dict)])
+
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                it_name = _extract_project_name(it)
+                if it_name and it_name.strip().lower() == name.strip().lower():
+                    pid = _extract_project_id(it)
+                    if pid:
+                        _dbg("SP-FIND-MATCH", name=it_name, project_id=pid)
+                        return pid
+            _dbg("SP-FIND-NO-MATCH", target=name, available=[_extract_project_name(it) for it in items if isinstance(it, dict)])
+    except HTTPException as e:
+        _dbg("SP-FIND-ERROR", error=str(e)[:200])
+        return None
+    except Exception as e:
+        _dbg("SP-FIND-UNEXPECTED", error=str(e)[:200])
+        return None
+    return None
+
+
+async def create_sourcepipeline_project_rest(
+    owner: str,
+    repo: str,
+    build_project_id: str,
+    deploy_project_id: str,
+    deploy_stage_id: int,
+    deploy_scenario_id: int,
+    branch: str = "main",
+    sc_repo_name: str | None = None
+) -> str:
+    """Create SourcePipeline project using REST API.
+
+    Creates a pipeline that:
+    1. Runs SourceBuild to build Docker image
+    2. Runs SourceDeploy to deploy to NKS cluster
+
+    Triggered automatically on SourceCommit push events.
+
+    Args:
+        owner: GitHub repository owner
+        repo: GitHub repository name
+        build_project_id: SourceBuild project ID to reference
+        deploy_project_id: SourceDeploy project ID to reference
+        deploy_stage_id: SourceDeploy stage ID (typically 1)
+        deploy_scenario_id: SourceDeploy scenario ID (typically 1)
+        branch: Git branch to trigger on (default: "main")
+        sc_repo_name: SourceCommit repository name
+
+    Returns:
+        Created pipeline project ID
+    """
+    base = "https://vpcsourcepipeline.apigw.ntruss.com"
+    path = "/api/v1/project"
+
+    # Determine repository name for trigger
+    if not sc_repo_name:
+        sc_repo_name = f"{owner}-{repo}"
+
+    pipeline_name = f"pipeline-{owner}-{repo}"
+
+    _dbg("SP-PROJECT-CREATE",
+         name=pipeline_name,
+         build_id=build_project_id,
+         deploy_id=deploy_project_id,
+         stage_id=deploy_stage_id,
+         scenario_id=deploy_scenario_id)
+
+    # Construct pipeline configuration
+    body = {
+        "name": pipeline_name,
+        "description": f"Automated CI/CD pipeline for {owner}/{repo}",
+        "tasks": [
+            {
+                "name": "build-docker-image",
+                "type": "SourceBuild",
+                "config": {
+                    "projectId": int(build_project_id),
+                    "target": {
+                        "info": {
+                            "branch": branch
+                        }
+                    }
+                },
+                "linkedTasks": []
+            },
+            {
+                "name": "deploy-to-nks",
+                "type": "SourceDeploy",
+                "config": {
+                    "projectId": int(deploy_project_id),
+                    "stageId": deploy_stage_id,
+                    "scenarioId": deploy_scenario_id
+                },
+                "linkedTasks": ["build-docker-image"]
+            }
+        ],
+        "trigger": {
+            "repository": [
+                {
+                    "type": "sourcecommit",
+                    "name": sc_repo_name,
+                    "branch": branch
+                }
+            ]
+        }
+    }
+
+    try:
+        data = await _call_ncp_rest_api('POST', base, path, body)
+        _dbg("SP-CREATE-RESPONSE", response=data)
+        
+        result = data.get('result') if isinstance(data, dict) else None
+        project_id = str((result or {}).get('projectId') or (result or {}).get('id') or data.get('id') or data.get('project_id') or data.get('projectId'))
+        
+        _dbg("SP-PROJECT-CREATED", pipeline_id=project_id, name=pipeline_name, response_keys=list(data.keys()) if isinstance(data, dict) else None)
+        return project_id
+
+    except HTTPException as e:
+        # Check if duplicate name error
+        msg = getattr(e, 'detail', '')
+        if getattr(e, 'status_code', 0) == 400 and isinstance(msg, str) and 'duplicat' in msg.lower():
+            _dbg("SP-PROJECT-DUPLICATE", name=pipeline_name)
+            # Try to find existing pipeline by name
+            pid = await _find_sourcepipeline_project_by_name(base, pipeline_name)
+            if pid:
+                return pid
+
+        # Re-raise if not duplicate or couldn't find
+        raise
+
+
+async def ensure_sourcepipeline_project(
+    *,
+    owner: str,
+    repo: str,
+    build_project_id: str,
+    deploy_project_id: str,
+    deploy_stage_id: int = 1,
+    deploy_scenario_id: int = 1,
+    branch: str = "main",
+    sc_repo_name: str | None = None,
+    db: Session | None = None,
+    user_id: str | None = None
+) -> str:
+    """Ensure a SourcePipeline project exists and return its ID.
+
+    Follows the pattern of ensure_sourcebuild_project:
+    1. Check DB for existing pipeline_id
+    2. If not in DB, search by name
+    3. If still not found, create new pipeline
+    4. Save pipeline_id to DB
+
+    Args:
+        owner: GitHub repository owner
+        repo: GitHub repository name
+        build_project_id: SourceBuild project ID to reference
+        deploy_project_id: SourceDeploy project ID to reference
+        deploy_stage_id: SourceDeploy stage ID (default: 1)
+        deploy_scenario_id: SourceDeploy scenario ID (default: 1)
+        branch: Git branch to trigger on (default: "main")
+        sc_repo_name: SourceCommit repository name
+        db: Database session (optional)
+        user_id: User ID for DB storage (optional)
+
+    Returns:
+        Pipeline project ID
+    """
+    base = "https://vpcsourcepipeline.apigw.ntruss.com"
+    pipeline_name = f"pipeline-{owner}-{repo}"
+    
+    # _dbg("SP-ENSURE-START", owner=owner, repo=repo, build_id=build_project_id, deploy_id=deploy_project_id, pipeline_name=pipeline_name)
+
+    # 1. Check DB first
+    if db is not None and user_id is not None:
+        try:
+            integ_existing = get_integration(db, user_id=user_id, owner=owner, repo=repo)
+            if integ_existing and getattr(integ_existing, 'pipeline_id', None):
+                existing_id = str(getattr(integ_existing, 'pipeline_id'))
+                _dbg("SP-ENSURE-DB-HIT", pipeline_id=existing_id)
+                return existing_id
+        except Exception as e:
+            _dbg("SP-ENSURE-DB-ERROR", error=str(e)[:200])
+
+    # 2. Search by name
+    # _dbg("SP-ENSURE-SEARCH", pipeline_name=pipeline_name)
+    pid = await _find_sourcepipeline_project_by_name(base, pipeline_name)
+    # _dbg("SP-ENSURE-SEARCH-RESULT", found_pid=pid)
+
+    # 3. Create if not found
+    if not pid:
+        # _dbg("SP-ENSURE-CREATING", name=pipeline_name, build_id=build_project_id, deploy_id=deploy_project_id)
+        try:
+            pid = await create_sourcepipeline_project_rest(
+                owner=owner,
+                repo=repo,
+                build_project_id=build_project_id,
+                deploy_project_id=deploy_project_id,
+                deploy_stage_id=deploy_stage_id,
+                deploy_scenario_id=deploy_scenario_id,
+                branch=branch,
+                sc_repo_name=sc_repo_name
+            )
+            _dbg("SP-ENSURE-CREATED", pipeline_id=pid)
+        except Exception as e:
+            _dbg("SP-ENSURE-CREATE-ERROR", error=str(e)[:200])
+            raise
+
+    if not pid:
+        raise HTTPException(status_code=500, detail="Failed to ensure SourcePipeline project ID")
+
+    # 4. Save to DB
+    if db is not None and user_id is not None:
+        try:
+            upsert_integration(db, user_id=user_id, owner=owner, repo=repo, pipeline_id=str(pid))
+            _dbg("SP-ENSURE-DB-SAVED", pipeline_id=pid)
+        except Exception as e:
+            _dbg("SP-ENSURE-DB-SAVE-ERROR", error=str(e)[:200])
+
+    _dbg("SP-ENSURE-SUCCESS", pipeline_id=pid, name=pipeline_name)
+    return str(pid)
+
+
+async def execute_sourcepipeline_rest(project_id: str) -> dict:
+    """Execute a SourcePipeline project (manual trigger).
+
+    Args:
+        project_id: Pipeline project ID to execute
+
+    Returns:
+        Dict with execution status and history_id
+    """
+    base = "https://vpcsourcepipeline.apigw.ntruss.com"
+    path = f"/api/v1/project/{project_id}/do"
+
+    _dbg("SP-EXECUTE", project_id=project_id)
+
+    try:
+        data = await _call_ncp_rest_api('POST', base, path, {})
+        result = data.get('result', {}) if isinstance(data, dict) else {}
+        history_id = result.get('historyId') or result.get('history_id')
+
+        _dbg("SP-EXECUTE-SUCCESS", project_id=project_id, history_id=history_id)
+
+        return {
+            "status": "started",
+            "project_id": project_id,
+            "history_id": history_id
+        }
+    except HTTPException as e:
+        _dbg("SP-EXECUTE-ERROR", project_id=project_id, error=str(e)[:500])
+        raise
+
+
+async def get_sourcepipeline_history_detail(project_id: str, history_id: int) -> dict:
+    """Get detailed execution history of a pipeline run.
+
+    Args:
+        project_id: Pipeline project ID
+        history_id: Execution history ID
+
+    Returns:
+        Detailed execution history including status and task results
+    """
+    base = "https://vpcsourcepipeline.apigw.ntruss.com"
+    path = f"/api/v1/project/{project_id}/history/{history_id}"
+
+    _dbg("SP-HISTORY-DETAIL", project_id=project_id, history_id=history_id)
+
+    try:
+        data = await _call_ncp_rest_api('GET', base, path)
+        _dbg("SP-HISTORY-DETAIL-SUCCESS", project_id=project_id, history_id=history_id)
+        return data
+    except HTTPException as e:
+        _dbg("SP-HISTORY-DETAIL-ERROR", project_id=project_id, history_id=history_id, error=str(e)[:500])
+        raise
+
+
 __all__ = [
     "ensure_sourcecommit_repo",
     "create_sourcebuild_project_rest",
@@ -2903,4 +3224,9 @@ __all__ = [
     "update_replicas_in_sourcecommit",
     "_dbg",
     "_compose_image_repo",
+    # SourcePipeline functions
+    "ensure_sourcepipeline_project",
+    "create_sourcepipeline_project_rest",
+    "execute_sourcepipeline_rest",
+    "get_sourcepipeline_history_detail",
 ]
