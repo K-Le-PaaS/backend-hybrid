@@ -13,6 +13,7 @@ from fastapi import HTTPException
 
 from .deployments import DeployApplicationInput, perform_deploy
 from .k8s_client import get_apps_v1_api, get_core_v1_api, get_networking_v1_api
+from .response_formatter import ResponseFormatter
 
 logger = structlog.get_logger(__name__)
 
@@ -347,6 +348,21 @@ async def _execute_cost_analysis(args: Dict[str, Any]) -> Dict[str, Any]:
 async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
     """
     명령 실행 계획을 실제 Kubernetes API 호출로 변환하여 실행
+    ResponseFormatter를 사용하여 사용자 친화적인 형식으로 응답을 포맷팅합니다.
+    """
+    # 원본 실행 결과를 가져옵니다
+    raw_result = await _execute_raw_command(plan)
+    
+    # ResponseFormatter를 사용하여 포맷팅
+    formatter = ResponseFormatter()
+    formatted_result = formatter.format_by_command(plan.tool, raw_result)
+    
+    return formatted_result
+
+
+async def _execute_raw_command(plan: CommandPlan) -> Dict[str, Any]:
+    """
+    원본 명령 실행 (포맷팅 없이)
     """
     if plan.tool == "deploy_application":
         payload = DeployApplicationInput(**plan.args)
