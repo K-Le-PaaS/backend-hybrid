@@ -32,6 +32,7 @@ from .api.v1.deployment_histories import router as deployment_histories_router
 from .api.v1.rollback import router as rollback_router
 from .api.v1.ncp_pipeline_api import router as ncp_pipeline_router
 from .mcp.external.api import router as mcp_external_router
+from .api.v1.admin_db import router as admin_db_router
 from .core.error_handler import setup_error_handlers
 from .core.logging_config import setup_logging
 from .database import init_database, init_services, get_db
@@ -150,6 +151,7 @@ def create_app() -> FastAPI:
     app.include_router(github_workflows_router, prefix="/api/v1", tags=["github"])
     app.include_router(ncp_pipeline_router, prefix="/api/v1/ncp/pipeline", tags=["ncp-pipeline"])
     app.include_router(mcp_external_router, tags=["mcp-external"])
+    app.include_router(admin_db_router, prefix="/api/v1", tags=["admin-db"])
 
     @app.get("/")
     async def root() -> Dict[str, Any]:
