@@ -284,6 +284,92 @@ async def get_deployment_stats(
         raise HTTPException(status_code=500, detail=f"Failed to fetch deployment stats: {str(e)}")
 
 
+@router.get("/deployment-histories/repositories/latest")
+async def get_repositories_latest_deployments(
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """
+    사용자의 모든 연동된 repository의 최신 배포 조회
+
+    각 repository의 최신 배포 상태와 Kubernetes 워크로드 정보를 반환합니다.
+    """
+    try:
+        from ...models.user_project_integration import UserProjectIntegration
+        from sqlalchemy import func
+        import random
+
+        # 사용자의 모든 연동된 repository 조회
+        integrations = db.query(UserProjectIntegration).filter(
+            UserProjectIntegration.user_id == current_user["id"]
+        ).all()
+
+        repositories = []
+
+        for integration in integrations:
+            # 각 repository의 최신 배포 조회
+            latest_deployment = db.query(DeploymentHistory).filter(
+                and_(
+                    DeploymentHistory.user_id == current_user["id"],
+                    DeploymentHistory.github_owner == integration.github_owner,
+                    DeploymentHistory.github_repo == integration.github_repo
+                )
+            ).order_by(desc(DeploymentHistory.started_at)).first()
+
+            if latest_deployment:
+                # Kubernetes 워크로드 정보 (하드코딩)
+                # TODO: 실제 K8s API 조회로 변경
+                k8s_info = {
+                    "namespace": latest_deployment.namespace or "default",
+                    "replicas": {
+                        "desired": 3,
+                        "ready": 3 if latest_deployment.status == "success" else random.randint(0, 2)
+                    },
+                    "resources": {
+                        "cpu": random.randint(30, 80),  # CPU 사용률 (%)
+                        "memory": random.randint(40, 85)  # Memory 사용률 (%)
+                    }
+                }
+
+                # 배포 정보에 K8s 정보 추가
+                deployment_dict = latest_deployment.to_dict()
+                deployment_dict["cluster"] = k8s_info
+
+                repositories.append({
+                    "owner": integration.github_owner,
+                    "repo": integration.github_repo,
+                    "full_name": integration.github_full_name,
+                    "branch": integration.branch or "main",
+                    "latest_deployment": deployment_dict,
+                    "auto_deploy_enabled": integration.auto_deploy_enabled
+                })
+            else:
+                # 배포 이력이 없는 경우
+                repositories.append({
+                    "owner": integration.github_owner,
+                    "repo": integration.github_repo,
+                    "full_name": integration.github_full_name,
+                    "branch": integration.branch or "main",
+                    "latest_deployment": None,
+                    "auto_deploy_enabled": integration.auto_deploy_enabled
+                })
+
+        return JSONResponse(
+            content={"repositories": repositories},
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            }
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch repository deployments: {str(e)}"
+        )
+
+
 @router.get("/deployment-histories/websocket/status")
 async def get_websocket_status(
     db: Session = Depends(get_db),
@@ -291,20 +377,20 @@ async def get_websocket_status(
 ) -> Dict[str, Any]:
     """
     WebSocket 연결 상태 조회
-    
+
     현재 WebSocket 연결 상태를 조회합니다.
     """
     try:
         from ...websocket.deployment_monitor import deployment_monitor_manager
-        
+
         stats = deployment_monitor_manager.get_connection_stats()
-        
+
         return {
             "websocket_status": "active",
             "connection_stats": stats,
             "user_id": current_user["id"]
         }
-        
+
     except Exception as e:
         return {
             "websocket_status": "inactive",

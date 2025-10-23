@@ -78,7 +78,7 @@ class DeploymentMonitorManager:
                 self.user_connections[user_id] = []
             self.user_connections[user_id].append(websocket)
         
-        logger.info(f"WebSocket connected: {connection_id}, deployment_id: {deployment_id}, user_id: {user_id}")
+        # WebSocket connected (logging removed for verbosity)
     
     async def disconnect(self, connection_id: str):
         """기존 API와 호환성을 위한 연결 해제 메서드"""
@@ -109,7 +109,7 @@ class DeploymentMonitorManager:
                 del self.connection_metadata[websocket]
             
             del self.connections[connection_id]
-        logger.info(f"WebSocket disconnected: {connection_id}")
+        # WebSocket disconnected (logging removed for verbosity)
     
     async def handle_message(self, connection_id: str, data: dict):
         """기존 API와 호환성을 위한 메시지 처리 메서드"""
@@ -134,8 +134,7 @@ class DeploymentMonitorManager:
             deployment_id = data.get("deployment_id")
             user_id = data.get("user_id")
             
-            logger.info(f"Received subscribe message: subscriber_id={subscriber_id}, deployment_id={deployment_id}, user_id={user_id}")
-            logger.info(f"Connection ID: {connection_id}")
+            # Subscribe message received (logging removed for verbosity)
             
             if subscriber_id and connection_id in self.connections:
                 websocket = self.connections[connection_id]
@@ -156,16 +155,10 @@ class DeploymentMonitorManager:
                 
                 # 사용자별 연결 등록
                 if user_id:
-                    logger.info(f"Registering user {user_id} for WebSocket connection")
                     if user_id not in self.user_connections:
                         self.user_connections[user_id] = []
                     if websocket not in self.user_connections[user_id]:
                         self.user_connections[user_id].append(websocket)
-                        logger.info(f"User {user_id} registered. Total connections: {len(self.user_connections[user_id])}")
-                    else:
-                        logger.info(f"User {user_id} already registered")
-                
-                logger.info(f"Subscriber {subscriber_id} registered for deployment {deployment_id}, user {user_id}")
 
                 # 구독 직후 스냅샷 재전송 (해당 배포의 최근 이벤트들을 순서대로 전달)
                 try:
@@ -208,7 +201,7 @@ class DeploymentMonitorManager:
             "connection_type": "deployment"
         }
         
-        logger.info(f"WebSocket connected for deployment {deployment_id}, user {user_id}")
+        # WebSocket connected for deployment (logging removed for verbosity)
         
         # 연결 확인 메시지 전송
         await self.send_to_websocket(websocket, {
@@ -233,7 +226,7 @@ class DeploymentMonitorManager:
             "connection_type": "user"
         }
         
-        logger.info(f"WebSocket connected for user {user_id}")
+        # WebSocket connected for user (logging removed for verbosity)
         
         # 연결 확인 메시지 전송
         await self.send_to_websocket(websocket, {
@@ -268,7 +261,7 @@ class DeploymentMonitorManager:
         # 메타데이터 제거
         del self.connection_metadata[websocket]
         
-        logger.info(f"WebSocket disconnected for deployment {deployment_id}, user {user_id}")
+        # WebSocket disconnected for deployment (logging removed for verbosity)
     
     async def send_to_websocket(self, websocket: WebSocket, message: dict):
         """특정 WebSocket에 메시지 전송"""
@@ -328,9 +321,7 @@ class DeploymentMonitorManager:
             "data": data
         }
         
-        logger.info(f"Broadcasting deployment_started message: {message}")
-        logger.info(f"User connections for user {user_id}: {list(self.user_connections.keys())}")
-        logger.info(f"Deployment connections for deployment {deployment_id}: {list(self.deployment_connections.keys())}")
+        # Broadcasting deployment_started (logging removed for verbosity)
 
         self._record_deployment_event(deployment_id, message)
         await self.broadcast_to_deployment(deployment_id, message)

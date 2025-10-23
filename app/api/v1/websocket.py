@@ -145,13 +145,10 @@ async def websocket_deployment_monitor(
         while True:
             try:
                 # 메시지 수신
-                logger.info(f"Waiting for message from connection: {connection_id}")
                 data = await websocket.receive_json()
-                logger.info(f"Received message from {connection_id}: {data}")
                 
                 # 메시지 처리
                 await manager.handle_message(connection_id, data)
-                logger.info(f"Message processed successfully for {connection_id}")
                 
             except WebSocketDisconnect:
                 logger.info("websocket_disconnected", connection_id=connection_id)
