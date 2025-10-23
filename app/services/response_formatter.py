@@ -51,6 +51,7 @@ class ResponseFormatter:
                 "get_rollback_list": self.format_rollback_list,  # 롤백 목록 조회 명령어 추가
                 "scale": self.format_scale,
                 "deploy_application": self.format_deploy,
+                "deploy_github_repository": self.format_deploy_github_repository,  # GitHub 저장소 배포 명령어 추가
                 "k8s_restart_deployment": self.format_restart,
                 "cost_analysis": self.format_cost_analysis,
             }
@@ -531,6 +532,42 @@ class ResponseFormatter:
         except Exception as e:
             self.logger.error(f"Error formatting deploy: {str(e)}")
             return self.format_error("deploy", str(e))
+    
+    def format_deploy_github_repository(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """GitHub 저장소 배포 결과를 포맷"""
+        try:
+            # raw_data는 이미 formatted 구조를 가지고 있음
+            formatted_data = raw_data.get("formatted", raw_data)
+            message = formatted_data.get("message", "")
+            repository = formatted_data.get("repository", "")
+            branch = formatted_data.get("branch", "")
+            commit = formatted_data.get("commit", {})
+            deployment_status = formatted_data.get("deployment_status", "")
+            
+            return {
+                "type": "deploy_github_repository",
+                "summary": message,
+                "data": {
+                    "formatted": {
+                        "status": formatted_data.get("status", "success"),
+                        "message": message,
+                        "repository": repository,
+                        "branch": branch,
+                        "commit": commit,
+                        "deployment_status": deployment_status
+                    },
+                    "raw": raw_data
+                },
+                "metadata": {
+                    "repository": repository,
+                    "branch": branch,
+                    "commit_sha": commit.get("sha", ""),
+                    "author": commit.get("author", "")
+                }
+            }
+        except Exception as e:
+            self.logger.error(f"Error formatting deploy_github_repository: {str(e)}")
+            return self.format_error("deploy_github_repository", str(e))
     
     def format_restart(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """재시작 결과를 포맷"""

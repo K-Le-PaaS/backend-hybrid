@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from datetime import datetime, timezone
@@ -14,6 +15,9 @@ from fastapi import HTTPException
 from .deployments import DeployApplicationInput, perform_deploy
 from .k8s_client import get_apps_v1_api, get_core_v1_api, get_networking_v1_api
 from .response_formatter import ResponseFormatter
+from .github_app import github_app_auth
+from ..models.user_project_integration import UserProjectIntegration
+from ..database import SessionLocal
 
 logger = structlog.get_logger(__name__)
 
@@ -114,13 +118,15 @@ def plan_command(req: CommandRequest) -> CommandPlan:
     resource_name = get_resource_name()
 
     if command == "deploy":
+        # GitHub 저장소 기반 배포
+        if not req.github_owner or not req.github_repo:
+            raise ValueError("배포 명령어에는 GitHub 저장소 정보가 필요합니다. 예: 'K-Le-PaaS/test01 배포해줘'")
         return CommandPlan(
-            tool="deploy_application",
+            tool="deploy_github_repository",
             args={
-                "app_name": resource_name,
-                "environment": "staging",
-                "image": f"{resource_name}:latest",
-                "replicas": 2,
+                "github_owner": req.github_owner,
+                "github_repo": req.github_repo,
+                "branch": getattr(req, "branch", "main"),
             },
         )
     
@@ -345,6 +351,136 @@ async def _execute_cost_analysis(args: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
+async def _execute_deploy_github_repository(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    GitHub 저장소 배포 실행 (자연어 명령어용)
+    예: "K-Le-PaaS/test01 배포해줘"
+    """
+    owner = args.get("github_owner")
+    repo = args.get("github_repo")
+    branch = args.get("branch", "main")
+    user_id = args.get("user_id")
+
+    if not owner or not repo:
+        return {
+            "status": "error",
+            "message": "GitHub 저장소 정보가 필요합니다 (owner/repo 형식)"
+        }
+
+    if not user_id:
+        return {
+            "status": "error",
+            "message": "사용자 인증 정보가 필요합니다"
+        }
+
+    db = SessionLocal()
+    try:
+        # 1. UserProjectIntegration에서 연동 정보 조회
+        integration = db.query(UserProjectIntegration).filter(
+            UserProjectIntegration.github_owner == owner,
+            UserProjectIntegration.github_repo == repo,
+            UserProjectIntegration.user_id == str(user_id)
+        ).first()
+
+        if not integration:
+            return {
+                "status": "error",
+                "message": f"저장소 {owner}/{repo}가 연동되지 않았습니다. Connected Repositories에서 먼저 연동해주세요."
+            }
+
+        # 2. GitHub API로 최신 커밋 정보 가져오기
+        try:
+            commit_info = await github_app_auth.get_latest_commit(owner, repo, branch, db)
+        except Exception as e:
+            logger.error(f"Failed to fetch latest commit: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"최신 커밋 정보를 가져오는데 실패했습니다: {str(e)}"
+            }
+
+        # 3. 웹훅 payload 형식으로 데이터 구성
+        payload = {
+            "ref": f"refs/heads/{branch}",
+            "head_commit": {
+                "id": commit_info["sha"],
+                "message": commit_info["message"],
+                "author": {
+                    "name": commit_info["author"]["name"],
+                    "email": commit_info["author"].get("email", ""),
+                },
+                "url": commit_info["url"],
+                "timestamp": commit_info["timestamp"],
+            },
+            "pusher": {
+                "name": "nlp-deploy",  # NLP 명령어를 통한 배포 식별자
+            },
+            "repository": {
+                "full_name": f"{owner}/{repo}",
+            }
+        }
+
+        logger.info(f"NLP deploy triggered for {owner}/{repo} (commit: {commit_info['sha'][:7]})")
+
+        # 4. handle_push_webhook을 백그라운드에서 실행
+        from ..api.v1.github_workflows import handle_push_webhook
+
+        def run_async_in_thread(coro_func, *args, **kwargs):
+            """백그라운드 스레드에서 비동기 함수 실행"""
+            session = SessionLocal()
+            try:
+                # 통합 객체는 스레드 세이프하게 재조회
+                integ = session.query(UserProjectIntegration).filter(
+                    UserProjectIntegration.id == integration.id
+                ).first()
+                if integ is None:
+                    logger.error(f"Integration {integration.id} not found in background task")
+                    return
+                asyncio.run(coro_func(*args, **kwargs, db=session, integration=integ))
+            finally:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
+        # 백그라운드 태스크로 배포 시작
+        import threading
+        thread = threading.Thread(
+            target=run_async_in_thread,
+            args=(handle_push_webhook, payload)
+        )
+        thread.start()
+
+        # 5. 즉시 응답 반환 (배포는 백그라운드에서 진행)
+        short_sha = commit_info["sha"][:7]
+        return {
+            "status": "success",
+            "formatted": {
+                "status": "success",
+                "message": f"{owner}/{repo} 배포를 시작했습니다",
+                "repository": f"{owner}/{repo}",
+                "branch": branch,
+                "commit": {
+                    "sha": short_sha,
+                    "message": commit_info["message"][:50] + ("..." if len(commit_info["message"]) > 50 else ""),
+                    "author": commit_info["author"]["name"]
+                },
+                "deployment_status": "배포가 백그라운드에서 진행 중입니다. CI/CD Pipelines 탭에서 진행 상황을 확인하세요."
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Deploy execution failed: {str(e)}")
+        return {
+            "status": "error",
+            "message": f"배포 실행 중 오류가 발생했습니다: {str(e)}"
+        }
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
 async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
     """
     명령 실행 계획을 실제 Kubernetes API 호출로 변환하여 실행
@@ -367,6 +503,9 @@ async def _execute_raw_command(plan: CommandPlan) -> Dict[str, Any]:
     if plan.tool == "deploy_application":
         payload = DeployApplicationInput(**plan.args)
         return await perform_deploy(payload)
+
+    if plan.tool == "deploy_github_repository":
+        return await _execute_deploy_github_repository(plan.args)
 
     if plan.tool == "scale":
         return await _execute_scale(plan.args)

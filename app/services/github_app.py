@@ -222,23 +222,76 @@ class GitHubAppAuth:
             # 레포지토리에 접근 가능한 설치를 찾지 못함
             raise ValueError(f"GitHub App이 레포지토리 '{owner}/{repo}'에 설치되지 않았습니다.")
     
+    async def get_latest_commit(self, owner: str, repo: str, branch: str = "main", db_session=None) -> Dict[str, Any]:
+        """특정 브랜치의 최신 커밋 정보를 가져옵니다 (웹훅 payload 형식과 동일)"""
+        # GitHub App 토큰 획득
+        token, _ = await self.get_installation_token_for_repo(owner, repo, db_session)
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            # 브랜치 정보 조회 (최신 커밋 포함)
+            response = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/branches/{branch}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28"
+                }
+            )
+
+            if response.status_code != 200:
+                raise ValueError(f"브랜치 정보 조회 실패: {response.status_code} - {response.text}")
+
+            branch_data = response.json()
+            commit_data = branch_data.get("commit", {})
+            commit_sha = commit_data.get("sha")
+
+            if not commit_sha:
+                raise ValueError(f"브랜치 '{branch}'의 커밋 정보를 찾을 수 없습니다")
+
+            # 상세 커밋 정보 조회
+            commit_response = await client.get(
+                f"https://api.github.com/repos/{owner}/{repo}/commits/{commit_sha}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28"
+                }
+            )
+
+            if commit_response.status_code != 200:
+                raise ValueError(f"커밋 상세 정보 조회 실패: {commit_response.status_code} - {commit_response.text}")
+
+            full_commit = commit_response.json()
+
+            # 웹훅 payload 형식과 동일하게 반환
+            return {
+                "sha": full_commit.get("sha"),
+                "message": full_commit.get("commit", {}).get("message", ""),
+                "author": {
+                    "name": full_commit.get("commit", {}).get("author", {}).get("name", ""),
+                    "email": full_commit.get("commit", {}).get("author", {}).get("email", ""),
+                },
+                "url": full_commit.get("html_url", ""),
+                "timestamp": full_commit.get("commit", {}).get("author", {}).get("date", ""),
+            }
+
     async def verify_webhook_signature(self, payload: bytes, signature: str) -> bool:
         """GitHub App 웹훅 서명 검증"""
         if not self.settings.github_app_webhook_secret:
             return False
-        
+
         import hmac
         import hashlib
-        
+
         expected_signature = hmac.new(
             self.settings.github_app_webhook_secret.encode('utf-8'),
             payload,
             hashlib.sha256
         ).hexdigest()
-        
+
         # GitHub는 "sha256=" 접두사를 사용
         expected_signature = f"sha256={expected_signature}"
-        
+
         return hmac.compare_digest(signature, expected_signature)
 
 
