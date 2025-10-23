@@ -134,7 +134,9 @@ async def github_callback(
         gh_user = await _fetch_github_user(access_token)
         _store_token(db, str(gh_user["id"]), access_token)
     # 프론트 대시보드로 리다이렉트 (사용자 ID를 쿼리로 전달)
-    dashboard_url = f"http://localhost:3000/console"  # 필요 시 환경설정으로 교체
+    from app.core.config import get_settings
+    settings = get_settings()
+    dashboard_url = f"{settings.frontend_url}/console"
     return RedirectResponse(url=dashboard_url, status_code=302)
 
 

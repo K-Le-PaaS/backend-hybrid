@@ -192,6 +192,142 @@ async def websocket_deployment_monitor(
         await manager.disconnect(connection_id)
 
 
+@router.websocket("/ws/nks-monitoring")
+async def websocket_nks_monitoring(websocket: WebSocket):
+    """
+    NKS 모니터링 실시간 WebSocket 엔드포인트
+    
+    클라이언트는 이 엔드포인트에 연결하여 NKS 클러스터의 실시간 모니터링 데이터를 받을 수 있습니다.
+    
+    메시지 형식:
+    - 구독: {"type": "subscribe", "data": {"metrics": ["cpu", "memory", "disk", "network"]}}
+    - 핑: {"type": "ping"}
+    """
+    connection_id = str(uuid.uuid4())
+    
+    try:
+        # WebSocket 연결 수락
+        await websocket.accept()
+        
+        logger.info("nks_monitoring_websocket_connected", connection_id=connection_id)
+        
+        # 연결 확인 메시지 전송
+        await websocket.send_json({
+            "type": "connection",
+            "data": {
+                "status": "connected",
+                "connection_id": connection_id,
+                "message": "NKS 모니터링 WebSocket 연결이 성공적으로 설정되었습니다."
+            }
+        })
+        
+        # NKS 모니터링 데이터 전송 루프
+        import asyncio
+        from ..services.prometheus_client import query_prometheus, PromQuery
+        
+        while True:
+            try:
+                # 클라이언트로부터 메시지 수신 (비차단)
+                try:
+                    data = await asyncio.wait_for(websocket.receive_json(), timeout=0.1)
+                    
+                    # 핑/퐁 처리
+                    if data.get("type") == "ping":
+                        await websocket.send_json({
+                            "type": "pong",
+                            "data": {"timestamp": str(uuid.uuid4())}
+                        })
+                        continue
+                        
+                except asyncio.TimeoutError:
+                    # 메시지가 없으면 계속 진행
+                    pass
+                
+                # NKS 모니터링 데이터 수집 및 전송
+                try:
+                    # CPU 사용률
+                    cpu_query = PromQuery(query='100 - (avg(rate(node_cpu_seconds_total{cluster="nks-cluster", mode="idle"}[2m])) * 100)')
+                    cpu_result = await query_prometheus(cpu_query)
+                    
+                    # 메모리 사용률
+                    memory_query = PromQuery(query='(1 - (node_memory_MemAvailable_bytes{cluster="nks-cluster"} / node_memory_MemTotal_bytes{cluster="nks-cluster"})) * 100')
+                    memory_result = await query_prometheus(memory_query)
+                    
+                    # 디스크 사용률
+                    disk_query = PromQuery(query='100 - ((node_filesystem_avail_bytes{cluster="nks-cluster", mountpoint="/"} / node_filesystem_size_bytes{cluster="nks-cluster", mountpoint="/"}) * 100)')
+                    disk_result = await query_prometheus(disk_query)
+                    
+                    # 네트워크 트래픽
+                    inbound_task = asyncio.create_task(query_prometheus(PromQuery(query='rate(node_network_receive_bytes_total{cluster="nks-cluster"}[5m])')))
+                    outbound_task = asyncio.create_task(query_prometheus(PromQuery(query='rate(node_network_transmit_bytes_total{cluster="nks-cluster"}[5m])')))
+                    inbound_result, outbound_result = await asyncio.gather(inbound_task, outbound_task, return_exceptions=True)
+                    
+                    # 데이터 파싱
+                    cpu_usage = None
+                    if cpu_result.get("status") == "success" and cpu_result.get("data", {}).get("result"):
+                        cpu_usage = round(float(cpu_result["data"]["result"][0]["value"][1]), 2)
+                    
+                    memory_usage = None
+                    if memory_result.get("status") == "success" and memory_result.get("data", {}).get("result"):
+                        memory_usage = round(float(memory_result["data"]["result"][0]["value"][1]), 2)
+                    
+                    disk_usage = None
+                    if disk_result.get("status") == "success" and disk_result.get("data", {}).get("result"):
+                        disk_usage = round(float(disk_result["data"]["result"][0]["value"][1]), 2)
+                    
+                    inbound_traffic = None
+                    outbound_traffic = None
+                    if not isinstance(inbound_result, Exception) and inbound_result.get("data", {}).get("result"):
+                        total_inbound = sum(float(r.get("value", [None, "0"])[1]) for r in inbound_result["data"]["result"])
+                        inbound_traffic = round(total_inbound / 1024 / 1024, 2)
+                    
+                    if not isinstance(outbound_result, Exception) and outbound_result.get("data", {}).get("result"):
+                        total_outbound = sum(float(r.get("value", [None, "0"])[1]) for r in outbound_result["data"]["result"])
+                        outbound_traffic = round(total_outbound / 1024 / 1024, 2)
+                    
+                    # 실시간 데이터 전송
+                    monitoring_data = {
+                        "type": "monitoring_data",
+                        "data": {
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "cluster": "nks-cluster",
+                            "metrics": {
+                                "cpu_usage": cpu_usage,
+                                "memory_usage": memory_usage,
+                                "disk_usage": disk_usage,
+                                "network_traffic": {
+                                    "inbound_mbps": inbound_traffic,
+                                    "outbound_mbps": outbound_traffic
+                                }
+                            }
+                        }
+                    }
+                    
+                    await websocket.send_json(monitoring_data)
+                    
+                except Exception as e:
+                    logger.error(f"NKS monitoring data collection failed: {e}")
+                    await websocket.send_json({
+                        "type": "error",
+                        "data": {"error": f"Monitoring data collection failed: {str(e)}"}
+                    })
+                
+                # 5초마다 데이터 전송
+                await asyncio.sleep(5)
+                
+            except WebSocketDisconnect:
+                logger.info("nks_monitoring_websocket_disconnected", connection_id=connection_id)
+                break
+            except Exception as e:
+                logger.error(f"NKS monitoring WebSocket error: {e}")
+                break
+    
+    except Exception as e:
+        logger.error(f"NKS monitoring WebSocket connection failed: {e}")
+    finally:
+        logger.info("nks_monitoring_websocket_cleanup", connection_id=connection_id)
+
+
 @router.get("/ws/stats")
 async def get_websocket_stats(
     manager: DeploymentMonitorManager = Depends(get_deployment_monitor_manager)

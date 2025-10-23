@@ -39,6 +39,11 @@ class CORSManager:
             "https://staging.k-le-paas.com"  # 스테이징 도메인
         ]
         
+        # 환경변수에서 프론트엔드 URL 추가
+        if hasattr(settings, 'frontend_url') and settings.frontend_url:
+            if settings.frontend_url not in origins:
+                origins.append(settings.frontend_url)
+        
         # 환경변수에서 추가 오리진 가져오기
         if hasattr(settings, 'cors_origins') and settings.cors_origins:
             origins.extend(settings.cors_origins.split(','))

@@ -209,3 +209,5 @@ docker run --rm -p 8080:8080 klepaas-backend:dev
 - Workflow: `E2E CI/CD Webhook Verification`
 - 전제: `KLEPAAS_WEBHOOK_SECRET` 시크릿 설정 필요
 - 수행: GitHub Actions에서 수동 실행 → 백엔드 기동 → `/health`·`/version` 체크 → 서명된 `push`/`release` 웹훅을 `/api/v1/cicd/webhook`에 전송하여 파이프라인 엔드포인트 동작 검증
+
+
