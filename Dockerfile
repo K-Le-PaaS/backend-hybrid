@@ -2,7 +2,7 @@
 FROM python:3.11-slim AS builder
 
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
-    curl ca-certificates && \
+    curl ca-certificates git && \
     rm -rf /var/lib/apt/lists/*
 
 # Download ncp-iam-authenticator in builder stage with retry logic
@@ -14,6 +14,11 @@ RUN curl --retry 3 --retry-delay 2 --retry-max-time 30 \
 
 # Final stage
 FROM python:3.11-slim
+
+# Install git in final stage
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+    git && \
+    rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
