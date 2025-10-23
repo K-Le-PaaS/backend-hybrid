@@ -5,19 +5,24 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from datetime import datetime, timezone
 
+import structlog
 from pydantic import BaseModel, Field
 from kubernetes import client
 from kubernetes.client.rest import ApiException
+from fastapi import HTTPException
 
 from .deployments import DeployApplicationInput, perform_deploy
 from .k8s_client import get_apps_v1_api, get_core_v1_api, get_networking_v1_api
+from .response_formatter import ResponseFormatter
+
+logger = structlog.get_logger(__name__)
 
 
 class CommandRequest(BaseModel):
     command: str = Field(min_length=1)
     # 리소스 타입별 명확한 필드 분리
     pod_name: str = Field(default="")          # Pod 관련 명령어용
-    deployment_name: str = Field(default="")   # Deployment 관련 명령어용  
+    deployment_name: str = Field(default="")   # Deployment 관련 명령어용
     service_name: str = Field(default="")      # Service 관련 명령어용
     # 기타 파라미터들
     replicas: int = Field(default=1)
@@ -25,6 +30,13 @@ class CommandRequest(BaseModel):
     version: str = Field(default="")
     namespace: str = Field(default="default")
     previous: bool = Field(default=False)  # 이전 파드 로그 여부
+    # NCP 롤백 관련 필드
+    github_owner: str = Field(default="")      # GitHub 저장소 소유자
+    github_repo: str = Field(default="")       # GitHub 저장소 이름
+    target_commit_sha: str = Field(default="") # 롤백할 커밋 SHA
+    steps_back: int = Field(default=0, ge=0)   # 몇 번 전으로 롤백할지
+    # 비용 분석 관련 필드
+    analysis_type: str = Field(default="usage")  # usage, optimization, forecast   # 몇 번 전으로 롤백할지
 
 
 @dataclass
@@ -113,12 +125,18 @@ def plan_command(req: CommandRequest) -> CommandPlan:
         )
     
     elif command == "scale":
-        # 리소스 이름이 명시되지 않았을 때 유효성 검사
-        if not req.deployment_name or req.deployment_name.strip() == "":
-            raise ValueError("스케일링 명령어에는 배포 이름을 명시해야 합니다. 예: 'nginx-deployment 3개로 늘려줘'")
+        # NCP SourceCommit 기반 스케일링만 지원
+        if not req.github_owner or not req.github_repo:
+            raise ValueError("스케일링 명령어에는 GitHub 저장소 정보가 필요합니다. 예: 'K-Le-PaaS/test01을 3개로 늘려줘'")
         return CommandPlan(
-            tool="k8s_scale_deployment",
-            args={"name": resource_name, "namespace": ns, "replicas": req.replicas},
+            tool="scale",
+            args={
+                "owner": req.github_owner,
+                "repo": req.github_repo,
+                "github_owner": req.github_owner,
+                "github_repo": req.github_repo,
+                "replicas": req.replicas
+            },
         )
     
     elif command == "status":
@@ -163,12 +181,17 @@ def plan_command(req: CommandRequest) -> CommandPlan:
         )
     
     elif command == "rollback":
-        # 리소스 이름이 명시되지 않았을 때 유효성 검사
-        if not req.deployment_name or req.deployment_name.strip() == "":
-            raise ValueError("롤백 명령어에는 배포 이름을 명시해야 합니다. 예: 'nginx-deployment v1.0으로 롤백'")
+        # NCP 파이프라인 롤백 (deployment_histories 기반)
+        if not req.github_owner or not req.github_repo:
+            raise ValueError("NCP 롤백 명령어에는 GitHub 저장소 정보가 필요합니다. 예: 'owner/repo를 3번 전으로 롤백'")
         return CommandPlan(
-            tool="k8s_rollback_deployment",
-            args={"name": resource_name, "namespace": ns, "version": req.version},
+            tool="rollback_deployment",
+            args={
+                "owner": req.github_owner,
+                "repo": req.github_repo,
+                "target_commit_sha": req.target_commit_sha,
+                "steps_back": req.steps_back
+            },
         )
     
     elif command == "list_pods" or command == "pods":
@@ -212,7 +235,16 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             tool="k8s_list_deployments",
             args={"namespace": ns},
         )
-    
+
+    elif command == "list_rollback":
+        # 롤백 목록 조회 명령어
+        if not req.github_owner or not req.github_repo:
+            raise ValueError("롤백 목록 조회에는 프로젝트 정보가 필요합니다. 예: 'K-Le-PaaS/test01 롤백 목록'")
+        return CommandPlan(
+            tool="get_rollback_list",
+            args={"owner": req.github_owner, "repo": req.github_repo},
+        )
+
     elif command == "get_service":
         # 리소스 이름이 명시되지 않았을 때 유효성 검사
         if not req.service_name or req.service_name.strip() == "":
@@ -231,18 +263,112 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             args={"name": resource_name, "namespace": ns},
         )
 
+    elif command == "cost_analysis":
+        # 비용 분석 명령어
+        return CommandPlan(
+            tool="cost_analysis",
+            args={
+                "namespace": ns,
+                "analysis_type": req.analysis_type or "usage"
+            },
+        )
+
     raise ValueError("해석할 수 없는 명령입니다.")
+
+
+async def _execute_cost_analysis(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    클러스터 비용 분석 실행
+    """
+    namespace = args.get("namespace", "default")
+    analysis_type = args.get("analysis_type", "usage")
+    
+    # TODO: 실제 비용 분석 로직 구현
+    # 현재는 mock 데이터 반환
+    
+    if analysis_type == "optimization":
+        return {
+            "message": f"{namespace} 네임스페이스의 비용 최적화 제안을 생성했습니다.",
+            "cost_estimate": {
+                "current_cost": 150000,
+                "estimated_cost": 105000,
+                "savings": 45000,
+                "currency": "KRW",
+                "period": "월간",
+                "breakdown": {
+                    "compute": 80000,
+                    "storage": 30000,
+                    "network": 25000,
+                    "idle_resources": -45000
+                }
+            },
+            "recommendations": [
+                "미사용 Pod 3개 제거 시 월 20,000원 절감",
+                "스토리지 최적화로 월 15,000원 절감",
+                "인스턴스 다운사이징으로 월 10,000원 절감"
+            ]
+        }
+    elif analysis_type == "forecast":
+        return {
+            "message": f"{namespace} 네임스페이스의 월간 예상 비용을 계산했습니다.",
+            "cost_estimate": {
+                "estimated_cost": 150000,
+                "currency": "KRW",
+                "period": "월간 예상",
+                "breakdown": {
+                    "compute": 85000,
+                    "storage": 35000,
+                    "network": 30000
+                }
+            },
+            "trend": "지난달 대비 5% 증가 예상"
+        }
+    else:  # usage
+        return {
+            "message": f"{namespace} 네임스페이스의 현재 비용 현황입니다.",
+            "cost_estimate": {
+                "current_cost": 150000,
+                "currency": "KRW",
+                "period": "이번 달",
+                "breakdown": {
+                    "compute": 85000,
+                    "storage": 35000,
+                    "network": 30000
+                }
+            },
+            "resource_usage": {
+                "pods": 12,
+                "deployments": 5,
+                "services": 8,
+                "storage_gb": 150
+            }
+        }
 
 
 async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
     """
     명령 실행 계획을 실제 Kubernetes API 호출로 변환하여 실행
+    ResponseFormatter를 사용하여 사용자 친화적인 형식으로 응답을 포맷팅합니다.
+    """
+    # 원본 실행 결과를 가져옵니다
+    raw_result = await _execute_raw_command(plan)
+    
+    # ResponseFormatter를 사용하여 포맷팅
+    formatter = ResponseFormatter()
+    formatted_result = formatter.format_by_command(plan.tool, raw_result)
+    
+    return formatted_result
+
+
+async def _execute_raw_command(plan: CommandPlan) -> Dict[str, Any]:
+    """
+    원본 명령 실행 (포맷팅 없이)
     """
     if plan.tool == "deploy_application":
         payload = DeployApplicationInput(**plan.args)
         return await perform_deploy(payload)
 
-    if plan.tool == "k8s_scale_deployment":
+    if plan.tool == "scale":
         return await _execute_scale(plan.args)
 
     if plan.tool == "k8s_get_status":
@@ -257,8 +383,11 @@ async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
     if plan.tool == "k8s_restart_deployment":
         return await _execute_restart(plan.args)
 
-    if plan.tool == "k8s_rollback_deployment":
-        return await _execute_rollback(plan.args)
+    if plan.tool == "rollback_deployment":
+        return await _execute_ncp_rollback(plan.args)
+
+    if plan.tool == "get_rollback_list":
+        return await _execute_get_rollback_list(plan.args)
 
     if plan.tool == "k8s_list_pods":
         return await _execute_list_pods(plan.args)
@@ -286,6 +415,9 @@ async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
 
     if plan.tool == "k8s_get_deployment":
         return await _execute_get_deployment(plan.args)
+
+    if plan.tool == "cost_analysis":
+        return await _execute_cost_analysis(plan.args)
 
     raise ValueError("지원하지 않는 실행 계획입니다.")
 
@@ -669,94 +801,141 @@ async def _execute_restart(args: Dict[str, Any]) -> Dict[str, Any]:
 async def _execute_scale(args: Dict[str, Any]) -> Dict[str, Any]:
     """
     Deployment 스케일링 (scale 명령어)
-    예: "서버 3대로 늘려줘", "chat-app 스케일 아웃"
+    NCP SourceCommit 매니페스트 기반 스케일링
+    예: "K-Le-PaaS/test01을 3개로 늘려줘", "test01 스케일 5로"
     """
-    name = args["name"]
-    namespace = args["namespace"]
-    replicas = args["replicas"]
-    
-    try:
-        apps_v1 = get_apps_v1_api()
-        
-        # Deployment의 replicas 값만 업데이트
-        body = {
-            "spec": {
-                "replicas": replicas
-            }
-        }
-        
-        apps_v1.patch_namespaced_deployment_scale(
-            name=name,
-            namespace=namespace,
-            body=body
-        )
-        
+    from .rollback import scale_deployment
+    from ..database import get_db
+
+    owner = args.get("owner") or args.get("github_owner", "")
+    repo = args.get("repo") or args.get("github_repo", "")
+    replicas = args.get("replicas", 1)
+    user_id = args.get("user_id", "nlp_user")
+
+    # Validation
+    if not owner or not repo:
         return {
-            "status": "success",
-            "message": f"Deployment '{name}'의 replicas를 {replicas}개로 변경했습니다.",
-            "deployment": name,
-            "replicas": replicas
+            "status": "error",
+            "message": "GitHub 저장소 정보가 필요합니다 (예: K-Le-PaaS/test01을 3개로 늘려줘)"
         }
-        
-    except ApiException as e:
-        if e.status == 404:
-            return {"status": "error", "message": f"Deployment '{name}'을 찾을 수 없습니다."}
-        return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
-    except Exception as e:
-        return {"status": "error", "message": f"스케일링 실패: {str(e)}"}
 
-
-async def _execute_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Deployment 롤백 (rollback 명령어)
-    예: "v1.1 버전으로 롤백해줘", "이전 배포로 되돌려"
-    """
-    name = args["name"]
-    namespace = args["namespace"]
-    version = args.get("version")
-    
     try:
-        apps_v1 = get_apps_v1_api()
-        
-        if version:
-            # 특정 버전으로 롤백 (이미지 태그 변경)
-            deployment = apps_v1.read_namespaced_deployment(name=name, namespace=namespace)
-            
-            # 첫 번째 컨테이너의 이미지를 변경
-            if deployment.spec.template.spec.containers:
-                current_image = deployment.spec.template.spec.containers[0].image
-                image_base = current_image.rsplit(":", 1)[0]  # 태그 제거
-                new_image = f"{image_base}:{version}"
-                
-                deployment.spec.template.spec.containers[0].image = new_image
-                
-                apps_v1.patch_namespaced_deployment(
-                    name=name,
-                    namespace=namespace,
-                    body=deployment
-                )
-                
-                return {
-                    "status": "success",
-                    "message": f"Deployment '{name}'을 {version} 버전으로 롤백했습니다.",
-                    "deployment": name,
-                    "version": version,
-                    "image": new_image
-                }
-        else:
-            # 이전 ReplicaSet으로 롤백 (kubectl rollout undo와 동일)
-            # Kubernetes API는 직접적인 undo를 지원하지 않으므로, 이전 ReplicaSet을 찾아서 이미지를 변경
+        # 데이터베이스 세션 생성
+        db = next(get_db())
+
+        try:
+            # scale_deployment 호출
+            result = await scale_deployment(
+                owner=owner,
+                repo=repo,
+                replicas=replicas,
+                db=db,
+                user_id=user_id
+            )
+
             return {
-                "status": "error",
-                "message": "버전을 명시해주세요. 예: 'v1.0으로 롤백'"
+                "status": "success",
+                "message": f"{owner}/{repo}의 레플리카를 {result['old_replicas']}개에서 {replicas}개로 변경했습니다.",
+                "data": result
             }
-        
-    except ApiException as e:
-        if e.status == 404:
-            return {"status": "error", "message": f"Deployment '{name}'을 찾을 수 없습니다."}
-        return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
+
+        finally:
+            db.close()
+
+    except HTTPException as e:
+        return {
+            "status": "error",
+            "message": e.detail
+        }
     except Exception as e:
-        return {"status": "error", "message": f"롤백 실패: {str(e)}"}
+        logger.error(f"Scaling failed: {str(e)}", exc_info=True)
+        return {
+            "status": "error",
+            "message": f"스케일링 실패: {str(e)}"
+        }
+
+
+async def _execute_ncp_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    NCP 파이프라인 롤백 (ncp_rollback 명령어)
+    deployment_histories 테이블 기반으로 이전 배포로 롤백
+    예: "owner/repo를 3번 전으로 롤백", "owner/repo를 커밋 abc1234로 롤백"
+    """
+    from .rollback import rollback_to_commit, rollback_to_previous
+    from ..database import get_db
+
+    owner = args["owner"]
+    repo = args["repo"]
+    target_commit_sha = args.get("target_commit_sha", "")
+    steps_back = args.get("steps_back", 0)
+    user_id = args.get("user_id", "nlp_user")  # JWT에서 전달된 user_id 사용, 없으면 기본값
+
+    # 데이터베이스 세션 생성
+    db = next(get_db())
+
+    try:
+        # 커밋 SHA가 지정되었으면 해당 커밋으로 롤백
+        if target_commit_sha:
+            result = await rollback_to_commit(
+                owner=owner,
+                repo=repo,
+                target_commit_sha=target_commit_sha,
+                db=db,
+                user_id=user_id  # 실제 사용자 ID 사용
+            )
+
+            return {
+                "status": "success",
+                "action": "ncp_rollback_to_commit",
+                "message": f"{owner}/{repo}를 커밋 {target_commit_sha[:7]}로 롤백했습니다.",
+                "result": result
+            }
+
+        # steps_back이 지정되었으면 N번 전으로 롤백
+        elif steps_back > 0:
+            result = await rollback_to_previous(
+                owner=owner,
+                repo=repo,
+                steps_back=steps_back,
+                db=db,
+                user_id=user_id  # 실제 사용자 ID 사용
+            )
+
+            return {
+                "status": "success",
+                "action": "ncp_rollback_to_previous",
+                "message": f"{owner}/{repo}를 {steps_back}번 전 배포로 롤백했습니다.",
+                "result": result
+            }
+
+        else:
+            # 기본값: 1번 전으로 롤백
+            result = await rollback_to_previous(
+                owner=owner,
+                repo=repo,
+                steps_back=1,
+                db=db,
+                user_id=user_id  # 실제 사용자 ID 사용
+            )
+
+            return {
+                "status": "success",
+                "action": "ncp_rollback_to_previous",
+                "message": f"{owner}/{repo}를 이전 배포로 롤백했습니다.",
+                "result": result
+            }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "action": "ncp_rollback",
+            "message": f"NCP 롤백 실패: {str(e)}",
+            "owner": owner,
+            "repo": repo
+        }
+    finally:
+        # 데이터베이스 세션 정리
+        db.close()
 
 
 async def _execute_list_pods(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1148,6 +1327,59 @@ async def _execute_list_deployments(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
     except Exception as e:
         return {"status": "error", "message": f"Deployment 목록 조회 실패: {str(e)}"}
+
+
+async def _execute_get_rollback_list(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    롤백 목록 조회 (list_rollback 명령어)
+    예: "K-Le-PaaS/test01 롤백 목록 보여줘", "배포 이력 확인"
+    """
+    owner = args.get("owner")
+    repo = args.get("repo")
+    
+    if not owner or not repo:
+        return {"status": "error", "message": "프로젝트 정보가 필요합니다. 예: 'K-Le-PaaS/test01 롤백 목록'"}
+    
+    try:
+        from ..database import SessionLocal
+        from .rollback import get_rollback_list
+        
+        db = SessionLocal()
+        try:
+            result = await get_rollback_list(owner, repo, db, limit=10)
+            
+            if not result.get("current_state"):
+                return {
+                    "status": "success",
+                    "message": f"{owner}/{repo} 프로젝트에 배포 이력이 없습니다.",
+                    "data": result
+                }
+            
+            # 사용자 친화적인 메시지 구성
+            current = result["current_state"]
+            current_msg = f"현재: {current['commit_sha_short']} - {current['commit_message'][:50]}"
+            if current["is_rollback"]:
+                current_msg += " (롤백됨)"
+            
+            available_count = result["total_available"]
+            rollback_count = result["total_rollbacks"]
+            
+            message = f"{owner}/{repo} 롤백 목록을 조회했습니다.\n"
+            message += f"{current_msg}\n"
+            message += f"롤백 가능한 버전: {available_count}개, 최근 롤백: {rollback_count}개"
+            
+            return {
+                "status": "success",
+                "message": message,
+                "data": result
+            }
+            
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"롤백 목록 조회 실패: {str(e)}", exc_info=True)
+        return {"status": "error", "message": f"롤백 목록 조회 실패: {str(e)}"}
 
 
 async def _execute_get_service(args: Dict[str, Any]) -> Dict[str, Any]:

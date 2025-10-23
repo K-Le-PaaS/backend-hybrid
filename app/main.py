@@ -29,6 +29,8 @@ from .api.v1.github_workflows import router as github_workflows_router
 from .api.v1.github_oauth import router as github_oauth_router
 from .api.v1.projects import router as projects_router
 from .api.v1.deployment_histories import router as deployment_histories_router
+from .api.v1.rollback import router as rollback_router
+from .api.v1.ncp_pipeline_api import router as ncp_pipeline_router
 from .mcp.external.api import router as mcp_external_router
 from .core.error_handler import setup_error_handlers
 from .core.logging_config import setup_logging
@@ -88,6 +90,26 @@ def create_app() -> FastAPI:
         )
         # Explicitly set the spec version key
         openapi_schema["openapi"] = "3.1.0"
+
+        # Add JWT Bearer security scheme for Swagger UI
+        if "components" not in openapi_schema:
+            openapi_schema["components"] = {}
+        openapi_schema["components"]["securitySchemes"] = {
+            "BearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "JWT",
+                "description": "Enter your JWT token (obtained from /api/v1/oauth2/google or /api/v1/oauth2/github)"
+            }
+        }
+
+        # Apply BearerAuth to all paths (optional for each endpoint)
+        for path_data in openapi_schema.get("paths", {}).values():
+            for operation in path_data.values():
+                if isinstance(operation, dict) and "operationId" in operation:
+                    # Add optional security to all endpoints
+                    operation["security"] = [{"BearerAuth": []}]
+
         app.openapi_schema = openapi_schema
         return app.openapi_schema
 
@@ -123,8 +145,10 @@ def create_app() -> FastAPI:
     app.include_router(github_oauth_router, prefix="/api/v1", tags=["auth", "github"])
     app.include_router(projects_router, prefix="/api/v1", tags=["projects"])
     app.include_router(deployment_histories_router, prefix="/api/v1", tags=["deployment-histories"])
+    app.include_router(rollback_router, prefix="/api/v1", tags=["rollback"])
     app.include_router(auth_verify_router, prefix="/api/v1", tags=["auth"])
     app.include_router(github_workflows_router, prefix="/api/v1", tags=["github"])
+    app.include_router(ncp_pipeline_router, prefix="/api/v1/ncp/pipeline", tags=["ncp-pipeline"])
     app.include_router(mcp_external_router, tags=["mcp-external"])
 
     @app.get("/")
@@ -150,13 +174,31 @@ def create_app() -> FastAPI:
         # 데이터베이스 초기화
         init_database()
         logger.info("Database initialized successfully")
-        
+
         # 서비스 초기화
         db_session = next(get_db())
         init_services(db_session)
         logger.info("All services initialized successfully")
+
     except Exception as e:
         logger.warning("Failed to initialize database or services", error=str(e))
+
+    # Shutdown 이벤트 핸들러 추가
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        """애플리케이션 종료 시 정리 작업"""
+        logger.info("Shutting down application...")
+        
+        # Kubernetes Watcher 중지
+        try:
+            from .services.kubernetes_watcher import get_kubernetes_watcher
+            watcher = get_kubernetes_watcher()
+            await watcher.stop_all_watches()
+            logger.info("Kubernetes Watcher stopped successfully")
+        except Exception as e:
+            logger.warning(f"Failed to stop Kubernetes Watcher: {e}")
+        
+        logger.info("Application shutdown complete")
 
     return app
 

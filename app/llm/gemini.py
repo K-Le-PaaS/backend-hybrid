@@ -35,7 +35,7 @@ class GeminiClient(LLMClient):
                 # Pod 관련 명령어
                 if parameters.get("podName") is not None:
                     entities["pod_name"] = parameters.get("podName")
-            elif command in ("scale", "rollback", "deploy", "get_deployment"):
+            elif command in ("scale", "deploy", "get_deployment"):
                 # Deployment 관련 명령어
                 if parameters.get("deploymentName") is not None:
                     entities["deployment_name"] = parameters.get("deploymentName")
@@ -45,11 +45,20 @@ class GeminiClient(LLMClient):
                     entities["service_name"] = parameters.get("serviceName")
 
             # namespace 기본값 포함이 필요한 명령어들
-            if command in ("status", "endpoint", "restart", "overview", "list_pods", "list_apps", "logs", "get_service", "get_deployment"):
+            if command in ("status", "endpoint", "restart", "overview", "list_pods", "list_apps", "logs", "get_service", "get_deployment", "cost_analysis"):
                 entities["namespace"] = parameters.get("namespace", "default")
 
-            # 스케일링 복제수
+            # 비용 분석 파라미터
+            if command == "cost_analysis":
+                entities["analysis_type"] = parameters.get("analysis_type", "usage")
+
+            # 스케일링 복제수 및 GitHub 저장소 정보
             if command == "scale":
+                # GitHub 저장소 정보 (필수)
+                entities["github_owner"] = parameters.get("owner", "")
+                entities["github_repo"] = parameters.get("repo", "")
+
+                # 복제수 파싱
                 raw_replicas = parameters.get("replicas", 1)
                 try:
                     coerced_replicas = int(raw_replicas)
@@ -61,13 +70,35 @@ class GeminiClient(LLMClient):
                     coerced_replicas = 100
                 entities["replicas"] = coerced_replicas
 
-            # 롤백 버전
+            # NCP 롤백 파라미터
             if command == "rollback":
-                raw_version = parameters.get("version", "")
-                if raw_version and isinstance(raw_version, str):
-                    entities["version"] = raw_version.strip()
+                # GitHub 저장소 정보 (필수)
+                entities["github_owner"] = parameters.get("owner", "")
+                entities["github_repo"] = parameters.get("repo", "")
+
+                # 커밋 SHA (선택: commitSha가 있으면 커밋 기반 롤백)
+                commit_sha = parameters.get("commitSha")
+                if commit_sha and isinstance(commit_sha, str):
+                    entities["target_commit_sha"] = commit_sha.strip()
                 else:
-                    entities["version"] = ""
+                    entities["target_commit_sha"] = None
+
+                # N번째 전 (선택: stepsBack이 있으면 N번째 전 롤백)
+                steps_back = parameters.get("stepsBack")
+                if steps_back is not None:
+                    try:
+                        steps = int(steps_back)
+                        entities["steps_back"] = max(1, min(steps, 10))  # 1~10 제한
+                    except (TypeError, ValueError):
+                        entities["steps_back"] = 1  # 기본값
+                else:
+                    entities["steps_back"] = None
+
+            # 롤백 목록 조회 파라미터
+            if command == "list_rollback":
+                # GitHub 저장소 정보 (필수)
+                entities["github_owner"] = parameters.get("owner", "")
+                entities["github_repo"] = parameters.get("repo", "")
 
             # 로그 관련 옵션: lines, previous
             if command == "logs":
@@ -97,6 +128,7 @@ class GeminiClient(LLMClient):
             messages = {
                 "deploy": "배포 명령을 해석했습니다.",
                 "rollback": "롤백 명령을 해석했습니다.",
+                "list_rollback": "롤백 목록 조회 명령을 해석했습니다.",
                 "scale": "스케일링 명령을 해석했습니다.",
                 "status": "상태 확인 명령을 해석했습니다.",
                 "logs": "로그 조회 명령을 해석했습니다.",
@@ -205,21 +237,85 @@ class GeminiClient(LLMClient):
 필수 JSON 형식: { "command": "restart", "parameters": { "podName": "<추출된_파드이름_없으면_null>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
 5. 스케일링 (command: "scale")
-설명: Deployment의 서버(파드) 개수를 조절하는 명령입니다.
-중요: "app", "앱"이라는 호칭은 Pod를 의미하므로, 스케일링은 "deployment", "배포" 등의 명시적 표현을 사용합니다.
-사용자 입력 예시:
-- 기본 표현: "서버 3대로 늘려줘", "chat-app 스케일 아웃", "서버 1개로 줄여"
-- 자연스러운 표현: "nginx-deployment 5개로 늘려줘", "frontend-deployment 2개로 줄여줘", "백엔드 서버 4개로 스케일", "deployment 복제본 3개로 조정"
-- 다양한 뉘앙스: "서버 개수 3개로", "deployment를 5개로 늘려줘", "인스턴스 2개로 줄여", "복제본 4개로 설정", "서버 수를 3개로 조정", "deployment 개수 늘려줘", "서버 추가해줘", "인스턴스 줄여줘", "스케일 업해줘", "스케일 다운", "deployment 확장", "서버 축소", "복제본 늘려줘", "파드 개수 조정"
-필수 JSON 형식: { "command": "scale", "parameters": { "deploymentName": "<추출된_배포이름_없으면_null>", "replicas": <추출된_숫자> } }
+설명: NCP SourceCommit 매니페스트 기반으로 배포의 replicas를 조절하는 명령입니다.
+중요: GitHub 저장소(owner/repo) 정보가 반드시 필요합니다.
 
-6. 이미지 롤백 (command: "rollback")
-설명: 애플리케이션을 이전 버전으로 되돌리는 명령입니다.
 사용자 입력 예시:
-- 기본 표현: "v1.1 버전으로 롤백해줘", "이전 배포로 되돌려"
-- 자연스러운 표현: "앱 이전 버전으로 되돌려줘", "서비스 롤백"
-- 다양한 뉘앙스: "이전 버전으로 복구", "앱 되돌리기", "서비스 리셋", "이전 상태로 복원", "버전 되돌리기", "배포 취소", "앱 복구", "이전 이미지로 변경"
-필수 JSON 형식: { "command": "rollback", "parameters": { "deploymentName": "<추출된_배포이름_없으면_null>", "version": "<추출된_버전_태그>" } }
+- **저장소 지정 패턴** (권장):
+  * "K-Le-PaaS/test01을 3개로 늘려줘"
+  * "owner/repo 레플리카 5개로 스케일"
+  * "myorg/myapp 서버 2개로 줄여"
+  * "저장소 K-Le-PaaS/backend-hybrid을 4개로 확장"
+  * "test01 저장소 3개로 스케일 아웃"
+
+- **간단한 패턴** (저장소 정보 필수):
+  * "test01을 3개로 늘려줘" → owner는 컨텍스트에서 추론
+  * "backend 5개로 스케일" → owner는 컨텍스트에서 추론
+
+필수 JSON 형식: { "command": "scale", "parameters": { "owner": "<GitHub_저장소_소유자>", "repo": "<GitHub_저장소_이름>", "replicas": <추출된_숫자> } }
+
+6. NCP 배포 롤백 (command: "rollback")
+설명: NCP SourceBuild/SourceDeploy 기반으로 이전 배포 버전으로 되돌리는 명령입니다.
+중요: GitHub 저장소(owner/repo) 정보가 반드시 필요합니다.
+
+롤백 방식 2가지:
+A) 커밋 해시로 롤백: 특정 커밋 SHA를 지정하여 해당 버전으로 롤백
+B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포로 롤백
+
+사용자 입력 예시:
+- **커밋 해시 패턴**:
+  * "owner/repo를 커밋 abc1234로 롤백해줘"
+  * "myorg/myapp을 abc1234 커밋으로 되돌려"
+  * "K-Le-PaaS/backend-hybrid 커밋 a1b2c3d로 복구"
+  * "저장소 owner/repo 커밋 해시 abc1234로 롤백"
+
+- **N번째 전 패턴**:
+  * "owner/repo를 3번 전으로 롤백해줘"
+  * "myorg/myapp 2번 전 배포로 되돌려"
+  * "K-Le-PaaS/backend-hybrid 이전 배포로 복구" (1번 전으로 해석)
+  * "저장소 owner/repo를 5번 전으로 롤백"
+  * "owner/repo 바로 이전 버전으로 되돌려" (1번 전)
+
+- **자연스러운 표현**:
+  * "myorg/myapp 롤백해줘" (기본: 1번 전)
+  * "owner/repo 예전 버전으로 되돌려"
+  * "저장소 복구해줘"
+
+추출 규칙:
+1. **owner/repo 패턴 추출**: "owner/repo", "저장소명", "myorg/myapp" 등에서 GitHub 저장소 정보 추출
+2. **커밋 해시 추출**: "커밋", "commit", "해시", "hash" 키워드 뒤의 영숫자 조합 (최소 7자)
+3. **숫자 추출**: "N번 전", "N개 전", "N번째 전", "previous N" 등에서 숫자 추출
+4. **이전/previous**: 숫자 없이 "이전", "바로 전", "previous"만 있으면 1로 간주
+5. **기본값**: owner/repo만 있고 커밋/숫자 없으면 stepsBack=1
+
+필수 JSON 형식:
+{
+  "command": "rollback",
+  "parameters": {
+    "owner": "<추출된_GitHub_owner>",
+    "repo": "<추출된_GitHub_repo>",
+    "commitSha": "<커밋_해시_패턴이면_추출_없으면_null>",
+    "stepsBack": <N번째_전_패턴이면_숫자_없으면_null>
+  }
+}
+
+예시 변환:
+- "myorg/myapp을 abc1234로 롤백" → { "command": "rollback", "parameters": { "owner": "myorg", "repo": "myapp", "commitSha": "abc1234", "stepsBack": null } }
+- "owner/repo 3번 전으로 롤백" → { "command": "rollback", "parameters": { "owner": "owner", "repo": "repo", "commitSha": null, "stepsBack": 3 } }
+- "K-Le-PaaS/backend 이전 배포로" → { "command": "rollback", "parameters": { "owner": "K-Le-PaaS", "repo": "backend", "commitSha": null, "stepsBack": 1 } }
+
+6-1. 롤백 목록 조회 (command: "list_rollback")
+설명: 프로젝트의 현재 배포 상태, 롤백 가능한 버전 목록, 최근 롤백 히스토리를 조회하는 명령입니다.
+사용자 입력 예시:
+  * "K-Le-PaaS/test01 롤백 목록 보여줘"
+  * "owner/repo 배포 이력 확인"
+  * "myorg/myapp 롤백 가능한 버전 보여줘"
+  * "배포 히스토리 확인"
+  * "롤백 리스트 조회"
+필수 JSON 형식: { "command": "list_rollback", "parameters": { "owner": "<저장소_소유자>", "repo": "<저장소_이름>" } }
+예시:
+- "K-Le-PaaS/test01 롤백 목록" → { "command": "list_rollback", "parameters": { "owner": "K-Le-PaaS", "repo": "test01" } }
+- "myorg/myapp 배포 이력" → { "command": "list_rollback", "parameters": { "owner": "myorg", "repo": "myapp" } }
 
 7. 배포 (command: "deploy")
 설명: 사용자의 최신 코드를 빌드하고 클러스터에 배포합니다.
@@ -281,14 +377,28 @@ class GeminiClient(LLMClient):
 - 다양한 뉘앙스: "deployment 어떻게 설정되어 있어?", "배포 설정 확인해줘", "deployment 정보 자세히", "배포 구성 체크", "deployment 상세 분석", "배포 설정 파악", "deployment 정보 분석", "배포 상태 상세히"
 필수 JSON 형식: { "command": "get_deployment", "parameters": { "deploymentName": "<추출된_배포_이름>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
+17. 비용 분석 및 최적화 (command: "cost_analysis")
+설명: 클러스터의 비용 현황을 분석하고 최적화 제안을 제공하는 명령입니다.
+사용자 입력 예시:
+- 기본 표현: "비용 분석해줘", "현재 클러스터 비용 확인", "비용 현황 보여줘", "얼마나 나와?"
+- 최적화 요청: "비용 줄일 방법 알려줘", "비용 절감 방안", "저렴하게 운영하는 방법", "비용 최적화 제안"
+- 상세 분석: "사용하지 않는 리소스 찾아줘", "낭비되는 비용 확인", "불필요한 리소스 확인"
+- 예상 비용: "월간 예상 비용", "이번 달 예상 비용", "비용 예측해줘"
+- 다양한 뉘앙스: "비용 얼마나 드나?", "클러스터 운영 비용", "요금 확인", "비용 체크", "지출 현황", "예산 확인", "리소스 비용", "인프라 비용", "운영 비용 분석"
+필수 JSON 형식: { "command": "cost_analysis", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>", "analysis_type": "<optimization|usage|forecast>" } }
+
 일반 규칙:
-- 사용자의 의도가 불분명하거나 위 16가지 명령어 중 어느 것과도 일치하지 않으면: { "command": "unknown", "parameters": { "query": "<사용자_원본_입력>" } }
+- 사용자의 의도가 불분명하거나 위 17가지 명령어 중 어느 것과도 일치하지 않으면: { "command": "unknown", "parameters": { "query": "<사용자_원본_입력>" } }
 - 리소스 이름이 명시되지 않은 경우, 컨텍스트상 기본 리소스가 있다면 그 이름을 사용하거나 null을 반환합니다.
 - 리소스 타입별 파라미터 사용: podName(파드), deploymentName(배포), serviceName(서비스)
 - **중요한 리소스 타입 구분 규칙:**
   * "app", "앱"이라는 호칭은 Pod 관련 명령어(status, logs, restart)에서 사용
   * Deployment 관련 명령어(scale, get_deployment)에서는 "deployment", "배포" 등의 명시적 표현 사용
   * Service 관련 명령어(endpoint, get_service)에서는 "service", "서비스" 등의 명시적 표현 사용
+- **롤백 명령 우선순위**:
+  * commitSha와 stepsBack이 둘 다 있으면 commitSha 우선 (커밋 기반 롤백)
+  * 둘 다 없으면 stepsBack=1로 기본 설정 (1번 전 배포로 롤백)
+  * owner/repo가 없으면 롤백 명령으로 인식하지 않음 (저장소 정보 필수)
 - 오직 JSON 객체만 반환하며, 추가 설명이나 대화는 포함하지 않습니다."""
         
         payload = {

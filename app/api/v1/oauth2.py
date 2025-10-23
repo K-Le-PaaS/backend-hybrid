@@ -26,9 +26,13 @@ router = APIRouter(prefix="/auth/oauth2", tags=["oauth2"])
 logger = logging.getLogger("app.api.oauth2")
 
 # JWT 설정
-JWT_SECRET = "your-secret-key"  # 실제로는 환경변수에서 가져와야 함
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
+
+def get_jwt_secret() -> str:
+    """환경변수에서 JWT 시크릿 키를 가져옵니다."""
+    settings = get_settings()
+    return settings.secret_key or "your-secret-key"
 
 
 class OAuth2Manager:
@@ -302,14 +306,14 @@ def create_jwt_token(user_info: Dict[str, Any]) -> str:
         "iat": datetime.utcnow()
     }
     
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
 
 @router.get("/user")
 async def get_current_user(token: str = Query(..., description="JWT 토큰")):
     """현재 사용자 정보 조회"""
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
         return {
             "success": True,
             "user": {

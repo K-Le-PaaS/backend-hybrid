@@ -65,47 +65,38 @@ class DeploymentHistoryService:
         deployment_reason: Optional[str] = None,
         git_commit_sha: Optional[str] = None,
         git_branch: Optional[str] = None,
+        is_rollback: bool = False,
+        rollback_reason: Optional[str] = None,
         extra_metadata: Optional[Dict[str, Any]] = None
     ) -> int:
         """새로운 배포 기록을 생성합니다."""
         try:
+            # app_name을 github_owner/github_repo로 파싱
+            if "/" in app_name:
+                github_owner, github_repo = app_name.split("/", 1)
+            else:
+                # 슬래시가 없으면 전체를 repo로 사용
+                github_owner = ""
+                github_repo = app_name
+
             # 이미지 태그 추출
             image_tag, tag_type = self._extract_image_tag(image)
-            
-            # 배포 기록 생성
-            deployment_data = DeploymentHistoryCreate(
-                app_name=app_name,
-                environment=environment,
-                image=image,
-                image_tag=image_tag,
-                image_tag_type=tag_type,
-                replicas=replicas,
-                namespace=namespace,
-                status=DeploymentStatus.PENDING,
-                progress=0,
-                deployed_by=deployed_by,
-                deployment_reason=deployment_reason,
-                git_commit_sha=git_commit_sha,
-                git_branch=git_branch,
-                extra_metadata=extra_metadata
-            )
-            
-            # 데이터베이스에 저장
+
+            # 데이터베이스에 저장 (DeploymentHistory 모델에 맞춤)
             deployment_record = DeploymentHistory(
-                app_name=deployment_data.app_name,
-                environment=deployment_data.environment,
-                image=deployment_data.image,
-                image_tag=deployment_data.image_tag,
-                image_tag_type=deployment_data.image_tag_type.value,
-                replicas=deployment_data.replicas,
-                namespace=deployment_data.namespace,
-                status=deployment_data.status.value,
-                progress=deployment_data.progress,
-                deployed_by=deployment_data.deployed_by,
-                deployment_reason=deployment_data.deployment_reason,
-                git_commit_sha=deployment_data.git_commit_sha,
-                git_branch=deployment_data.git_branch,
-                extra_metadata=deployment_data.extra_metadata,
+                user_id=deployed_by or "system",
+                github_owner=github_owner,
+                github_repo=github_repo,
+                github_commit_sha=git_commit_sha,
+                github_commit_message=deployment_reason,
+                image_name=image,
+                image_tag=image_tag,
+                image_url=image,
+                namespace=namespace or "default",
+                status="success" if not is_rollback else "success",
+                is_rollback=is_rollback,
+                deployed_at=datetime.now(timezone.utc) if not is_rollback else None,
+                started_at=datetime.now(timezone.utc),
                 created_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc)
             )
@@ -113,24 +104,26 @@ class DeploymentHistoryService:
             self.db.add(deployment_record)
             self.db.commit()
             self.db.refresh(deployment_record)
-            
+
             logger.info(
                 "deployment_record_created",
                 deployment_id=deployment_record.id,
-                app_name=app_name,
+                github_owner=github_owner,
+                github_repo=github_repo,
                 environment=environment,
                 image=image,
                 image_tag=image_tag,
-                tag_type=tag_type.value
+                is_rollback=is_rollback
             )
-            
+
             return deployment_record.id
-            
+
         except Exception as e:
             logger.error(
                 "deployment_record_creation_failed",
                 error=str(e),
-                app_name=app_name,
+                github_owner=github_owner if "/" in app_name else "",
+                github_repo=github_repo if "/" in app_name else app_name,
                 environment=environment,
                 image=image
             )
@@ -158,11 +151,12 @@ class DeploymentHistoryService:
             if progress is not None:
                 deployment.progress = progress
             
-            # 배포 완료 시간 설정
+            # 배포 완료 시간 설정 (KST)
+            from ..models.deployment_history import get_kst_now
             if status == DeploymentStatus.SUCCESS:
-                deployment.deployed_at = datetime.now(timezone.utc)
+                deployment.deployed_at = get_kst_now()
             elif status == DeploymentStatus.FAILED:
-                deployment.updated_at = datetime.now(timezone.utc)
+                deployment.updated_at = get_kst_now()
             
             # 추가 메타데이터 업데이트
             if extra_metadata:

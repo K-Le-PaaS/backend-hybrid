@@ -81,9 +81,11 @@ async def handle_push_event(event: Dict[str, Any]) -> Dict[str, Any]:
     if not is_merge:
         return {"status": "ignored", "reason": "not a PR merge commit"}
 
-    # 🔧 추가: auto_deploy_enabled 상태 확인
-    # GitHub App installation_id로 사용자 설정 조회
+    # Check auto_deploy_enabled status and pipeline configuration
+    # GitHub App installation_id for user settings lookup
     installation_id = event.get("installation", {}).get("id")
+    integration = None
+    
     if installation_id:
         try:
             from ..database import SessionLocal
@@ -91,7 +93,7 @@ async def handle_push_event(event: Dict[str, Any]) -> Dict[str, Any]:
             
             db = SessionLocal()
             try:
-                # installation_id로 통합 정보 조회
+                # Query integration by installation_id
                 integration = db.query(UserProjectIntegration).filter(
                     UserProjectIntegration.github_installation_id == str(installation_id)
                 ).first()
@@ -107,11 +109,87 @@ async def handle_push_event(event: Dict[str, Any]) -> Dict[str, Any]:
                 db.close()
         except Exception as e:
             log.warning("Failed to check auto_deploy_enabled status", error=str(e))
-            # DB 조회 실패 시에도 배포는 진행 (기존 동작 유지)
+            # Continue deployment even if DB check fails (preserve existing behavior)
 
-    repo = event.get("repository", {}).get("name", "app")
-    # simplistic image tag using commit sha short
+    repo_data = event.get("repository", {})
+    repo = repo_data.get("name", "app")
+    owner = repo_data.get("owner", {}).get("login", "")
     commit = (event.get("after") or "")[:7] or "latest"
+    
+    # Pipeline mode: Auto-create and use SourcePipeline if build/deploy projects exist
+    if integration:
+        try:
+            from .ncp_pipeline import ensure_sourcepipeline_project, execute_sourcepipeline_rest
+            from ..database import SessionLocal
+            
+            pipeline_id = getattr(integration, 'pipeline_id', None)
+            build_project_id = getattr(integration, 'build_project_id', None)
+            deploy_project_id = getattr(integration, 'deploy_project_id', None)
+            
+            # Auto-create pipeline if build and deploy projects exist but pipeline doesn't
+            if not pipeline_id and build_project_id and deploy_project_id:
+                log.info("auto_creating_pipeline", 
+                        repository=f"{owner}/{repo}", 
+                        build_id=build_project_id, 
+                        deploy_id=deploy_project_id)
+                
+                db = SessionLocal()
+                try:
+                    # Create pipeline with existing build/deploy projects
+                    pipeline_id = await ensure_sourcepipeline_project(
+                        owner=owner,
+                        repo=repo,
+                        build_project_id=str(build_project_id),
+                        deploy_project_id=str(deploy_project_id),
+                        deploy_stage_id=1,
+                        deploy_scenario_id=1,
+                        branch=branch,
+                        sc_repo_name=getattr(integration, 'sc_repo_name', None),
+                        db=db,
+                        user_id=getattr(integration, 'user_id', None)
+                    )
+                    log.info("pipeline_auto_created", 
+                            pipeline_id=pipeline_id, 
+                            repository=f"{owner}/{repo}")
+                finally:
+                    db.close()
+            
+            # Execute pipeline if available
+            if pipeline_id:
+                log.info("pipeline_mode_enabled", repository=repo, pipeline_id=pipeline_id)
+                
+                # Execute SourcePipeline (Build -> Deploy workflow)
+                pipeline_result = await execute_sourcepipeline_rest(pipeline_id)
+                
+                # Send Slack notification for pipeline execution
+                try:
+                    import asyncio
+                    notification_msg = (
+                        f"[SourcePipeline] Execution triggered for {repo}:{commit}\n"
+                        f"Pipeline ID: {pipeline_id}\n"
+                        f"History ID: {pipeline_result.get('history_id', 'N/A')}"
+                    )
+                    asyncio.create_task(slack_notify(notification_msg))
+                except Exception as slack_error:
+                    logger.error("Failed to send pipeline Slack notification", 
+                               extra={"error": str(slack_error), "repo": repo, "pipeline_id": pipeline_id})
+                
+                return {
+                    "status": "pipeline_triggered",
+                    "mode": "sourcepipeline",
+                    "pipeline_id": pipeline_id,
+                    "history_id": pipeline_result.get("history_id"),
+                    "repository": repo,
+                    "commit": commit
+                }
+                
+        except Exception as pipeline_error:
+            log.warning("pipeline_execution_failed_fallback_to_direct_deploy", 
+                       error=str(pipeline_error), repository=repo)
+            # Fallback to direct deployment if pipeline execution fails
+            # Continue to standard deployment logic below
+    
+    # Standard direct deployment mode (existing logic)
     image = f"{repo}:{commit}"
     payload = DeployApplicationInput(
         app_name=repo,
@@ -119,11 +197,12 @@ async def handle_push_event(event: Dict[str, Any]) -> Dict[str, Any]:
         image=image,
         replicas=2,
     )
-    # MCP 네이티브 Git 에이전트를 통한 배포 (우선순위)
+    
+    # MCP native Git agent deployment (priority)
     try:
         if settings.mcp_git_agent_enabled:
             from ..mcp.tools.git_deployment import git_deployment_tools
-            # 클라우드 프로바이더 자동 감지 또는 설정에서 가져오기
+            # Auto-detect cloud provider or get from settings
             cloud_provider = getattr(settings, 'mcp_default_cloud_provider', 'gcp')
             
             mcp_result = await git_deployment_tools._deploy_application_mcp({
@@ -138,19 +217,19 @@ async def handle_push_event(event: Dict[str, Any]) -> Dict[str, Any]:
                 result = mcp_result
                 log.info("mcp_git_agent_deploy_success", result=mcp_result)
             else:
-                # MCP 실패 시 기존 방식으로 폴백
+                # Fallback to standard deployment on MCP failure
                 result = perform_deploy(payload)
                 log.warning("mcp_git_agent_deploy_failed_fallback", 
                            mcp_error=mcp_result.get("error"), fallback_result=result)
         else:
-            # 기존 직접 배포 방식
+            # Standard direct deployment
             result = perform_deploy(payload)
     except Exception as e:
         log.warning("mcp_git_agent_deploy_error_fallback", error=str(e))
-        # MCP 에이전트 실패 시 기존 방식으로 폴백
+        # Fallback to standard deployment on MCP agent error
         result = perform_deploy(payload)
     
-    # 레거시 MCP 트리거 (호환성)
+    # Legacy MCP trigger (compatibility)
     try:
         if settings.mcp_trigger_provider:
             from ..mcp.external.registry import mcp_registry
@@ -167,12 +246,15 @@ async def handle_push_event(event: Dict[str, Any]) -> Dict[str, Any]:
             asyncio.create_task(mcp_registry.call_tool(provider, tool, args))
     except Exception as e:
         log.warning("mcp_trigger_failed", error=str(e))
+        
     try:
         # fire-and-forget
         import asyncio
         asyncio.create_task(slack_notify(f"[Staging] Deploy triggered: {repo}:{commit}"))
     except Exception as e:
-        logger.error("Failed to send Slack notification for staging deploy", extra={"error": str(e), "repo": repo, "commit": commit})
+        logger.error("Failed to send Slack notification for staging deploy", 
+                    extra={"error": str(e), "repo": repo, "commit": commit})
+    
     return {"status": "triggered", "deploy": result}
 
 

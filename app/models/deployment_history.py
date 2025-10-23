@@ -8,10 +8,17 @@ GitHub Push 이벤트부터 SourceCommit, SourceBuild, SourceDeploy까지의
 
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text
 from sqlalchemy.sql import func
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from enum import Enum
 from .base import Base
+
+# 한국 표준시 (KST) 타임존
+KST = timezone(timedelta(hours=9))
+
+def get_kst_now():
+    """현재 한국 시간(KST) 반환"""
+    return datetime.now(KST).replace(tzinfo=None)  # SQLite는 timezone-naive datetime 사용
 
 
 class ImageTagType(Enum):
@@ -81,6 +88,8 @@ class DeploymentHistory(Base):
     sourcecommit_repo_name = Column(String(255), nullable=True)
     sourcebuild_project_id = Column(String(255), nullable=True)
     sourcedeploy_project_id = Column(String(255), nullable=True)
+    pipeline_id = Column(String(255), nullable=True)
+    pipeline_history_id = Column(Integer, nullable=True)
     build_id = Column(String(255), nullable=True)
     deploy_id = Column(String(255), nullable=True)
     
@@ -100,11 +109,12 @@ class DeploymentHistory(Base):
     cluster_name = Column(String(255), nullable=True)
     namespace = Column(String(255), nullable=True, default="default")
     
-    # 시간 정보
-    started_at = Column(DateTime, nullable=False, default=func.now())
+    # 시간 정보 (모두 한국 시간 KST로 저장)
+    started_at = Column(DateTime, nullable=False, default=get_kst_now)
     completed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=func.now())
-    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+    deployed_at = Column(DateTime, nullable=True)  # 배포 완료 시점 (롤백용)
+    created_at = Column(DateTime, default=get_kst_now)
+    updated_at = Column(DateTime, default=get_kst_now, onupdate=get_kst_now)
     
     # 소요 시간 (초)
     total_duration = Column(Integer, nullable=True)  # 전체 소요 시간
@@ -119,7 +129,11 @@ class DeploymentHistory(Base):
     # 메타데이터
     webhook_payload = Column(Text, nullable=True)  # 원본 웹훅 페이로드 (디버깅용)
     auto_deploy_enabled = Column(Boolean, default=True)
-    
+
+    # 롤백 정보
+    is_rollback = Column(Boolean, default=False, nullable=False)  # 롤백 배포 여부
+    rollback_from_id = Column(Integer, nullable=True)  # 어느 배포에서 롤백했는지
+
     def __repr__(self):
         return f"<DeploymentHistory(id={self.id}, user_id={self.user_id}, repo={self.github_owner}/{self.github_repo}, status={self.status})>"
     

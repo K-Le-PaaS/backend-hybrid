@@ -12,7 +12,7 @@ from ...core.config import get_settings
 from ...database import get_db
 from sqlalchemy.orm import Session
 from ...models.oauth_token import OAuthToken
-from ..v1.auth_verify import JWT_SECRET, JWT_ALGORITHM
+from ..v1.auth_verify import get_jwt_secret, JWT_ALGORITHM
 import jwt
 
 
@@ -123,7 +123,7 @@ async def github_callback(
     app_user_id: str | None = None
     if state:
         try:
-            payload = jwt.decode(state, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            payload = jwt.decode(state, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
             app_user_id = str(payload.get("sub")) if payload.get("sub") is not None else None
         except Exception:
             app_user_id = None

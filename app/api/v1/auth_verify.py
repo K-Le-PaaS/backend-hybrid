@@ -13,16 +13,20 @@ from ...core.config import get_settings
 router = APIRouter(prefix="/auth", tags=["auth"])
 security = HTTPBearer()
 
-# JWT 설정 (oauth2.py와 동일)
-JWT_SECRET = "your-secret-key"  # 실제로는 환경변수에서 가져와야 함
+# JWT 설정
 JWT_ALGORITHM = "HS256"
+
+def get_jwt_secret() -> str:
+    """환경변수에서 JWT 시크릿 키를 가져옵니다."""
+    settings = get_settings()
+    return settings.secret_key or "your-secret-key"
 
 @router.get("/verify", response_model=Dict[str, Any])
 async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Dict[str, Any]:
     """JWT 토큰 검증"""
     try:
         token = credentials.credentials
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
         
         # 토큰이 유효한지 확인
         current_time = datetime.utcnow().timestamp()
@@ -48,7 +52,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     """현재 사용자 정보 조회"""
     try:
         token = credentials.credentials
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
         
         return {
             "id": payload.get("sub"),
