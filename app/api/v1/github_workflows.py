@@ -1050,11 +1050,19 @@ async def handle_sourcecommit_mirror(payload: Dict[str, Any], integration: UserP
         
         github_repo_url = f"https://github.com/{integration.github_owner}/{integration.github_repo}.git"
         
+        # SourceCommit 인증 정보 가져오기
+        from ...core.config import get_settings
+        settings = get_settings()
+        sc_username = getattr(settings, 'ncp_sourcecommit_username', None)
+        sc_password = getattr(settings, 'ncp_sourcecommit_password', None)
+        
         mirror_result = mirror_to_sourcecommit(
             github_repo_url=github_repo_url,
             installation_or_access_token=github_token,
             sc_project_id=integration.sc_project_id,
-            sc_repo_name=integration.sc_repo_name
+            sc_repo_name=integration.sc_repo_name,
+            sc_username=sc_username,
+            sc_password=sc_password
         )
         
         return {
