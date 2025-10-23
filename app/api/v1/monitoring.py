@@ -182,3 +182,256 @@ async def get_db_health(db: Session = Depends(get_db)) -> Dict[str, Any]:
             "database_url": "configured" if __import__('os').getenv('KLEPAAS_DATABASE_URL') else "sqlite:///./test.db",
             "message": f"Database connection failed: {str(e)}"
         }
+
+# NKS 클러스터 전용 메트릭 엔드포인트
+@router.get("/monitoring/nks/cpu-usage")
+async def get_nks_cpu_usage() -> Dict[str, Any]:
+    """NKS 클러스터 CPU 사용률 조회"""
+    try:
+        # NKS 클러스터 전용 CPU 사용률 쿼리
+        query = '100 - (avg(rate(node_cpu_seconds_total{cluster="nks-cluster", mode="idle"}[2m])) * 100)'
+        result = await query_prometheus(PromQuery(query=query))
+        
+        if result.get("status") == "success" and result.get("data", {}).get("result"):
+            value = float(result["data"]["result"][0]["value"][1])
+            return {
+                "status": "success",
+                "cluster": "nks-cluster",
+                "metric": "cpu_usage",
+                "value": round(value, 2),
+                "unit": "percent",
+                "message": "NKS CPU usage retrieved successfully"
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "No CPU usage data available for NKS cluster"
+            }
+            
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"NKS CPU usage query failed: {str(e)}"
+        }
+
+@router.get("/monitoring/nks/memory-usage")
+async def get_nks_memory_usage() -> Dict[str, Any]:
+    """NKS 클러스터 메모리 사용률 조회"""
+    try:
+        # NKS 클러스터 전용 메모리 사용률 쿼리
+        query = '(1 - (node_memory_MemAvailable_bytes{cluster="nks-cluster"} / node_memory_MemTotal_bytes{cluster="nks-cluster"})) * 100'
+        result = await query_prometheus(PromQuery(query=query))
+        
+        if result.get("status") == "success" and result.get("data", {}).get("result"):
+            value = float(result["data"]["result"][0]["value"][1])
+            return {
+                "status": "success",
+                "cluster": "nks-cluster",
+                "metric": "memory_usage",
+                "value": round(value, 2),
+                "unit": "percent",
+                "message": "NKS memory usage retrieved successfully"
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "No memory usage data available for NKS cluster"
+            }
+            
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"NKS memory usage query failed: {str(e)}"
+        }
+
+@router.get("/monitoring/nks/disk-usage")
+async def get_nks_disk_usage() -> Dict[str, Any]:
+    """NKS 클러스터 디스크 사용률 조회"""
+    try:
+        # NKS 클러스터 전용 디스크 사용률 쿼리
+        query = '100 - ((node_filesystem_avail_bytes{cluster="nks-cluster", mountpoint="/"} / node_filesystem_size_bytes{cluster="nks-cluster", mountpoint="/"}) * 100)'
+        result = await query_prometheus(PromQuery(query=query))
+        
+        if result.get("status") == "success" and result.get("data", {}).get("result"):
+            value = float(result["data"]["result"][0]["value"][1])
+            return {
+                "status": "success",
+                "cluster": "nks-cluster",
+                "metric": "disk_usage",
+                "value": round(value, 2),
+                "unit": "percent",
+                "message": "NKS disk usage retrieved successfully"
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "No disk usage data available for NKS cluster"
+            }
+            
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"NKS disk usage query failed: {str(e)}"
+        }
+
+@router.get("/monitoring/nks/network-traffic")
+async def get_nks_network_traffic() -> Dict[str, Any]:
+    """NKS 클러스터 네트워크 트래픽 조회"""
+    try:
+        import asyncio
+        
+        # 병렬로 네트워크 인바운드/아웃바운드 트래픽 조회
+        inbound_task = asyncio.create_task(query_prometheus(PromQuery(query='rate(node_network_receive_bytes_total{cluster="nks-cluster"}[5m])')))
+        outbound_task = asyncio.create_task(query_prometheus(PromQuery(query='rate(node_network_transmit_bytes_total{cluster="nks-cluster"}[5m])')))
+        
+        inbound_result, outbound_result = await asyncio.gather(
+            inbound_task, outbound_task, return_exceptions=True
+        )
+        
+        # 결과 파싱
+        inbound_traffic = None
+        outbound_traffic = None
+        
+        if not isinstance(inbound_result, Exception) and inbound_result.get("data", {}).get("result"):
+            # 모든 네트워크 인터페이스의 인바운드 트래픽 합계
+            total_inbound = sum(float(r.get("value", [None, "0"])[1]) for r in inbound_result["data"]["result"])
+            inbound_traffic = round(total_inbound / 1024 / 1024, 2)  # MB/s로 변환
+            
+        if not isinstance(outbound_result, Exception) and outbound_result.get("data", {}).get("result"):
+            # 모든 네트워크 인터페이스의 아웃바운드 트래픽 합계
+            total_outbound = sum(float(r.get("value", [None, "0"])[1]) for r in outbound_result["data"]["result"])
+            outbound_traffic = round(total_outbound / 1024 / 1024, 2)  # MB/s로 변환
+        
+        return {
+            "status": "success",
+            "cluster": "nks-cluster",
+            "metric": "network_traffic",
+            "inbound_mbps": inbound_traffic,
+            "outbound_mbps": outbound_traffic,
+            "unit": "MB/s",
+            "message": "NKS network traffic retrieved successfully"
+        }
+            
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"NKS network traffic query failed: {str(e)}"
+        }
+
+@router.get("/monitoring/nks/overview")
+async def get_nks_overview() -> Dict[str, Any]:
+    """NKS 클러스터 전체 개요 조회"""
+    try:
+        import asyncio
+        
+        # 병렬로 모든 메트릭 조회
+        cpu_task = asyncio.create_task(query_prometheus(PromQuery(query='100 - (avg(rate(node_cpu_seconds_total{cluster="nks-cluster", mode="idle"}[2m])) * 100)')))
+        memory_task = asyncio.create_task(query_prometheus(PromQuery(query='(1 - (node_memory_MemAvailable_bytes{cluster="nks-cluster"} / node_memory_MemTotal_bytes{cluster="nks-cluster"})) * 100')))
+        disk_task = asyncio.create_task(query_prometheus(PromQuery(query='100 - ((node_filesystem_avail_bytes{cluster="nks-cluster", mountpoint="/"} / node_filesystem_size_bytes{cluster="nks-cluster", mountpoint="/"}) * 100)')))
+        inbound_task = asyncio.create_task(query_prometheus(PromQuery(query='rate(node_network_receive_bytes_total{cluster="nks-cluster"}[5m])')))
+        outbound_task = asyncio.create_task(query_prometheus(PromQuery(query='rate(node_network_transmit_bytes_total{cluster="nks-cluster"}[5m])')))
+        node_task = asyncio.create_task(query_prometheus(PromQuery(query='up{cluster="nks-cluster"}')))
+        
+        cpu_result, memory_result, disk_result, inbound_result, outbound_result, node_result = await asyncio.gather(
+            cpu_task, memory_task, disk_task, inbound_task, outbound_task, node_task, return_exceptions=True
+        )
+        
+        # 결과 파싱
+        cpu_usage = None
+        memory_usage = None
+        disk_usage = None
+        inbound_traffic = None
+        outbound_traffic = None
+        node_status = None
+        
+        if not isinstance(cpu_result, Exception) and cpu_result.get("data", {}).get("result"):
+            cpu_usage = round(float(cpu_result["data"]["result"][0]["value"][1]), 2)
+            
+        if not isinstance(memory_result, Exception) and memory_result.get("data", {}).get("result"):
+            memory_usage = round(float(memory_result["data"]["result"][0]["value"][1]), 2)
+            
+        if not isinstance(disk_result, Exception) and disk_result.get("data", {}).get("result"):
+            disk_usage = round(float(disk_result["data"]["result"][0]["value"][1]), 2)
+            
+        if not isinstance(inbound_result, Exception) and inbound_result.get("data", {}).get("result"):
+            total_inbound = sum(float(r.get("value", [None, "0"])[1]) for r in inbound_result["data"]["result"])
+            inbound_traffic = round(total_inbound / 1024 / 1024, 2)  # MB/s로 변환
+            
+        if not isinstance(outbound_result, Exception) and outbound_result.get("data", {}).get("result"):
+            total_outbound = sum(float(r.get("value", [None, "0"])[1]) for r in outbound_result["data"]["result"])
+            outbound_traffic = round(total_outbound / 1024 / 1024, 2)  # MB/s로 변환
+            
+        if not isinstance(node_result, Exception) and node_result.get("data", {}).get("result"):
+            results = node_result["data"]["result"]
+            node_status = {
+                "total_nodes": len(results),
+                "healthy_nodes": sum(1 for r in results if float(r.get("value", [None, "0"])[1]) == 1),
+                "nodes": [{"instance": r.get("metric", {}).get("instance", "unknown"), 
+                          "status": "healthy" if float(r.get("value", [None, "0"])[1]) == 1 else "unhealthy"} 
+                         for r in results]
+            }
+        
+        return {
+            "status": "success",
+            "cluster": "nks-cluster",
+            "timestamp": "2025-01-23T03:46:40Z",
+            "metrics": {
+                "cpu_usage": cpu_usage,
+                "memory_usage": memory_usage,
+                "disk_usage": disk_usage,
+                "network_traffic": {
+                    "inbound_mbps": inbound_traffic,
+                    "outbound_mbps": outbound_traffic
+                },
+                "node_status": node_status
+            },
+            "overall_status": "healthy" if cpu_usage is not None and memory_usage is not None and disk_usage is not None else "degraded",
+            "message": "NKS overview retrieved successfully"
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"NKS overview query failed: {str(e)}"
+        }
+
+@router.get("/monitoring/nks/pod-info")
+async def get_nks_pod_info() -> Dict[str, Any]:
+    """NKS 클러스터 Pod 정보 조회"""
+    try:
+        # Pod 수 조회 (더 간단한 쿼리 사용)
+        pod_query = 'kube_pod_info{cluster="nks-cluster"}'
+        pod_result = await query_prometheus(PromQuery(query=pod_query))
+        
+        # 노드별 Pod 수 조회
+        node_pod_query = 'count by (instance) (kube_pod_info{cluster="nks-cluster"})'
+        node_pod_result = await query_prometheus(PromQuery(query=node_pod_query))
+        
+        total_pods = 0
+        node_pod_counts = []
+        
+        if pod_result.get("status") == "success" and pod_result.get("data", {}).get("result"):
+            total_pods = sum(float(r.get("value", [None, "0"])[1]) for r in pod_result["data"]["result"])
+        
+        if node_pod_result.get("status") == "success" and node_pod_result.get("data", {}).get("result"):
+            node_pod_counts = [
+                {
+                    "instance": r.get("metric", {}).get("instance", "unknown"),
+                    "pod_count": int(float(r.get("value", [None, "0"])[1]))
+                }
+                for r in node_pod_result["data"]["result"]
+            ]
+        
+        return {
+            "status": "success",
+            "cluster": "nks-cluster",
+            "total_pods": int(total_pods),
+            "node_pod_counts": node_pod_counts,
+            "message": "NKS pod information retrieved successfully"
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"NKS pod info query failed: {str(e)}"
+        }

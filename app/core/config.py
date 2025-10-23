@@ -165,6 +165,10 @@ class Settings(BaseSettings):
     
     # JWT Configuration
     secret_key: str = Field(default="your-secret-key-here", description="JWT secret key")
+    
+    # Frontend/Backend URLs
+    frontend_url: str = Field(default="http://localhost:3000", description="Frontend application URL")
+    backend_url: str = Field(default="http://localhost:8000", description="Backend application URL")
 
     
 
