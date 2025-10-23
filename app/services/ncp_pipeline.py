@@ -1209,6 +1209,18 @@ spec:
                     subprocess.run(["git", "-C", str(inj_dir), "add", "k8s/deployment.yaml"], check=True, capture_output=True, text=True)
                     subprocess.run(["git", "-C", str(inj_dir), "add", "k8s/service.yaml"], check=True, capture_output=True, text=True)
                     subprocess.run(["git", "-C", str(inj_dir), "commit", "-m", f"chore: add default k8s manifests with tag {image_tag}"], check=True, capture_output=True, text=True)
+
+                    # Pull first to avoid non-fast-forward errors
+                    _dbg("SC-INJECT-GIT-PULL", branch=target_branch)
+                    try:
+                        subprocess.run(
+                            ["git", "-C", str(inj_dir), "pull", "origin", target_branch, "--rebase"],
+                            check=True, capture_output=True, text=True
+                        )
+                    except subprocess.CalledProcessError as e:
+                        _dbg("SC-INJECT-GIT-PULL-FAILED", error=e.stderr[:200] if e.stderr else str(e))
+                        # Continue anyway
+
                     # Push to the checked out target branch explicitly
                     r2 = subprocess.run(["git", "-C", str(inj_dir), "push", "origin", f"HEAD:refs/heads/{target_branch}"], capture_output=True, text=True)
                     _dbg("SC-INJECT-PUSH-BR", br=target_branch, rc=r2.returncode, out=r2.stdout[:120])
@@ -1412,14 +1424,26 @@ def mirror_and_update_manifest(
                     check=True, capture_output=True, text=True
                 )
 
-                # Check current branch and push
+                # Check current branch
                 branch_result = subprocess.run(
                     ["git", "-C", str(sc_dir), "branch", "--show-current"],
                     capture_output=True, text=True
                 )
                 current_branch = branch_result.stdout.strip() or "main"
-                _dbg("MM-GIT-PUSH-UPDATE", branch=current_branch)
 
+                # Pull first to avoid non-fast-forward errors
+                _dbg("MM-GIT-PULL-UPDATE", branch=current_branch)
+                try:
+                    subprocess.run(
+                        ["git", "-C", str(sc_dir), "pull", "origin", current_branch, "--rebase"],
+                        check=True, capture_output=True, text=True
+                    )
+                except subprocess.CalledProcessError as e:
+                    _dbg("MM-GIT-PULL-UPDATE-FAILED", error=e.stderr[:200] if e.stderr else str(e))
+                    # Continue anyway
+
+                # Now push
+                _dbg("MM-GIT-PUSH-UPDATE", branch=current_branch)
                 subprocess.run(
                     ["git", "-C", str(sc_dir), "push", "origin", current_branch],
                     check=True, capture_output=True, text=True
@@ -1513,14 +1537,26 @@ spec:
                 check=True, capture_output=True, text=True
             )
 
-            # Check current branch and push
+            # Check current branch
             branch_result = subprocess.run(
                 ["git", "-C", str(sc_dir), "branch", "--show-current"],
                 capture_output=True, text=True
             )
             current_branch = branch_result.stdout.strip() or "main"
-            _dbg("MM-GIT-PUSH", branch=current_branch)
 
+            # Pull first to avoid non-fast-forward errors
+            _dbg("MM-GIT-PULL", branch=current_branch)
+            try:
+                subprocess.run(
+                    ["git", "-C", str(sc_dir), "pull", "origin", current_branch, "--rebase"],
+                    check=True, capture_output=True, text=True
+                )
+            except subprocess.CalledProcessError as e:
+                _dbg("MM-GIT-PULL-FAILED", error=e.stderr[:200] if e.stderr else str(e))
+                # Continue anyway, push might still work or we'll get a clearer error
+
+            # Now push
+            _dbg("MM-GIT-PUSH", branch=current_branch)
             subprocess.run(
                 ["git", "-C", str(sc_dir), "push", "origin", current_branch],
                 check=True, capture_output=True, text=True
@@ -2870,13 +2906,25 @@ def update_replicas_in_sourcecommit(
             check=True, capture_output=True, text=True
         )
 
-        # Check current branch and push
+        # Check current branch
         branch_result = subprocess.run(
             ["git", "-C", str(sc_dir), "branch", "--show-current"],
             capture_output=True, text=True
         )
         current_branch = branch_result.stdout.strip() or "main"
 
+        # Pull first to avoid non-fast-forward errors
+        _dbg("SCALE-GIT-PULL", branch=current_branch)
+        try:
+            subprocess.run(
+                ["git", "-C", str(sc_dir), "pull", "origin", current_branch, "--rebase"],
+                check=True, capture_output=True, text=True
+            )
+        except subprocess.CalledProcessError as e:
+            _dbg("SCALE-GIT-PULL-FAILED", error=e.stderr[:200] if e.stderr else str(e))
+            # Continue anyway
+
+        # Now push
         subprocess.run(
             ["git", "-C", str(sc_dir), "push", "origin", current_branch],
             check=True, capture_output=True, text=True
