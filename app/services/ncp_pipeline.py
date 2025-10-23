@@ -2558,7 +2558,7 @@ async def run_sourcedeploy(
                 github_repo_url = f"https://github.com/{owner}/{repo}.git"
 
                 # Use new mirror function that updates manifest with actual image tag
-                # Note: Do NOT pass sc_username/sc_password (NCP API keys are not Git credentials)
+                # Pass SourceCommit authentication credentials for Git operations
                 mirror_result = mirror_and_update_manifest(
                     github_repo_url=github_repo_url,
                     installation_or_access_token=github_token,
@@ -2566,7 +2566,9 @@ async def run_sourcedeploy(
                     sc_repo_name=sc_repo_name,
                     image_repo=image_repo,
                     image_tag=effective_tag,
-                    sc_endpoint=getattr(settings, "ncp_sourcecommit_endpoint", None)
+                    sc_endpoint=getattr(settings, "ncp_sourcecommit_endpoint", None),
+                    sc_username=getattr(settings, "ncp_sourcecommit_username", None),
+                    sc_password=getattr(settings, "ncp_sourcecommit_password", None)
                 )
                 _dbg("SC-MIRROR-SUCCESS", result=mirror_result)
                 manifest_updated = mirror_result.get("manifest_updated", False)
