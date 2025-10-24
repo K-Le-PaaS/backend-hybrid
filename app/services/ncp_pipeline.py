@@ -2567,11 +2567,24 @@ async def run_sourcedeploy(
     # SourceBuild는 SourceCommit의 코드를 사용하므로, 먼저 최신 코드를 미러링해야 함
     # 이 단계에서 k8s/deployment.yaml의 이미지 태그도 함께 업데이트
     manifest_updated = False
+
+    # Get desired replica count from DB
+    desired_replicas = None
+    if db is not None and owner and repo:
+        try:
+            from .deployment_config import DeploymentConfigService
+            config_service = DeploymentConfigService()
+            desired_replicas = config_service.get_replica_count(db, owner, repo)
+            _dbg("SD-REPLICA-FROM-DB", owner=owner, repo=repo, replicas=desired_replicas)
+        except Exception as e:
+            _dbg("SD-REPLICA-DB-ERR", error=str(e)[:200])
+            desired_replicas = 1  # Fallback to default
+
     if skip_mirror:
         _dbg("SC-MIRROR-SKIP", reason="skip_mirror_flag_enabled")
         manifest_updated = True  # Assume already updated by caller
     elif owner and repo and sc_repo_name:
-        _dbg("SC-MIRROR-START", owner=owner, repo=repo, sc_repo=sc_repo_name, image_tag=effective_tag)
+        _dbg("SC-MIRROR-START", owner=owner, repo=repo, sc_repo=sc_repo_name, image_tag=effective_tag, replicas=desired_replicas)
         try:
             # Get GitHub Installation Token from DB
             github_token = None
@@ -2603,7 +2616,7 @@ async def run_sourcedeploy(
             if github_token and sc_project_id:
                 github_repo_url = f"https://github.com/{owner}/{repo}.git"
 
-                # Use new mirror function that updates manifest with actual image tag
+                # Use new mirror function that updates manifest with actual image tag and replicas
                 # Pass SourceCommit authentication credentials for Git operations
                 mirror_result = mirror_and_update_manifest(
                     github_repo_url=github_repo_url,
@@ -2614,7 +2627,8 @@ async def run_sourcedeploy(
                     image_tag=effective_tag,
                     sc_endpoint=getattr(settings, "ncp_sourcecommit_endpoint", None),
                     sc_username=getattr(settings, "ncp_sourcecommit_username", None),
-                    sc_password=getattr(settings, "ncp_sourcecommit_password", None)
+                    sc_password=getattr(settings, "ncp_sourcecommit_password", None),
+                    replicas=desired_replicas  # Pass DB replica count
                 )
                 _dbg("SC-MIRROR-SUCCESS", result=mirror_result)
                 manifest_updated = mirror_result.get("manifest_updated", False)

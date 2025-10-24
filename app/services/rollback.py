@@ -741,13 +741,19 @@ async def scale_deployment(
         skip_mirror=True  # Skip mirror since manifest was already updated above
     )
 
+    # Save replica count to DB for persistence across deployments/rollbacks
+    from .deployment_config import DeploymentConfigService
+    config_service = DeploymentConfigService()
+    config_service.set_replica_count(db, owner, repo, replicas, user_id)
+
     logger.info(
         "scaling_deployment_completed",
         owner=owner,
         repo=repo,
         replicas=replicas,
         old_replicas=old_replicas,
-        deploy_history_id=deploy_result.get("deploy_history_id")
+        deploy_history_id=deploy_result.get("deploy_history_id"),
+        saved_to_db=True
     )
 
     return {

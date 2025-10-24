@@ -108,6 +108,9 @@ class DeploymentHistory(Base):
     cluster_id = Column(String(255), nullable=True)
     cluster_name = Column(String(255), nullable=True)
     namespace = Column(String(255), nullable=True, default="default")
+
+    # 배포 구성 정보
+    replica_count = Column(Integer, nullable=True, default=1)  # 배포 시점의 replica 수
     
     # 시간 정보 (모두 한국 시간 KST로 저장)
     started_at = Column(DateTime, nullable=False, default=get_kst_now)
