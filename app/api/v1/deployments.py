@@ -610,7 +610,7 @@ async def get_scaling_history(
             history.append({
                 "id": record.id,
                 "replica_count": record.replica_count or 1,
-                "action": "rollback" if record.is_rollback else "deploy",
+                "action": record.operation_type or ("rollback" if record.is_rollback else "deploy"),
                 "status": record.status,
                 "image_tag": record.github_commit_sha[:7] if record.github_commit_sha else None,
                 "deployed_at": record.deployed_at.isoformat() if record.deployed_at else None,

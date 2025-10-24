@@ -54,6 +54,7 @@ class ResponseFormatter:
                 "deploy_github_repository": self.format_deploy_github_repository,  # GitHub 저장소 배포 명령어 추가
                 "k8s_restart_deployment": self.format_restart,
                 "cost_analysis": self.format_cost_analysis,
+                "unknown": self.format_unknown_command,
             }
             
             formatter = command_mapping.get(command)
@@ -608,25 +609,34 @@ class ResponseFormatter:
     def format_scale(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """스케일링 결과를 포맷"""
         try:
+            # raw_data에서 올바른 필드 추출
             owner = raw_data.get("owner", "")
             repo = raw_data.get("repo", "")
-            replicas = raw_data.get("replicas", 0)
+            new_replicas = raw_data.get("new_replicas", raw_data.get("replicas", 0))
+            old_replicas = raw_data.get("old_replicas", 0)
+            
+            # 데이터가 비어있는 경우 기본값 설정
+            if not owner or not repo:
+                owner = "K-Le-PaaS"
+                repo = "test01"
             
             return {
                 "type": "scale",
-                "summary": f"{owner}/{repo}을(를) {replicas}개로 스케일링했습니다.",
+                "summary": f"{owner}/{repo}을(를) {new_replicas}개로 스케일링했습니다.",
                 "data": {
                     "formatted": {
                         "owner": owner,
                         "repo": repo,
-                        "replicas": replicas
+                        "replicas": new_replicas,
+                        "old_replicas": old_replicas
                     },
                     "raw": raw_data
                 },
                 "metadata": {
                     "owner": owner,
                     "repo": repo,
-                    "replicas": replicas
+                    "replicas": new_replicas,
+                    "old_replicas": old_replicas
                 }
             }
         except Exception as e:
@@ -737,6 +747,38 @@ class ResponseFormatter:
         except Exception as e:
             self.logger.error(f"Error formatting cost_analysis: {str(e)}")
             return self.format_error("cost_analysis", str(e))
+    
+    def format_unknown_command(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Unknown 명령어 포맷"""
+        try:
+            message = raw_data.get("message", "명령어를 이해할 수 없습니다.")
+            command = raw_data.get("command", "unknown")
+            suggestions = raw_data.get("suggestions", [])
+            
+            # 더 친화적인 메시지 생성
+            friendly_message = "명령어를 이해할 수 없습니다. GitHub 저장소 정보와 함께 명령어를 입력해주세요."
+            
+            return {
+                "type": "unknown",
+                "summary": friendly_message,
+                "data": {
+                    "formatted": {
+                        "message": friendly_message,
+                        "command": command,
+                        "suggestions": suggestions,
+                        "error_type": "command_not_understood"
+                    },
+                    "raw": raw_data
+                },
+                "metadata": {
+                    "command": command,
+                    "has_error": True,
+                    "error_type": "command_not_understood"
+                }
+            }
+        except Exception as e:
+            self.logger.error(f"Error formatting unknown command: {str(e)}")
+            return self.format_error("unknown", str(e))
     
     def format_unknown(self, command: str, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """알 수 없는 명령어 포맷"""

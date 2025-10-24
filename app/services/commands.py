@@ -286,6 +286,17 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             },
         )
 
+    elif command == "unknown":
+        # unknown 명령어에 대한 처리
+        return CommandPlan(
+            tool="unknown",
+            args={
+                "command": req.command,
+                "message": "명령어를 이해할 수 없습니다. 올바른 형식으로 다시 입력해주세요."
+            },
+        )
+
+    else:
         raise ValueError(
             "[ERROR] 명령을 해석할 수 없습니다\n\n"
             "[지원 명령어] 지원하는 명령어:\n"
@@ -296,6 +307,24 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             "• 비용 분석: 비용 분석해줘\n\n"
             "[팁] 구체적인 리소스 이름과 함께 명령어를 입력해주세요"
         )
+
+
+async def _execute_unknown(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Unknown 명령어 처리
+    """
+    return {
+        "status": "error",
+        "message": "명령어를 이해할 수 없습니다. GitHub 저장소 정보와 함께 명령어를 입력해주세요.",
+        "command": args.get("command", "unknown"),
+        "suggestions": [
+            "K-Le-PaaS/test01 4개로 스케일링 해줘",
+            "K-Le-PaaS/test01 롤백 목록 보여줘", 
+            "K-Le-PaaS/test01 상태 확인",
+            "K-Le-PaaS/test01 로그 보여줘"
+        ],
+        "error_type": "command_not_understood"
+    }
 
 
 async def _execute_cost_analysis(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -573,6 +602,9 @@ async def _execute_raw_command(plan: CommandPlan) -> Dict[str, Any]:
 
     if plan.tool == "cost_analysis":
         return await _execute_cost_analysis(plan.args)
+
+    if plan.tool == "unknown":
+        return await _execute_unknown(plan.args)
 
     raise ValueError("지원하지 않는 실행 계획입니다.")
 

@@ -2731,6 +2731,27 @@ async def run_sourcedeploy(
             
             if not deployment_history_id:
                 # Create new history record
+                # Determine operation type
+                operation_type = "rollback" if is_rollback else "deploy"
+                
+                # Check if this is a scaling operation (same image tag, different replicas)
+                if not is_rollback and owner and repo:
+                    from .deployment_config import DeploymentConfigService
+                    config_service = DeploymentConfigService()
+                    current_replicas = config_service.get_replica_count(db, owner, repo, user_id)
+                    
+                    # Get previous deployment to compare
+                    previous_deployment = db.query(DeploymentHistory).filter(
+                        DeploymentHistory.github_owner == owner,
+                        DeploymentHistory.github_repo == repo,
+                        DeploymentHistory.status == "success"
+                    ).order_by(DeploymentHistory.created_at.desc()).first()
+                    
+                    if (previous_deployment and 
+                        previous_deployment.image_tag == effective_tag and 
+                        previous_deployment.replica_count != current_replicas):
+                        operation_type = "scale"
+                
                 history_record = DeploymentHistory(
                     user_id=user_id,
                     github_owner=owner,
@@ -2751,7 +2772,8 @@ async def run_sourcedeploy(
                     namespace="default",
                     started_at=get_kst_now(),
                     auto_deploy_enabled=True,
-                    is_rollback=is_rollback
+                    is_rollback=is_rollback,
+                    operation_type=operation_type
                 )
 
                 db.add(history_record)

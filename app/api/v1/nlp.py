@@ -438,11 +438,12 @@ async def process_conversation(
             # 명령어에 "○○" 같은 플레이스홀더가 있는지 확인
             if "○○" in request.command or "unknown" in request.command.lower():
                 error_message = (
-                    "❌ **프로젝트 정보가 불완전합니다**\n\n"
+                    "❌ **명령어를 이해할 수 없습니다**\n\n"
                     "🔍 **올바른 사용법:**\n"
+                    "• `K-Le-PaaS/test01 4개로 스케일링 해줘`\n"
                     "• `K-Le-PaaS/test01 롤백 목록 보여줘`\n"
-                    "• `owner/repo 롤백 목록`\n"
-                    "• `리포지토리명 롤백 목록`\n\n"
+                    "• `K-Le-PaaS/test01 상태 확인`\n"
+                    "• `K-Le-PaaS/test01 로그 보여줘`\n\n"
                     "💡 **팁:** GitHub 저장소의 owner/repo 형식으로 입력해주세요"
                 )
                 
@@ -1002,11 +1003,21 @@ async def confirm_action(
             f"session_id={request.session_id}"
         )
 
+        # 롤백 명령어인 경우 저장소 정보가 없으면 에러 메시지 개선
         if not github_owner or not github_repo:
-            error_msg = (
-                f"저장소 정보가 없습니다. 먼저 '저장소이름 롤백 목록' 명령으로 "
-                f"롤백할 저장소를 지정해주세요. (owner={github_owner}, repo={github_repo})"
-            )
+            if command == "rollback":
+                error_msg = (
+                    "❌ **롤백할 저장소 정보가 없습니다**\n\n"
+                    "🔍 **해결 방법:**\n"
+                    "• `K-Le-PaaS/test01 롤백 목록 보여줘` - 먼저 롤백 목록을 확인하세요\n"
+                    "• `K-Le-PaaS/test01 롤백해줘` - 저장소 정보와 함께 롤백 명령을 입력하세요\n\n"
+                    "💡 **팁:** GitHub 저장소의 owner/repo 형식으로 입력해주세요"
+                )
+            else:
+                error_msg = (
+                    f"저장소 정보가 없습니다. 먼저 '저장소이름 롤백 목록' 명령으로 "
+                    f"롤백할 저장소를 지정해주세요. (owner={github_owner}, repo={github_repo})"
+                )
             logger.error(error_msg)
             raise HTTPException(400, error_msg)
 
