@@ -401,13 +401,131 @@ async def process_conversation(
         intent = interpretation.get("intent")
         entities = interpretation.get("entities", {})
 
+        # 세션 조회 (컨텍스트 복원용)
+        session = await conv_manager.get_session(user_id, session_id)
+        session_context = session.get("context", {}) if session else {}
+
+        # owner/repo 정보 처리: entities에 있으면 저장, 없으면 컨텍스트에서 복원
+        owner = entities.get("github_owner")
+        repo = entities.get("github_repo")
+
+        if owner and repo:
+            # 새로 파싱된 정보를 컨텍스트에 저장
+            await conv_manager.update_context(
+                user_id, session_id,
+                {"github_owner": owner, "github_repo": repo}
+            )
+            logger.info(f"저장소 정보 컨텍스트 저장: {owner}/{repo}")
+        else:
+            # 컨텍스트에서 복원 시도
+            owner = session_context.get("github_owner")
+            repo = session_context.get("github_repo")
+            if owner and repo:
+                # entities에 복원된 정보 추가
+                entities["github_owner"] = owner
+                entities["github_repo"] = repo
+                logger.info(f"저장소 정보 컨텍스트에서 복원: {owner}/{repo}")
+            else:
+                logger.warning(f"저장소 정보 없음: intent={intent}, entities={entities}")
+
         # intent가 error인 경우 처리
         if intent == "error":
             logger.warning(f"명령 해석 실패: {request.command}")
             await conv_manager.update_state(
                 user_id, session_id, ConversationState.ERROR
             )
-            error_message = "죄송합니다. 명령을 이해하지 못했습니다. 다시 말씀해주시겠어요?"
+            
+            # 명령어에 "○○" 같은 플레이스홀더가 있는지 확인
+            if "○○" in request.command or "unknown" in request.command.lower():
+                error_message = (
+                    "❌ **프로젝트 정보가 불완전합니다**\n\n"
+                    "🔍 **올바른 사용법:**\n"
+                    "• `K-Le-PaaS/test01 롤백 목록 보여줘`\n"
+                    "• `owner/repo 롤백 목록`\n"
+                    "• `리포지토리명 롤백 목록`\n\n"
+                    "💡 **팁:** GitHub 저장소의 owner/repo 형식으로 입력해주세요"
+                )
+                
+                # 구조화된 에러 데이터 생성
+                error_data = {
+                    "error_type": "missing_info",
+                    "error_message": "프로젝트 정보가 불완전합니다",
+                    "solutions": [
+                        {
+                            "title": "프로젝트 이름을 정확히 입력하세요",
+                            "description": "GitHub 저장소의 owner/repo 형식으로 입력해주세요",
+                            "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
+                        },
+                        {
+                            "title": "리포지토리 연결 확인",
+                            "description": "GitHub에 연결된 프로젝트인지 확인해주세요",
+                            "example": "owner/repo 롤백 목록"
+                        }
+                    ],
+                    "supported_commands": [
+                        {
+                            "category": "롤백",
+                            "name": "롤백 목록 조회",
+                            "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
+                        },
+                        {
+                            "category": "배포",
+                            "name": "애플리케이션 배포",
+                            "example": "K-Le-PaaS/test01 배포해줘"
+                        }
+                    ]
+                }
+            else:
+                error_message = (
+                    "❌ **명령을 이해하지 못했습니다**\n\n"
+                    "🔍 **지원하는 명령어:**\n"
+                    "• **롤백**: `K-Le-PaaS/test01 롤백 목록 보여줘`\n"
+                    "• **배포**: `K-Le-PaaS/test01 배포해줘`\n"
+                    "• **Pod 관리**: `pod 목록 보여줘`\n"
+                    "• **서비스 관리**: `service 목록 보여줘`\n\n"
+                    "💡 **팁:** 구체적인 리소스 이름과 함께 명령어를 입력해주세요"
+                )
+                
+                # 구조화된 에러 데이터 생성
+                error_data = {
+                    "error_type": "uninterpretable",
+                    "error_message": "명령을 이해하지 못했습니다",
+                    "solutions": [
+                        {
+                            "title": "명령어 형식을 확인하세요",
+                            "description": "지원되는 명령어 형식으로 입력해주세요",
+                            "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
+                        },
+                        {
+                            "title": "리소스 이름을 명확히 하세요",
+                            "description": "구체적인 리소스 이름과 함께 명령어를 입력해주세요",
+                            "example": "nginx-pod 로그 보여줘"
+                        }
+                    ],
+                    "supported_commands": [
+                        {
+                            "category": "롤백",
+                            "name": "롤백 목록 조회",
+                            "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
+                        },
+                        {
+                            "category": "배포",
+                            "name": "애플리케이션 배포",
+                            "example": "K-Le-PaaS/test01 배포해줘"
+                        },
+                        {
+                            "category": "Pod 관리",
+                            "name": "Pod 목록 조회",
+                            "example": "pod 목록 보여줘"
+                        },
+                        {
+                            "category": "서비스 관리",
+                            "name": "서비스 목록 조회",
+                            "example": "service 목록 보여줘"
+                        }
+                    ]
+                }
+            
             await conv_manager.add_message(
                 user_id, session_id,
                 "assistant", error_message,
@@ -420,7 +538,19 @@ async def process_conversation(
                 requires_confirmation=False,
                 cost_estimate=None,
                 pending_action=None,
-                result=None
+                result={
+                    "type": "command_error",
+                    "summary": error_message,
+                    "data": {
+                        "formatted": error_data,
+                        "raw": {"command": request.command, "error": error_message}
+                    },
+                    "metadata": {
+                        "error_type": error_data["error_type"],
+                        "timestamp": datetime.now().isoformat(),
+                        "command": request.command
+                    }
+                }
             )
 
         logger.info(f"명령 해석 완료: intent={intent}, entities={entities}")
@@ -526,8 +656,116 @@ async def process_conversation(
                 steps_back=entities.get("steps_back", 0)
             )
 
-            plan = plan_command(req)
-            result = await execute_command(plan)
+            try:
+                plan = plan_command(req)
+                result = await execute_command(plan)
+            except ValueError as e:
+                logger.error(f"명령 계획 실패: {str(e)}")
+                await conv_manager.update_state(
+                    user_id, session_id, ConversationState.ERROR
+                )
+                
+                # ValueError를 새로운 에러 타입으로 변환
+                error_message = str(e)
+                
+                # 에러 타입 결정
+                if "프로젝트 정보가 필요합니다" in error_message:
+                    error_type = "missing_info"
+                    error_data = {
+                        "error_type": "missing_info",
+                        "error_message": "프로젝트 정보가 불완전합니다",
+                        "solutions": [
+                            {
+                                "title": "프로젝트 이름을 정확히 입력하세요",
+                                "description": "GitHub 저장소의 owner/repo 형식으로 입력해주세요",
+                                "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
+                            },
+                            {
+                                "title": "리포지토리 연결 확인",
+                                "description": "GitHub에 연결된 프로젝트인지 확인해주세요",
+                                "example": "owner/repo 롤백 목록"
+                            }
+                        ],
+                        "supported_commands": [
+                            {
+                                "category": "롤백",
+                                "name": "롤백 목록 조회",
+                                "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
+                            },
+                            {
+                                "category": "배포",
+                                "name": "애플리케이션 배포",
+                                "example": "K-Le-PaaS/test01 배포해줘"
+                            }
+                        ]
+                    }
+                else:
+                    error_type = "uninterpretable"
+                    error_data = {
+                        "error_type": "uninterpretable",
+                        "error_message": "명령을 이해하지 못했습니다",
+                        "solutions": [
+                            {
+                                "title": "명령어 형식을 확인하세요",
+                                "description": "지원되는 명령어 형식으로 입력해주세요",
+                                "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
+                            },
+                            {
+                                "title": "리소스 이름을 명확히 하세요",
+                                "description": "구체적인 리소스 이름과 함께 명령어를 입력해주세요",
+                                "example": "nginx-pod 로그 보여줘"
+                            }
+                        ],
+                        "supported_commands": [
+                            {
+                                "category": "롤백",
+                                "name": "롤백 목록 조회",
+                                "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
+                            },
+                            {
+                                "category": "배포",
+                                "name": "애플리케이션 배포",
+                                "example": "K-Le-PaaS/test01 배포해줘"
+                            },
+                            {
+                                "category": "Pod 관리",
+                                "name": "Pod 목록 조회",
+                                "example": "pod 목록 보여줘"
+                            },
+                            {
+                                "category": "서비스 관리",
+                                "name": "서비스 목록 조회",
+                                "example": "service 목록 보여줘"
+                            }
+                        ]
+                    }
+                
+                await conv_manager.add_message(
+                    user_id, session_id,
+                    "assistant", error_message,
+                    action="error"
+                )
+                return ConversationResponse(
+                    session_id=session_id,
+                    state=ConversationState.ERROR.value,
+                    message=error_message,
+                    requires_confirmation=False,
+                    cost_estimate=None,
+                    pending_action=None,
+                    result={
+                        "type": "command_error",
+                        "summary": error_message,
+                        "data": {
+                            "formatted": error_data,
+                            "raw": {"command": request.command, "error": error_message}
+                        },
+                        "metadata": {
+                            "error_type": error_data["error_type"],
+                            "timestamp": datetime.now().isoformat(),
+                            "command": request.command
+                        }
+                    }
+                )
 
             await conv_manager.update_state(
                 user_id, session_id, ConversationState.COMPLETED
@@ -750,6 +988,28 @@ async def confirm_action(
 
         # CommandRequest 생성
         params = pending_action["parameters"]
+
+        # 세션 컨텍스트에서 owner/repo 복원 (파라미터에 없으면)
+        context = session.get("context", {})
+        github_owner = params.get("github_owner") or context.get("github_owner") or ""
+        github_repo = params.get("github_repo") or context.get("github_repo") or ""
+
+        logger.info(
+            f"확인 처리 시 저장소 정보 확인: "
+            f"owner={github_owner}, repo={github_repo}, "
+            f"params.owner={params.get('github_owner')}, "
+            f"context.owner={context.get('github_owner')}, "
+            f"session_id={request.session_id}"
+        )
+
+        if not github_owner or not github_repo:
+            error_msg = (
+                f"저장소 정보가 없습니다. 먼저 '저장소이름 롤백 목록' 명령으로 "
+                f"롤백할 저장소를 지정해주세요. (owner={github_owner}, repo={github_repo})"
+            )
+            logger.error(error_msg)
+            raise HTTPException(400, error_msg)
+
         req = CommandRequest(
             command=pending_action["type"],
             pod_name=params.get("pod_name") or "",
@@ -760,8 +1020,8 @@ async def confirm_action(
             version=params.get("version") or "",
             namespace=params.get("namespace") or "default",
             previous=bool(params.get("previous", False)),
-            github_owner=params.get("github_owner") or "",
-            github_repo=params.get("github_repo") or "",
+            github_owner=github_owner,
+            github_repo=github_repo,
             target_commit_sha=params.get("target_commit_sha") or "",
             steps_back=params.get("steps_back") or 0
         )
@@ -784,7 +1044,28 @@ async def confirm_action(
         # 대기 중인 작업 제거
         await conv_manager.clear_pending_action(user_id, request.session_id)
 
-        result_message = f"작업이 완료되었습니다: {result.get('message', '')}"
+        # 롤백 완료 시 특별한 메시지 처리
+        if result.get('action') == 'ncp_rollback_to_previous' or result.get('action') == 'ncp_rollback_to_commit':
+            # 롤백 성공 메시지 생성
+            target_commit = result.get('target_commit_short', '')
+            owner = result.get('owner', '')
+            repo = result.get('repo', '')
+            
+            if target_commit:
+                result_message = f"✅ 롤백이 성공적으로 완료되었습니다!\n\n"
+                result_message += f"📦 **프로젝트**: {owner}/{repo}\n"
+                result_message += f"🔄 **롤백된 커밋**: {target_commit}\n"
+                result_message += f"🚀 **상태**: 배포 완료\n\n"
+                result_message += f"이전 배포로 성공적으로 롤백되었습니다."
+            else:
+                result_message = f"✅ 롤백이 성공적으로 완료되었습니다!\n\n"
+                result_message += f"📦 **프로젝트**: {owner}/{repo}\n"
+                result_message += f"🚀 **상태**: 배포 완료\n\n"
+                result_message += f"이전 배포로 성공적으로 롤백되었습니다."
+        else:
+            # 일반적인 작업 완료 메시지
+            result_message = f"작업이 완료되었습니다: {result.get('message', '')}"
+        
         await conv_manager.add_message(
             user_id, request.session_id,
             "assistant", result_message,

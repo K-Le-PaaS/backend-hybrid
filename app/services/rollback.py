@@ -237,6 +237,15 @@ async def rollback_to_commit(
 
     # 7. Rollback history is automatically recorded by run_sourcedeploy() with is_rollback=True
     # No need for duplicate recording here - ncp_pipeline.py already handles it
+    
+    # 롤백 완료 후 데이터베이스 트랜잭션 확실히 커밋
+    try:
+        db.commit()
+        logger.info("Rollback database transaction committed successfully")
+    except Exception as e:
+        logger.error(f"Failed to commit rollback transaction: {str(e)}")
+        db.rollback()
+    
     logger.info(
         "rollback_deployment_initiated",
         owner=owner,
@@ -471,36 +480,62 @@ async def get_rollback_list(
     limit: int = 10
 ) -> Dict[str, Any]:
     """
-    롤백 목록 조회: 현재 배포 상태, 롤백 가능한 버전, 최근 롤백 히스토리
-    
-    Args:
-        owner: GitHub repository owner
-        repo: GitHub repository name
-        db: Database session
-        limit: 조회할 최대 버전 수
-    
-    Returns:
-        현재 상태, 롤백 가능 버전, 롤백 히스토리를 포함한 딕셔너리
+    롤백 목록 조회 내부 로직
     """
     # 1. 현재 배포 상태 조회 (가장 최근 성공한 배포, 롤백 포함)
+    # 롤백 완료 직후에는 deployed_at이 None일 수 있으므로 created_at 우선으로 조회
     current_deployment = db.query(DeploymentHistory).filter(
         DeploymentHistory.github_owner == owner,
         DeploymentHistory.github_repo == repo,
         DeploymentHistory.status == "success"
     ).order_by(
-        DeploymentHistory.deployed_at.desc()
+        DeploymentHistory.created_at.desc()  # created_at 우선으로 정렬
     ).first()
+    
+    # 롤백 완료 직후 deployed_at이 아직 설정되지 않은 경우를 위해
+    # running 상태의 롤백 배포도 고려
+    if not current_deployment:
+        current_deployment = db.query(DeploymentHistory).filter(
+            DeploymentHistory.github_owner == owner,
+            DeploymentHistory.github_repo == repo,
+            DeploymentHistory.status == "running",
+            DeploymentHistory.is_rollback == True
+        ).order_by(
+            DeploymentHistory.created_at.desc()
+        ).first()
+    
+    # 마지막 시도: 최근 배포 이력 (상태 무관)
+    if not current_deployment:
+        current_deployment = db.query(DeploymentHistory).filter(
+            DeploymentHistory.github_owner == owner,
+            DeploymentHistory.github_repo == repo
+        ).order_by(
+            DeploymentHistory.created_at.desc()
+        ).first()
     
     current_state = None
     if current_deployment:
-        current_state = {
-            "commit_sha": current_deployment.github_commit_sha,
-            "commit_sha_short": current_deployment.github_commit_sha[:7] if current_deployment.github_commit_sha else "unknown",
-            "commit_message": current_deployment.github_commit_message or "메시지 없음",
-            "deployed_at": current_deployment.deployed_at.isoformat() if current_deployment.deployed_at else None,
-            "is_rollback": current_deployment.is_rollback,
-            "deployment_id": current_deployment.id
-        }
+        try:
+            logger.info(f"get_rollback_list - Found current_deployment: id={current_deployment.id}, "
+                       f"commit={current_deployment.github_commit_sha}, "
+                       f"status={current_deployment.status}, "
+                       f"is_rollback={current_deployment.is_rollback}, "
+                       f"deployed_at={current_deployment.deployed_at}")
+
+            current_state = {
+                "commit_sha": current_deployment.github_commit_sha or "",
+                "commit_sha_short": current_deployment.github_commit_sha[:7] if current_deployment.github_commit_sha else "unknown",
+                "commit_message": current_deployment.github_commit_message or "메시지 없음",
+                "deployed_at": current_deployment.deployed_at.isoformat() if current_deployment.deployed_at else None,
+                "is_rollback": current_deployment.is_rollback or False,
+                "deployment_id": current_deployment.id
+            }
+            logger.info(f"get_rollback_list - Created current_state: {current_state}")
+        except Exception as e:
+            logger.error(f"Error processing current deployment: {str(e)}", exc_info=True)
+            current_state = None
+    else:
+        logger.warning(f"get_rollback_list - No current_deployment found for {owner}/{repo}")
     
     # 2. 롤백 가능한 버전 목록 (원본 배포만, is_rollback=False)
     original_deployments = db.query(DeploymentHistory).filter(
@@ -516,17 +551,21 @@ async def get_rollback_list(
     current_commit_short = current_deployment.github_commit_sha[:7] if current_deployment and current_deployment.github_commit_sha else ""
     
     for idx, dep in enumerate(original_deployments):
-        dep_commit_short = dep.github_commit_sha[:7] if dep.github_commit_sha else ""
-        is_current = (dep_commit_short == current_commit_short)
-        
-        available_versions.append({
-            "steps_back": idx,
-            "commit_sha": dep.github_commit_sha,
-            "commit_sha_short": dep_commit_short,
-            "commit_message": dep.github_commit_message or "메시지 없음",
-            "deployed_at": dep.deployed_at.isoformat() if dep.deployed_at else None,
-            "is_current": is_current
-        })
+        try:
+            dep_commit_short = dep.github_commit_sha[:7] if dep.github_commit_sha else ""
+            is_current = (dep_commit_short == current_commit_short)
+            
+            available_versions.append({
+                "steps_back": idx,
+                "commit_sha": dep.github_commit_sha or "",
+                "commit_sha_short": dep_commit_short,
+                "commit_message": dep.github_commit_message or "메시지 없음",
+                "deployed_at": dep.deployed_at.isoformat() if dep.deployed_at else None,
+                "is_current": is_current
+            })
+        except Exception as e:
+            logger.error(f"Error processing deployment {idx}: {str(e)}")
+            continue
     
     # 3. 최근 롤백 히스토리 (is_rollback=True, 최대 5개)
     recent_rollbacks = db.query(DeploymentHistory).filter(
@@ -540,12 +579,16 @@ async def get_rollback_list(
     
     rollback_history = []
     for rb in recent_rollbacks:
-        rollback_history.append({
-            "commit_sha_short": rb.github_commit_sha[:7] if rb.github_commit_sha else "unknown",
-            "commit_message": rb.github_commit_message or "메시지 없음",
-            "rolled_back_at": rb.deployed_at.isoformat() if rb.deployed_at else None,
-            "rollback_from_id": rb.rollback_from_id
-        })
+        try:
+            rollback_history.append({
+                "commit_sha_short": rb.github_commit_sha[:7] if rb.github_commit_sha else "unknown",
+                "commit_message": rb.github_commit_message or "메시지 없음",
+                "rolled_back_at": rb.deployed_at.isoformat() if rb.deployed_at else None,
+                "rollback_from_id": rb.rollback_from_id
+            })
+        except Exception as e:
+            logger.error(f"Error processing rollback history: {str(e)}")
+            continue
     
     return {
         "owner": owner,

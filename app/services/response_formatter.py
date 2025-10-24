@@ -114,12 +114,70 @@ class ResponseFormatter:
     def format_rollback_list(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """롤백 목록을 타임라인 형식으로 포맷"""
         try:
+            # 안전한 데이터 접근
+            if not raw_data:
+                return self.format_error("list_rollback", "데이터가 없습니다")
+
+            # 디버깅 로그
+            self.logger.debug(f"format_rollback_list - raw_data keys: {raw_data.keys()}")
+
+            # 롤백 실행 응답과 롤백 목록 조회 응답 구분 처리
+            # 롤백 실행: {'status': 'success', 'action': 'ncp_rollback_to_commit', 'message': '...', 'result': {...}}
+            # 롤백 목록: {'status': 'success', 'message': '...', 'data': {'owner': ..., 'current_state': ...}}
+            if 'action' in raw_data and raw_data.get('action') in ['ncp_rollback_to_commit', 'rollback']:
+                # 이것은 롤백 실행 결과이므로 그대로 반환 (이미 포맷됨)
+                self.logger.warning(f"format_rollback_list called with rollback execution result, returning as-is")
+                return {
+                    "type": "rollback_execution",
+                    "summary": raw_data.get("message", "롤백이 실행되었습니다."),
+                    "data": {
+                        "formatted": {
+                            "status": raw_data.get("status"),
+                            "action": raw_data.get("action"),
+                            "owner": raw_data.get("owner"),
+                            "repo": raw_data.get("repo"),
+                            "target_commit": raw_data.get("target_commit_short")
+                        },
+                        "raw": raw_data
+                    },
+                    "metadata": {
+                        "is_execution_result": True
+                    }
+                }
+
             data = raw_data.get("data", {})
+            self.logger.debug(f"format_rollback_list - data: {data}")
+
+            if not data:
+                self.logger.error(f"format_rollback_list - data is empty! raw_data keys: {raw_data.keys()}")
+                return self.format_error("list_rollback", "롤백 데이터가 없습니다")
+            
             owner = data.get("owner", "")
             repo = data.get("repo", "")
             current_state = data.get("current_state", {})
             available_versions = data.get("available_versions", [])
             rollback_history = data.get("rollback_history", [])
+            
+            # current_state가 None인 경우 처리
+            if not current_state:
+                return {
+                    "type": "list_rollback",
+                    "summary": f"[INFO] **{owner}/{repo}** 프로젝트의 배포 이력을 찾을 수 없습니다.",
+                    "data": {
+                        "formatted": {
+                            "current": None,
+                            "versions": [],
+                            "history": []
+                        },
+                        "raw": raw_data
+                    },
+                    "metadata": {
+                        "owner": owner,
+                        "repo": repo,
+                        "total_available": 0,
+                        "total_rollbacks": 0
+                    }
+                }
             
             # 현재 상태 포맷
             current_formatted = {
@@ -213,6 +271,59 @@ class ResponseFormatter:
         except Exception as e:
             self.logger.error(f"Error formatting status: {str(e)}")
             return self.format_error("status", str(e))
+    
+    def format_rollback_execution(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """롤백 실행 결과를 카드 형식으로 포맷"""
+        try:
+            action = raw_data.get("action", "")
+            owner = raw_data.get("owner", "")
+            repo = raw_data.get("repo", "")
+            target_commit = raw_data.get("target_commit_short", "")
+            status = raw_data.get("status", "")
+            
+            # 롤백 타입에 따른 메시지 생성
+            if "to_commit" in action:
+                action_type = "커밋 기반 롤백"
+                action_description = f"커밋 {target_commit}로 롤백"
+            elif "to_previous" in action:
+                action_type = "이전 버전 롤백"
+                action_description = "이전 배포로 롤백"
+            else:
+                action_type = "롤백 실행"
+                action_description = "롤백 완료"
+            
+            return {
+                "type": "rollback_execution",
+                "summary": f"✅ **{owner}/{repo}** 롤백이 성공적으로 완료되었습니다",
+                "data": {
+                    "formatted": {
+                        "action_type": action_type,
+                        "action_description": action_description,
+                        "project": f"{owner}/{repo}",
+                        "target_commit": target_commit,
+                        "status": status,
+                        "timestamp": self._format_datetime(raw_data.get("timestamp", "")),
+                        "details": {
+                            "owner": owner,
+                            "repo": repo,
+                            "target_commit_full": raw_data.get("target_commit", ""),
+                            "action": action,
+                            "status": status
+                        }
+                    },
+                    "raw": raw_data
+                },
+                "metadata": {
+                    "owner": owner,
+                    "repo": repo,
+                    "action_type": action_type,
+                    "target_commit": target_commit,
+                    "status": status
+                }
+            }
+        except Exception as e:
+            self.logger.error(f"Error formatting rollback_execution: {str(e)}")
+            return self.format_error("rollback_execution", str(e))
     
     def format_logs(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """로그를 읽기 쉬운 형식으로 포맷"""
