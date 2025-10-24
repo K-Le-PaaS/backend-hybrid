@@ -100,6 +100,14 @@ class GeminiClient(LLMClient):
                 entities["github_owner"] = parameters.get("owner", "")
                 entities["github_repo"] = parameters.get("repo", "")
 
+            # 배포 파라미터
+            if command == "deploy":
+                # GitHub 저장소 정보 (필수)
+                entities["github_owner"] = parameters.get("owner", "")
+                entities["github_repo"] = parameters.get("repo", "")
+                # 브랜치 (선택, 기본값 main)
+                entities["branch"] = parameters.get("branch", "main")
+
             # 로그 관련 옵션: lines, previous
             if command == "logs":
                 raw_lines = parameters.get("lines", 30)
@@ -318,12 +326,39 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 - "myorg/myapp 배포 이력" → { "command": "list_rollback", "parameters": { "owner": "myorg", "repo": "myapp" } }
 
 7. 배포 (command: "deploy")
-설명: 사용자의 최신 코드를 빌드하고 클러스터에 배포합니다.
+설명: GitHub 저장소의 최신 main 브랜치 커밋을 빌드하고 클러스터에 배포합니다.
+중요: GitHub 저장소(owner/repo) 정보가 반드시 필요합니다.
+
 사용자 입력 예시:
-- 기본 표현: "배포해줘", "최신 코드로 업데이트해줘"
-- 자연스러운 표현: "앱 배포", "서비스 배포", "최신 버전 배포"
-- 다양한 뉘앙스: "앱 업데이트", "서비스 업데이트", "새 버전 배포", "코드 배포", "앱 새로 배포", "서비스 새로 올려줘", "최신 코드 반영", "앱 새로고침"
-필수 JSON 형식: { "command": "deploy", "parameters": { "deploymentName": "<추출된_배포이름>" } }
+- **저장소 지정 패턴** (권장):
+  * "K-Le-PaaS/test01 배포해줘"
+  * "owner/repo 배포"
+  * "myorg/myapp 최신 코드로 배포해줘"
+  * "저장소 K-Le-PaaS/backend-hybrid 배포"
+  * "test01 저장소 배포해줘"
+
+- **간단한 패턴** (저장소 정보 필수):
+  * "test01 배포해줘" → owner는 컨텍스트에서 추론
+  * "backend 배포" → owner는 컨텍스트에서 추론
+
+- **자연스러운 표현**:
+  * "최신 코드로 업데이트해줘"
+  * "앱 배포", "서비스 배포", "최신 버전 배포"
+  * "앱 업데이트", "서비스 업데이트", "새 버전 배포"
+  * "코드 배포", "앱 새로 배포", "서비스 새로 올려줘"
+  * "최신 코드 반영", "앱 새로고침"
+
+추출 규칙:
+1. **owner/repo 패턴 추출**: "owner/repo", "저장소명", "myorg/myapp" 등에서 GitHub 저장소 정보 추출
+2. **간단한 repo 이름**: "test01 배포" → repo="test01", owner는 컨텍스트 또는 빈 문자열
+3. **브랜치**: 명시되지 않으면 기본값 "main" 사용
+
+필수 JSON 형식: { "command": "deploy", "parameters": { "owner": "<추출된_GitHub_owner>", "repo": "<추출된_GitHub_repo>", "branch": "<추출된_브랜치_없으면_'main'>" } }
+
+예시 변환:
+- "K-Le-PaaS/test01 배포해줘" → { "command": "deploy", "parameters": { "owner": "K-Le-PaaS", "repo": "test01", "branch": "main" } }
+- "test01 배포" → { "command": "deploy", "parameters": { "owner": "", "repo": "test01", "branch": "main" } }
+- "myorg/backend-hybrid 최신 코드로 배포" → { "command": "deploy", "parameters": { "owner": "myorg", "repo": "backend-hybrid", "branch": "main" } }
 
 8. 통합 대시보드 조회 (command: "overview")
 설명: 특정 네임스페이스의 모든 리소스를 한번에 조회하는 명령입니다 (Deployment, Pod, Service, Ingress).

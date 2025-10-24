@@ -56,7 +56,6 @@ class ActionClassifier:
     # 비용 추정이 필요한 명령어
     COST_ESTIMATION_COMMANDS = {
         "scale",      # 리소스 증가/감소
-        "deploy",     # 새 배포 (빌드 비용)
         "delete",     # 리소스 제거 (절감 비용)
     }
 
@@ -70,7 +69,7 @@ class ActionClassifier:
         "deploy": {
             "title": "배포 확인",
             "icon": "🚀",
-            "message_template": "{owner}/{repo}를 배포하시겠습니까?"
+            "message_template": "{github_owner}/{github_repo}를 배포하시겠습니까?"
         },
         "restart": {
             "title": "재시작 확인",

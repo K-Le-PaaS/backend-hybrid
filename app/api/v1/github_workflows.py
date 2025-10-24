@@ -790,8 +790,122 @@ async def get_webhook_status(
         raise
     except Exception as e:
         raise HTTPException(
-            status_code=500, 
+            status_code=500,
             detail=f"웹훅 상태 조회 실패: {str(e)}"
+        )
+
+
+class ManualDeployRequest(BaseModel):
+    """수동 배포 요청 모델"""
+    github_owner: str = Field(..., description="GitHub repository owner")
+    github_repo: str = Field(..., description="GitHub repository name")
+    branch: str = Field(default="main", description="Branch to deploy (default: main)")
+
+
+@router.post("/github/manual-deploy")
+async def manual_deploy(
+    request: ManualDeployRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """수동 배포 트리거 (자연어 또는 프론트엔드 버튼)"""
+    try:
+        owner = request.github_owner
+        repo = request.github_repo
+        branch = request.branch
+
+        logger.info(f"Manual deploy requested for {owner}/{repo} (branch: {branch}) by user {current_user.get('id')}")
+
+        # 1. UserProjectIntegration에서 연동 정보 조회
+        integration = db.query(UserProjectIntegration).filter(
+            UserProjectIntegration.github_owner == owner,
+            UserProjectIntegration.github_repo == repo,
+            UserProjectIntegration.user_id == str(current_user["id"])
+        ).first()
+
+        if not integration:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Repository {owner}/{repo} is not integrated for this user"
+            )
+
+        # 2. GitHub API로 최신 커밋 정보 가져오기
+        try:
+            commit_info = await github_app_auth.get_latest_commit(owner, repo, branch, db)
+        except Exception as e:
+            logger.error(f"Failed to fetch latest commit: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to fetch latest commit: {str(e)}"
+            )
+
+        # 3. 웹훅 payload 형식으로 데이터 구성
+        payload = {
+            "ref": f"refs/heads/{branch}",
+            "head_commit": {
+                "id": commit_info["sha"],
+                "message": commit_info["message"],
+                "author": {
+                    "name": commit_info["author"]["name"],
+                    "email": commit_info["author"].get("email", ""),
+                },
+                "url": commit_info["url"],
+                "timestamp": commit_info["timestamp"],
+            },
+            "pusher": {
+                "name": "manual-deploy",  # 수동 배포 식별자
+            },
+            "repository": {
+                "full_name": f"{owner}/{repo}",
+            }
+        }
+
+        logger.info(f"Manual deploy payload created for commit {commit_info['sha'][:7]}")
+
+        # 4. handle_push_webhook 함수를 백그라운드 태스크로 실행
+        from ...database import SessionLocal
+
+        def run_async_in_thread(coro_func, *args, **kwargs):
+            """백그라운드 스레드에서 비동기 함수 실행"""
+            session = SessionLocal()
+            try:
+                # 통합 객체는 스레드 세이프하게 재조회
+                integ = session.query(UserProjectIntegration).filter(
+                    UserProjectIntegration.id == integration.id
+                ).first()
+                if integ is None:
+                    logger.error(f"Integration {integration.id} not found in background task")
+                    return
+                asyncio.run(coro_func(*args, **kwargs, db=session, integration=integ))
+            finally:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
+        # 백그라운드로 배포 실행
+        background_tasks.add_task(run_async_in_thread, handle_push_webhook, payload)
+
+        # 5. 즉시 응답 반환
+        return {
+            "status": "started",
+            "message": "Deployment started",
+            "repository": f"{owner}/{repo}",
+            "branch": branch,
+            "commit": {
+                "sha": commit_info["sha"],
+                "message": commit_info["message"][:100],  # 메시지 일부만
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Manual deploy failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Manual deploy failed: {str(e)}"
         )
 
 
