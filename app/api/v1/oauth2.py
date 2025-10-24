@@ -327,3 +327,48 @@ async def get_current_user(token: str = Query(..., description="JWT 토큰")):
         raise HTTPException(status_code=401, detail="토큰이 만료되었습니다")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다")
+
+
+class AdminLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@router.post("/admin/login")
+async def admin_login(request: AdminLoginRequest):
+    """Admin 계정 로그인 (하드코딩된 자격증명)"""
+    # 하드코딩된 admin 자격증명
+    ADMIN_USERNAME = "admin"
+    ADMIN_PASSWORD = "klepaas"
+    ADMIN_USER_ID = "admin_user"
+
+    if request.username != ADMIN_USERNAME or request.password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="잘못된 사용자명 또는 비밀번호입니다")
+
+    # Admin 사용자 정보 생성
+    user_info = {
+        "provider": "admin",
+        "provider_id": ADMIN_USER_ID,
+        "email": "admin@klepaas.local",
+        "name": "Admin User",
+        "picture": None,
+        "verified": True
+    }
+
+    # JWT 토큰 생성
+    jwt_token = create_jwt_token(user_info)
+
+    logger.info("Admin login success", extra={"username": request.username})
+    return {
+        "success": True,
+        "access_token": jwt_token,
+        "user": {
+            "id": ADMIN_USER_ID,
+            "provider_id": ADMIN_USER_ID,
+            "email": user_info["email"],
+            "name": user_info["name"],
+            "picture": user_info["picture"],
+            "provider": user_info["provider"]
+        },
+        "message": "Admin 로그인이 성공했습니다!"
+    }
