@@ -55,8 +55,20 @@ class GeminiClient(LLMClient):
             # 스케일링 복제수 및 GitHub 저장소 정보
             if command == "scale":
                 # GitHub 저장소 정보 (필수)
-                entities["github_owner"] = parameters.get("owner", "")
-                entities["github_repo"] = parameters.get("repo", "")
+                owner = parameters.get("owner", "")
+                repo = parameters.get("repo", "")
+                
+                # owner/repo가 비어있는 경우 에러 처리
+                if not owner or not repo:
+                    entities["error"] = "GitHub 저장소 정보가 필요합니다. 'K-Le-PaaS/test01 4개로 스케일링 해줘' 형식으로 입력해주세요."
+                    return {
+                        "intent": "error",
+                        "entities": entities,
+                        "message": entities["error"]
+                    }
+                
+                entities["github_owner"] = owner
+                entities["github_repo"] = repo
 
                 # 복제수 파싱
                 raw_replicas = parameters.get("replicas", 1)
@@ -73,8 +85,20 @@ class GeminiClient(LLMClient):
             # NCP 롤백 파라미터
             if command == "rollback":
                 # GitHub 저장소 정보 (필수)
-                entities["github_owner"] = parameters.get("owner", "")
-                entities["github_repo"] = parameters.get("repo", "")
+                owner = parameters.get("owner", "")
+                repo = parameters.get("repo", "")
+                
+                # owner/repo가 비어있는 경우 에러 처리
+                if not owner or not repo:
+                    entities["error"] = "GitHub 저장소 정보가 필요합니다. 'K-Le-PaaS/test01 롤백해줘' 형식으로 입력해주세요."
+                    return {
+                        "intent": "error",
+                        "entities": entities,
+                        "message": entities["error"]
+                    }
+                
+                entities["github_owner"] = owner
+                entities["github_repo"] = repo
 
                 # 커밋 SHA (선택: commitSha가 있으면 커밋 기반 롤백)
                 commit_sha = parameters.get("commitSha")
@@ -103,8 +127,20 @@ class GeminiClient(LLMClient):
             # 배포 파라미터
             if command == "deploy":
                 # GitHub 저장소 정보 (필수)
-                entities["github_owner"] = parameters.get("owner", "")
-                entities["github_repo"] = parameters.get("repo", "")
+                owner = parameters.get("owner", "")
+                repo = parameters.get("repo", "")
+                
+                # owner/repo가 비어있는 경우 에러 처리
+                if not owner or not repo:
+                    entities["error"] = "GitHub 저장소 정보가 필요합니다. 'K-Le-PaaS/test01 배포해줘' 형식으로 입력해주세요."
+                    return {
+                        "intent": "error",
+                        "entities": entities,
+                        "message": entities["error"]
+                    }
+                
+                entities["github_owner"] = owner
+                entities["github_repo"] = repo
                 # 브랜치 (선택, 기본값 main)
                 entities["branch"] = parameters.get("branch", "main")
 
@@ -251,6 +287,8 @@ class GeminiClient(LLMClient):
 사용자 입력 예시:
 - **저장소 지정 패턴** (권장):
   * "K-Le-PaaS/test01을 3개로 늘려줘"
+  * "K-Le-PaaS/test01 4개로 스케일링 해줘"
+  * "K-Le-Paas/test01 4개로 스케일링 해줘"
   * "owner/repo 레플리카 5개로 스케일"
   * "myorg/myapp 서버 2개로 줄여"
   * "저장소 K-Le-PaaS/backend-hybrid을 4개로 확장"
@@ -259,6 +297,15 @@ class GeminiClient(LLMClient):
 - **간단한 패턴** (저장소 정보 필수):
   * "test01을 3개로 늘려줘" → owner는 컨텍스트에서 추론
   * "backend 5개로 스케일" → owner는 컨텍스트에서 추론
+
+- **스케일링 키워드 감지**:
+  * "스케일링", "스케일", "scale", "레플리카", "replicas", "개로", "개로 조정", "개로 늘려", "개로 줄여"
+  * "서버 개수", "인스턴스 개수", "pod 개수", "컨테이너 개수"
+
+추출 규칙:
+1. **스케일링 키워드**: "스케일링", "스케일", "scale", "레플리카", "replicas", "개로", "개로 조정", "개로 늘려", "개로 줄여" 등이 있으면 scale 명령으로 인식
+2. **owner/repo 패턴**: "K-Le-PaaS/test01", "owner/repo", "저장소명" 등에서 GitHub 저장소 정보 추출
+3. **숫자 추출**: "3개", "4개", "5개로" 등에서 숫자 추출 (1-100 범위)
 
 필수 JSON 형식: { "command": "scale", "parameters": { "owner": "<GitHub_저장소_소유자>", "repo": "<GitHub_저장소_이름>", "replicas": <추출된_숫자> } }
 
@@ -271,6 +318,18 @@ A) 커밋 해시로 롤백: 특정 커밋 SHA를 지정하여 해당 버전으�
 B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포로 롤백
 
 사용자 입력 예시:
+- **저장소 지정 패턴** (권장):
+  * "K-Le-PaaS/test01 롤백해줘"
+  * "K-Le-PaaS/test01 롤백 목록 보여줘"
+  * "K-Le-PaaS/test01을 3번 전으로 롤백"
+  * "K-Le-PaaS/test01 커밋 abc1234로 롤백"
+  * "myorg/myapp 롤백해줘"
+  * "저장소 K-Le-PaaS/backend-hybrid 롤백"
+
+- **간단한 패턴** (저장소 정보 필수):
+  * "test01 롤백해줘" → owner는 컨텍스트에서 추론
+  * "backend 롤백" → owner는 컨텍스트에서 추론
+
 - **커밋 해시 패턴**:
   * "owner/repo를 커밋 abc1234로 롤백해줘"
   * "myorg/myapp을 abc1234 커밋으로 되돌려"
@@ -283,25 +342,30 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
   * "K-Le-PaaS/backend-hybrid 이전 배포로 복구" (1번 전으로 해석)
   * "저장소 owner/repo를 5번 전으로 롤백"
   * "owner/repo 바로 이전 버전으로 되돌려" (1번 전)
+  * **"5번 전으로 롤백해줘" (owner/repo 없음, 컨텍스트에서 추론)**
+  * **"3번 전으로 되돌려" (owner/repo 없음, 컨텍스트에서 추론)**
+  * **"이전 버전으로 롤백" (owner/repo 없음, stepsBack=1)**
 
 - **자연스러운 표현**:
   * "myorg/myapp 롤백해줘" (기본: 1번 전)
   * "owner/repo 예전 버전으로 되돌려"
-  * "저장소 복구해줘"
+  * **"롤백해줘" (owner/repo 없음, 컨텍스트에서 추론, stepsBack=1)**
+  * **"이전으로 되돌려" (owner/repo 없음, stepsBack=1)**
 
 추출 규칙:
-1. **owner/repo 패턴 추출**: "owner/repo", "저장소명", "myorg/myapp" 등에서 GitHub 저장소 정보 추출
-2. **커밋 해시 추출**: "커밋", "commit", "해시", "hash" 키워드 뒤의 영숫자 조합 (최소 7자)
-3. **숫자 추출**: "N번 전", "N개 전", "N번째 전", "previous N" 등에서 숫자 추출
-4. **이전/previous**: 숫자 없이 "이전", "바로 전", "previous"만 있으면 1로 간주
-5. **기본값**: owner/repo만 있고 커밋/숫자 없으면 stepsBack=1
+1. **롤백 키워드 감지**: "롤백", "rollback", "되돌려", "revert", "복구", "restore", "이전" 등이 있으면 rollback 명령으로 인식
+2. **owner/repo 패턴 추출**: "owner/repo", "저장소명", "myorg/myapp" 등에서 GitHub 저장소 정보 추출 (없으면 빈 문자열 또는 null)
+3. **커밋 해시 추출**: "커밋", "commit", "해시", "hash" 키워드 뒤의 영숫자 조합 (최소 7자)
+4. **숫자 추출**: "N번 전", "N개 전", "N번째 전", "previous N" 등에서 숫자 추출
+5. **이전/previous**: 숫자 없이 "이전", "바로 전", "previous"만 있으면 1로 간주
+6. **owner/repo 없을 때**: 롤백 키워드가 있고 숫자/커밋이 있으면 rollback으로 인식, owner/repo는 빈 문자열 반환 (컨텍스트에서 복원됨)
 
 필수 JSON 형식:
 {
   "command": "rollback",
   "parameters": {
-    "owner": "<추출된_GitHub_owner>",
-    "repo": "<추출된_GitHub_repo>",
+    "owner": "<추출된_GitHub_owner_없으면_빈_문자열>",
+    "repo": "<추출된_GitHub_repo_없으면_빈_문자열>",
     "commitSha": "<커밋_해시_패턴이면_추출_없으면_null>",
     "stepsBack": <N번째_전_패턴이면_숫자_없으면_null>
   }
@@ -311,6 +375,8 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 - "myorg/myapp을 abc1234로 롤백" → { "command": "rollback", "parameters": { "owner": "myorg", "repo": "myapp", "commitSha": "abc1234", "stepsBack": null } }
 - "owner/repo 3번 전으로 롤백" → { "command": "rollback", "parameters": { "owner": "owner", "repo": "repo", "commitSha": null, "stepsBack": 3 } }
 - "K-Le-PaaS/backend 이전 배포로" → { "command": "rollback", "parameters": { "owner": "K-Le-PaaS", "repo": "backend", "commitSha": null, "stepsBack": 1 } }
+- **"5번 전으로 롤백해줘" → { "command": "rollback", "parameters": { "owner": "", "repo": "", "commitSha": null, "stepsBack": 5 } }**
+- **"이전 버전으로 되돌려" → { "command": "rollback", "parameters": { "owner": "", "repo": "", "commitSha": null, "stepsBack": 1 } }**
 
 6-1. 롤백 목록 조회 (command: "list_rollback")
 설명: 프로젝트의 현재 배포 상태, 롤백 가능한 버전 목록, 최근 롤백 히스토리를 조회하는 명령입니다.
@@ -433,7 +499,7 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 - **롤백 명령 우선순위**:
   * commitSha와 stepsBack이 둘 다 있으면 commitSha 우선 (커밋 기반 롤백)
   * 둘 다 없으면 stepsBack=1로 기본 설정 (1번 전 배포로 롤백)
-  * owner/repo가 없으면 롤백 명령으로 인식하지 않음 (저장소 정보 필수)
+  * owner/repo가 없어도 롤백 키워드가 있으면 rollback 명령으로 인식 (저장소 정보는 컨텍스트에서 복원)
 - 오직 JSON 객체만 반환하며, 추가 설명이나 대화는 포함하지 않습니다."""
         
         payload = {

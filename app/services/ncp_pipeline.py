@@ -1015,6 +1015,7 @@ def mirror_to_sourcecommit(
     sc_endpoint: str | None = None,
     sc_full_url: str | None = None,
     commit_sha: str | None = None,
+    replicas: int | None = None,
 ) -> dict:
     """Clone from GitHub (with installation token if provided) and mirror push to NCP SourceCommit.
 
@@ -1160,6 +1161,28 @@ def mirror_to_sourcecommit(
                     image_tag = commit_sha[:7] if commit_sha else "latest"
                     image_full = f"{registry}/{image_name_unified}:{image_tag}" if registry else f"{image_name_unified}:{image_tag}"
                     _dbg("SC-INJECT-IMAGE", image=image_full, commit_sha=commit_sha, image_tag=image_tag)
+                    
+                    # Read existing manifest to preserve current replicas value
+                    current_replicas = 1  # default
+                    if manifest_path.exists():
+                        try:
+                            import yaml
+                            with open(manifest_path, 'r', encoding='utf-8') as f:
+                                existing_manifest = yaml.safe_load(f)
+                                current_replicas = existing_manifest.get('spec', {}).get('replicas', 1)
+                            _dbg("SC-READ-EXISTING-REPLICAS", current=current_replicas)
+                        except Exception as e:
+                            _dbg("SC-READ-REPLICAS-ERROR", error=str(e))
+                            current_replicas = 1
+                    
+                    # Use dynamic replicas value or preserve existing value
+                    if replicas is not None:
+                        target_replicas = replicas  # Use new value
+                        _dbg("SC-INJECT-REPLICAS", replicas=target_replicas, provided=replicas, action="update")
+                    else:
+                        target_replicas = current_replicas  # Preserve existing value
+                        _dbg("SC-INJECT-REPLICAS", replicas=target_replicas, provided=replicas, action="preserve")
+                    
                     manifest = f"""
 apiVersion: apps/v1
 kind: Deployment
@@ -1167,7 +1190,7 @@ metadata:
   name: {repo_part}-deploy
   namespace: default
 spec:
-  replicas: 1
+  replicas: {target_replicas}
   selector:
     matchLabels:
       app: {repo_part}
@@ -1238,7 +1261,17 @@ spec:
                     subprocess.run(["git", "-C", str(inj_dir), "add", "k8s/deployment.yaml"], check=True, capture_output=True, text=True)
                     subprocess.run(["git", "-C", str(inj_dir), "add", "k8s/service.yaml"], check=True, capture_output=True, text=True)
                     subprocess.run(["git", "-C", str(inj_dir), "add", "k8s/ingress.yaml"], check=True, capture_output=True, text=True)
-                    subprocess.run(["git", "-C", str(inj_dir), "commit", "-m", f"chore: add default k8s manifests with tag {image_tag}"], check=True, capture_output=True, text=True)
+
+                    # Build commit message with replicas info
+                    commit_msg_parts = [f"tag {image_tag}"]
+                    if replicas is not None:
+                        commit_msg_parts.append(f"replicas {target_replicas}")
+                        commit_msg = f"chore: update k8s manifests with {', '.join(commit_msg_parts)}"
+                    else:
+                        commit_msg_parts.append(f"replicas {target_replicas} (preserved)")
+                        commit_msg = f"chore: update k8s manifests with {', '.join(commit_msg_parts)}"
+
+                    subprocess.run(["git", "-C", str(inj_dir), "commit", "-m", commit_msg], check=True, capture_output=True, text=True)
 
                     # Pull first to avoid non-fast-forward errors
                     _dbg("SC-INJECT-GIT-PULL", branch=target_branch)
@@ -1304,8 +1337,8 @@ def mirror_and_update_manifest(
     - dict with status, manifest_updated flag, and deployed image
     """
 
-    # Step 1: Use existing mirror function to sync GitHub → SourceCommit with commit SHA tag
-    _dbg("MM-STEP1-MIRROR", github=github_repo_url, sc_repo=sc_repo_name, image_tag=image_tag)
+    # Step 1: Use existing mirror function to sync GitHub → SourceCommit with commit SHA tag and replicas
+    _dbg("MM-STEP1-MIRROR", github=github_repo_url, sc_repo=sc_repo_name, image_tag=image_tag, replicas=replicas)
     mirror_result = mirror_to_sourcecommit(
         github_repo_url=github_repo_url,
         installation_or_access_token=installation_or_access_token,
@@ -1315,11 +1348,24 @@ def mirror_and_update_manifest(
         sc_password=sc_password,
         sc_endpoint=sc_endpoint,
         sc_full_url=sc_full_url,
-        commit_sha=image_tag  # Pass image_tag as commit SHA for manifest injection
+        commit_sha=image_tag,  # Pass image_tag as commit SHA for manifest injection
+        replicas=replicas  # Pass replicas parameter to Step 1
     )
     _dbg("MM-STEP1-SUCCESS", result=mirror_result)
 
-    # Step 2: Clone SourceCommit, update manifest with actual tag, push back
+    # Step 1에서 이미 replicas 값이 포함된 매니페스트가 생성되었으므로 Step 2는 불필요
+    # Step 1의 결과를 그대로 반환
+    return {
+        "status": "success",
+        "source": github_repo_url,
+        "target": mirror_result.get("target", ""),
+        "manifest_updated": True,
+        "image": f"{image_repo}:{image_tag}",
+        "old_replicas": 1,  # 기본값에서 시작
+        "new_replicas": replicas if replicas is not None else 1
+    }
+
+    # Step 2: Clone SourceCommit, update manifest with actual tag, push back (DISABLED)
     work_dir = Path("/tmp") / f"manifest-update-{uuid.uuid4().hex[:8]}"
     work_dir.mkdir(parents=True, exist_ok=True)
     sc_dir = work_dir / "sc_repo"
@@ -2581,11 +2627,24 @@ async def run_sourcedeploy(
     # SourceBuild는 SourceCommit의 코드를 사용하므로, 먼저 최신 코드를 미러링해야 함
     # 이 단계에서 k8s/deployment.yaml의 이미지 태그도 함께 업데이트
     manifest_updated = False
+
+    # Get desired replica count from DB
+    desired_replicas = None
+    if db is not None and owner and repo:
+        try:
+            from .deployment_config import DeploymentConfigService
+            config_service = DeploymentConfigService()
+            desired_replicas = config_service.get_replica_count(db, owner, repo)
+            _dbg("SD-REPLICA-FROM-DB", owner=owner, repo=repo, replicas=desired_replicas)
+        except Exception as e:
+            _dbg("SD-REPLICA-DB-ERR", error=str(e)[:200])
+            desired_replicas = 1  # Fallback to default
+
     if skip_mirror:
         _dbg("SC-MIRROR-SKIP", reason="skip_mirror_flag_enabled")
         manifest_updated = True  # Assume already updated by caller
     elif owner and repo and sc_repo_name:
-        _dbg("SC-MIRROR-START", owner=owner, repo=repo, sc_repo=sc_repo_name, image_tag=effective_tag)
+        _dbg("SC-MIRROR-START", owner=owner, repo=repo, sc_repo=sc_repo_name, image_tag=effective_tag, replicas=desired_replicas)
         try:
             # Get GitHub Installation Token from DB
             github_token = None
@@ -2617,7 +2676,7 @@ async def run_sourcedeploy(
             if github_token and sc_project_id:
                 github_repo_url = f"https://github.com/{owner}/{repo}.git"
 
-                # Use new mirror function that updates manifest with actual image tag
+                # Use new mirror function that updates manifest with actual image tag and replicas
                 # Pass SourceCommit authentication credentials for Git operations
                 mirror_result = mirror_and_update_manifest(
                     github_repo_url=github_repo_url,
@@ -2628,7 +2687,8 @@ async def run_sourcedeploy(
                     image_tag=effective_tag,
                     sc_endpoint=getattr(settings, "ncp_sourcecommit_endpoint", None),
                     sc_username=getattr(settings, "ncp_sourcecommit_username", None),
-                    sc_password=getattr(settings, "ncp_sourcecommit_password", None)
+                    sc_password=getattr(settings, "ncp_sourcecommit_password", None),
+                    replicas=desired_replicas  # Pass DB replica count
                 )
                 _dbg("SC-MIRROR-SUCCESS", result=mirror_result)
                 manifest_updated = mirror_result.get("manifest_updated", False)
@@ -2731,6 +2791,27 @@ async def run_sourcedeploy(
             
             if not deployment_history_id:
                 # Create new history record
+                # Determine operation type
+                operation_type = "rollback" if is_rollback else "deploy"
+                
+                # Check if this is a scaling operation (same image tag, different replicas)
+                if not is_rollback and owner and repo:
+                    from .deployment_config import DeploymentConfigService
+                    config_service = DeploymentConfigService()
+                    current_replicas = config_service.get_replica_count(db, owner, repo, user_id)
+                    
+                    # Get previous deployment to compare
+                    previous_deployment = db.query(DeploymentHistory).filter(
+                        DeploymentHistory.github_owner == owner,
+                        DeploymentHistory.github_repo == repo,
+                        DeploymentHistory.status == "success"
+                    ).order_by(DeploymentHistory.created_at.desc()).first()
+                    
+                    if (previous_deployment and 
+                        previous_deployment.image_tag == effective_tag and 
+                        previous_deployment.replica_count != current_replicas):
+                        operation_type = "scale"
+                
                 history_record = DeploymentHistory(
                     user_id=user_id,
                     github_owner=owner,
@@ -2751,7 +2832,8 @@ async def run_sourcedeploy(
                     namespace="default",
                     started_at=get_kst_now(),
                     auto_deploy_enabled=True,
-                    is_rollback=is_rollback
+                    is_rollback=is_rollback,
+                    operation_type=operation_type
                 )
 
                 db.add(history_record)

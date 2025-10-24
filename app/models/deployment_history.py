@@ -108,6 +108,9 @@ class DeploymentHistory(Base):
     cluster_id = Column(String(255), nullable=True)
     cluster_name = Column(String(255), nullable=True)
     namespace = Column(String(255), nullable=True, default="default")
+
+    # 배포 구성 정보
+    replica_count = Column(Integer, nullable=True, default=1)  # 배포 시점의 replica 수
     
     # 시간 정보 (모두 한국 시간 KST로 저장)
     started_at = Column(DateTime, nullable=False, default=get_kst_now)
@@ -133,6 +136,9 @@ class DeploymentHistory(Base):
     # 롤백 정보
     is_rollback = Column(Boolean, default=False, nullable=False)  # 롤백 배포 여부
     rollback_from_id = Column(Integer, nullable=True)  # 어느 배포에서 롤백했는지
+    
+    # 작업 유형 구분
+    operation_type = Column(String(50), nullable=True, default="deploy")  # deploy, rollback, scale
 
     def __repr__(self):
         return f"<DeploymentHistory(id={self.id}, user_id={self.user_id}, repo={self.github_owner}/{self.github_repo}, status={self.status})>"
@@ -151,6 +157,32 @@ class DeploymentHistory(Base):
     def is_completed(self):
         """배포 완료 여부"""
         return self.status in ["success", "failed"]
+    
+    @staticmethod
+    def detect_operation_type(record, previous_record=None):
+        """
+        작업 유형을 자동 감지합니다.
+        
+        Args:
+            record: 현재 배포 기록
+            previous_record: 이전 배포 기록 (선택사항)
+            
+        Returns:
+            str: "deploy", "rollback", "scale" 중 하나
+        """
+        # 롤백인 경우
+        if record.is_rollback:
+            return "rollback"
+        
+        # 이전 기록이 있는 경우 스케일링 감지
+        if previous_record:
+            # 같은 이미지 태그이지만 replica_count가 다른 경우 스케일링
+            if (record.image_tag == previous_record.image_tag and 
+                record.replica_count != previous_record.replica_count):
+                return "scale"
+        
+        # 기본값은 배포
+        return "deploy"
     
     @property
     def is_success(self):

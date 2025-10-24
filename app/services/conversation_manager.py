@@ -12,6 +12,14 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List
 import structlog
 
+
+class DateTimeEncoder(json.JSONEncoder):
+    """datetime 객체를 JSON 직렬화 가능한 형태로 변환하는 커스텀 인코더"""
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
 logger = structlog.get_logger(__name__)
 
 
@@ -69,7 +77,7 @@ class ConversationManager:
         self.redis.setex(
             key,
             self.ttl,
-            json.dumps(session_data, ensure_ascii=False)
+            json.dumps(session_data, ensure_ascii=False, cls=DateTimeEncoder)
         )
 
         logger.info(
@@ -139,7 +147,7 @@ class ConversationManager:
         self.redis.setex(
             key,
             self.ttl,
-            json.dumps(session, ensure_ascii=False)
+            json.dumps(session, ensure_ascii=False, cls=DateTimeEncoder)
         )
 
         logger.info(
@@ -193,7 +201,7 @@ class ConversationManager:
         self.redis.setex(
             key,
             self.ttl,
-            json.dumps(session, ensure_ascii=False)
+            json.dumps(session, ensure_ascii=False, cls=DateTimeEncoder)
         )
 
         logger.debug(
@@ -229,7 +237,7 @@ class ConversationManager:
         self.redis.setex(
             key,
             self.ttl,
-            json.dumps(session, ensure_ascii=False)
+            json.dumps(session, ensure_ascii=False, cls=DateTimeEncoder)
         )
 
     async def get_conversation_history(
@@ -283,7 +291,7 @@ class ConversationManager:
         self.redis.setex(
             key,
             self.ttl,
-            json.dumps(session, ensure_ascii=False)
+            json.dumps(session, ensure_ascii=False, cls=DateTimeEncoder)
         )
 
     async def delete_session(

@@ -39,6 +39,7 @@ class ActionClassifier:
         "endpoint": ActionRiskLevel.LOW,
         "overview": ActionRiskLevel.LOW,
         "cost_analysis": ActionRiskLevel.LOW,  # 비용 분석 (조회만)
+        "unknown": ActionRiskLevel.LOW,  # unknown 명령어는 확인 불필요
 
         # 중간 위험 (비용 추정 + 확인, MEDIUM 위험)
         "scale": ActionRiskLevel.MEDIUM,
@@ -172,6 +173,10 @@ class ActionClassifier:
         Returns:
             확인 메시지 문자열
         """
+        # unknown 명령어는 확인 불필요하므로 메시지 생성하지 않음
+        if command == "unknown":
+            return "명령어를 이해할 수 없습니다. 올바른 형식으로 다시 입력해주세요."
+        
         template_info = self.CONFIRMATION_TEMPLATES.get(command)
 
         if not template_info:

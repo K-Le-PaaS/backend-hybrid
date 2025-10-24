@@ -101,6 +101,11 @@ def init_database():
             _ensure_deployment_history_columns()
         except Exception as e:
             logger.warning(f"DeploymentHistory column ensure failed: {e}")
+
+        try:
+            _ensure_deployment_config_table()
+        except Exception as e:
+            logger.warning(f"DeploymentConfig table ensure failed: {e}")
         logger.info("Database tables created successfully")
         
     except Exception as e:
@@ -179,8 +184,8 @@ def _ensure_user_slack_config_columns() -> None:
 def _ensure_deployment_history_columns() -> None:
     """Ensure recently added columns exist for DeploymentHistory.
 
-    This is a minimal, safe migration for SQLite/Postgres: add pipeline_id (VARCHAR) and pipeline_history_id (INTEGER)
-    columns if they are missing. It does nothing if the table doesn't exist yet or columns already exist.
+    This is a minimal, safe migration for SQLite/Postgres: add pipeline_id (VARCHAR), pipeline_history_id (INTEGER),
+    and replica_count (INTEGER) columns if they are missing. It does nothing if the table doesn't exist yet or columns already exist.
     """
     try:
         with engine.connect() as conn:
@@ -212,7 +217,29 @@ def _ensure_deployment_history_columns() -> None:
                     conn.execute(text("ALTER TABLE deployment_histories ADD COLUMN pipeline_history_id INTEGER"))
                 else:
                     conn.execute(text("ALTER TABLE deployment_histories ADD COLUMN pipeline_history_id INTEGER"))
+            if "replica_count" not in existing_cols:
+                if dialect == "sqlite":
+                    conn.execute(text("ALTER TABLE deployment_histories ADD COLUMN replica_count INTEGER DEFAULT 1"))
+                else:
+                    conn.execute(text("ALTER TABLE deployment_histories ADD COLUMN replica_count INTEGER DEFAULT 1"))
             conn.commit()
+    except Exception:
+        # Best-effort; do not crash app on migration failure
+        raise
+
+
+def _ensure_deployment_config_table() -> None:
+    """Ensure deployment_configs table exists.
+
+    This is a minimal migration to create the deployment_configs table
+    if it doesn't exist yet.
+    """
+    try:
+        from .models.deployment_config import DeploymentConfig
+        from .models.base import Base
+
+        # Create only the deployment_configs table if it doesn't exist
+        DeploymentConfig.__table__.create(bind=engine, checkfirst=True)
     except Exception:
         # Best-effort; do not crash app on migration failure
         raise
