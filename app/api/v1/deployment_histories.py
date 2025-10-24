@@ -10,10 +10,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, and_
+from kubernetes.client.rest import ApiException
 
 from ...database import get_db
 from ...models.deployment_history import DeploymentHistory
 from .auth_verify import get_current_user
+from ...services.k8s_client import get_apps_v1_api
 
 router = APIRouter()
 
@@ -317,19 +319,12 @@ async def get_repositories_latest_deployments(
             ).order_by(desc(DeploymentHistory.started_at)).first()
 
             if latest_deployment:
-                # Kubernetes 워크로드 정보 (하드코딩)
-                # TODO: 실제 K8s API 조회로 변경
-                k8s_info = {
-                    "namespace": latest_deployment.namespace or "default",
-                    "replicas": {
-                        "desired": 3,
-                        "ready": 3 if latest_deployment.status == "success" else random.randint(0, 2)
-                    },
-                    "resources": {
-                        "cpu": random.randint(30, 80),  # CPU 사용률 (%)
-                        "memory": random.randint(40, 85)  # Memory 사용률 (%)
-                    }
-                }
+                # Kubernetes 워크로드 정보 (실제 K8s API 조회)
+                k8s_info = await _get_kubernetes_deployment_info(
+                    integration.github_owner,
+                    integration.github_repo,
+                    latest_deployment.namespace or "default"
+                )
 
                 # 배포 정보에 K8s 정보 추가
                 deployment_dict = latest_deployment.to_dict()
@@ -368,6 +363,104 @@ async def get_repositories_latest_deployments(
             status_code=500,
             detail=f"Failed to fetch repository deployments: {str(e)}"
         )
+
+
+async def _get_kubernetes_deployment_info(owner: str, repo: str, namespace: str) -> dict:
+    """
+    Kubernetes API를 통해 실제 Deployment 정보를 조회합니다.
+    
+    Args:
+        owner: GitHub repository owner
+        repo: GitHub repository name  
+        namespace: Kubernetes namespace
+        
+    Returns:
+        dict: Kubernetes 워크로드 정보
+    """
+    try:
+        # Kubernetes API 클라이언트 생성
+        apps_v1 = get_apps_v1_api()
+        
+        # Deployment 이름 생성 (실제 패턴: k-le-paas-{repo}-deploy)
+        deployment_name = f"k-le-paas-{repo}-deploy"
+        
+        # 실제 Deployment 조회
+        deployment = apps_v1.read_namespaced_deployment(
+            name=deployment_name,
+            namespace=namespace
+        )
+        
+        # 실제 레플리카 정보 추출
+        k8s_info = {
+            "namespace": namespace,
+            "replicas": {
+                "desired": deployment.spec.replicas,
+                "ready": deployment.status.ready_replicas or 0,
+                "current": deployment.status.replicas or 0,
+                "available": deployment.status.available_replicas or 0,
+                "unavailable": deployment.status.unavailable_replicas or 0
+            },
+            "resources": {
+                "cpu": 0,  # TODO: 실제 메트릭 조회 필요
+                "memory": 0  # TODO: 실제 메트릭 조회 필요
+            },
+            "status": "Running" if deployment.status.ready_replicas == deployment.spec.replicas else "Pending"
+        }
+        
+        return k8s_info
+        
+    except ApiException as e:
+        if e.status == 404:
+            # Deployment가 존재하지 않는 경우
+            return {
+                "namespace": namespace,
+                "replicas": {
+                    "desired": 0,
+                    "ready": 0,
+                    "current": 0,
+                    "available": 0,
+                    "unavailable": 0
+                },
+                "resources": {
+                    "cpu": 0,
+                    "memory": 0
+                },
+                "status": "NotFound"
+            }
+        else:
+            # 다른 API 에러의 경우 기본값 반환
+            return {
+                "namespace": namespace,
+                "replicas": {
+                    "desired": 1,
+                    "ready": 0,
+                    "current": 0,
+                    "available": 0,
+                    "unavailable": 0
+                },
+                "resources": {
+                    "cpu": 0,
+                    "memory": 0
+                },
+                "status": "Error"
+            }
+    except Exception as e:
+        # K8s API 연결 실패 등의 경우 기본값 반환
+        return {
+            "namespace": namespace,
+            "replicas": {
+                "desired": 1,
+                "ready": 0,
+                "current": 0,
+                "available": 0,
+                "unavailable": 0
+            },
+            "resources": {
+                "cpu": 0,
+                "memory": 0
+            },
+            "status": "Error"
+        }
 
 
 @router.get("/deployment-histories/websocket/status")

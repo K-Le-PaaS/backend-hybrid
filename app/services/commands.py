@@ -1298,8 +1298,20 @@ async def _execute_list_all_deployments(args: Dict[str, Any]) -> Dict[str, Any]:
                     "available": deployment.status.available_replicas or 0,
                 },
                 "image": deployment.spec.template.spec.containers[0].image if deployment.spec.template.spec.containers else None,
+                "up_to_date": deployment.status.updated_replicas or 0,  # 업데이트된 레플리카 수
+                "available": deployment.status.available_replicas or 0,  # 사용 가능한 레플리카 수
+                "age": None,  # 초기값 설정
                 "status": "Running" if deployment.status.ready_replicas == deployment.spec.replicas else "Pending"
             }
+            
+            # Deployment 생성 시간 계산
+            if deployment.metadata.creation_timestamp:
+                now = datetime.now(timezone.utc)
+                age = now - deployment.metadata.creation_timestamp
+                deployment_info["age"] = str(age).split('.')[0]  # 초 단위 제거
+            else:
+                deployment_info["age"] = "알 수 없음"  # creation_timestamp가 없는 경우
+            
             deployment_list.append(deployment_info)
         
         return {
@@ -1469,6 +1481,8 @@ async def _execute_list_deployments(args: Dict[str, Any]) -> Dict[str, Any]:
                 },
                 "image": deployment.spec.template.spec.containers[0].image if deployment.spec.template.spec.containers else None,
                 "age": None,
+                "up_to_date": deployment.status.updated_replicas or 0,  # 업데이트된 레플리카 수
+                "available": deployment.status.available_replicas or 0,  # 사용 가능한 레플리카 수
                 "status": "Running" if deployment.status.ready_replicas == deployment.spec.replicas else "Pending"
             }
             
@@ -1477,6 +1491,8 @@ async def _execute_list_deployments(args: Dict[str, Any]) -> Dict[str, Any]:
                 now = datetime.now(timezone.utc)
                 age = now - deployment.metadata.creation_timestamp
                 deployment_info["age"] = str(age).split('.')[0]  # 초 단위 제거
+            else:
+                deployment_info["age"] = "알 수 없음"  # creation_timestamp가 없는 경우
             
             deployment_list.append(deployment_info)
         

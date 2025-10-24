@@ -403,11 +403,22 @@ class ResponseFormatter:
             
             formatted_deployments = []
             for deployment in deployments:
+                # replicas 정보 올바르게 처리
+                replicas_info = deployment.get("replicas", {})
+                if isinstance(replicas_info, dict):
+                    ready_count = replicas_info.get("ready", 0)
+                    desired_count = replicas_info.get("desired", 0)
+                    replicas_display = f"{ready_count}/{desired_count}"
+                else:
+                    replicas_display = "0/0"
+                
                 formatted_deployments.append({
                     "name": deployment.get("name", ""),
                     "namespace": deployment.get("namespace", ""),
-                    "replicas": deployment.get("replicas", "0/0"),
-                    "ready": deployment.get("ready", "0/0"),
+                    "replicas": replicas_display,
+                    "ready": replicas_display,  # ready와 replicas 동일하게 표시
+                    "up_to_date": str(deployment.get("up_to_date", 0)),  # 업데이트된 레플리카 수
+                    "available": str(deployment.get("available", 0)),  # 사용 가능한 레플리카 수
                     "age": self._format_age(deployment.get("age", "")),
                     "image": deployment.get("image", "")
                 })
@@ -761,11 +772,11 @@ class ResponseFormatter:
     
     def _format_age(self, age_str: str) -> str:
         """Kubernetes age 문자열을 한국어로 포맷"""
-        if not age_str:
+        if not age_str or age_str == "None":
             return "알 수 없음"
         
         # 이미 포맷된 경우 그대로 반환
-        if "일" in age_str or "시간" in age_str or "분" in age_str:
+        if "일" in age_str or "시간" in age_str or "분" in age_str or "초" in age_str:
             return age_str
         
         # 간단한 변환 (실제로는 더 정교한 파싱이 필요)
