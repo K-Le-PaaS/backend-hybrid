@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ...services.commands import CommandRequest, plan_command, execute_command
 from ...database import get_db
 from ...services.security import get_current_user_id, security
+from ...services.command_history import save_command_history, update_command_status
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -110,9 +111,23 @@ async def process_command(
             )
             
             logger.info(f"Gemini 해석 결과: {gemini_result}")
-            
-            # 명령 히스토리에 추가
-            command_id = str(uuid.uuid4())
+
+            # Gemini 결과를 CommandRequest로 변환
+            entities = gemini_result.get("entities", {})
+            intent = gemini_result.get("intent", "status")
+
+            # 1. DB에 먼저 저장
+            db_history = await save_command_history(
+                db=db,
+                command_text=command,
+                tool=intent,
+                args=entities,
+                status="processing",
+                user_id=effective_user_id
+            )
+
+            # 2. 메모리에도 저장 (기존 코드 유지 - 대화 맥락용)
+            command_id = str(db_history.id)  # DB ID를 문자열로 사용
             history_entry = CommandHistory(
                 id=command_id,
                 command=command,
@@ -120,10 +135,6 @@ async def process_command(
                 status="processing"
             )
             command_history.insert(0, history_entry)
-            
-            # Gemini 결과를 CommandRequest로 변환
-            entities = gemini_result.get("entities", {})
-            intent = gemini_result.get("intent", "status")
             
             logger.info(f"Gemini intent: {intent}")
             logger.info(f"Gemini entities: {entities}")
@@ -169,7 +180,19 @@ async def process_command(
                     "entities": entities,
                     "k8s_result": k8s_result  # 실제 K8s 작업 결과
                 }
-                
+
+                # DB 업데이트 - 성공
+                await update_command_status(
+                    db=db,
+                    command_id=int(command_id),
+                    status="completed",
+                    result=result
+                )
+
+                # 메모리 업데이트 (기존 코드 유지)
+                history_entry.status = "completed"
+                history_entry.result = result
+
             except Exception as k8s_error:
                 logger.error(f"commands.py 실행 실패: {k8s_error}")
                 result = {
@@ -178,9 +201,34 @@ async def process_command(
                     "entities": entities,
                     "k8s_result": {"error": str(k8s_error)}
                 }
-                
+
+                # DB 업데이트 - K8s 실행 실패
+                await update_command_status(
+                    db=db,
+                    command_id=int(command_id),
+                    status="error",
+                    result=result,
+                    error_message=str(k8s_error)
+                )
+
+                # 메모리 업데이트 (기존 코드 유지)
+                history_entry.status = "error"
+                history_entry.result = result
+
         except Exception as e:
             logger.error(f"Gemini API 호출 실패: {e}")
+
+            # DB에 Gemini 실패 기록
+            db_history = await save_command_history(
+                db=db,
+                command_text=command,
+                tool="nlp_parse",
+                args={},
+                status="error",
+                error_message=str(e),
+                user_id=effective_user_id
+            )
+
             # Gemini 실패 시 에러 응답
             result = {
                 "message": f"명령 해석 중 오류가 발생했습니다: {str(e)}",
@@ -188,10 +236,6 @@ async def process_command(
                 "entities": {},
                 "k8s_result": {"error": str(e)}
             }
-        
-        # 히스토리 업데이트
-        history_entry.status = "completed"
-        history_entry.result = result
         
         return CommandResponse(
             success=True,
@@ -203,12 +247,25 @@ async def process_command(
         raise
     except Exception as e:
         logger.error(f"명령 처리 실패: {str(e)}")
-        
-        # 에러 히스토리 추가
-        if 'command_id' in locals():
+
+        # DB 업데이트 - 전체 실패 (command_id가 있으면)
+        if 'command_id' in locals() and command_id:
+            try:
+                await update_command_status(
+                    db=db,
+                    command_id=int(command_id),
+                    status="failed",
+                    error_message=str(e)
+                )
+            except Exception as db_error:
+                logger.error(f"DB 업데이트 실패: {db_error}")
+                # DB 업데이트 실패해도 응답은 반환
+
+        # 메모리 업데이트 (기존 코드 유지)
+        if 'history_entry' in locals():
             history_entry.status = "failed"
             history_entry.error = str(e)
-        
+
         return CommandResponse(
             success=False,
             message="명령 처리 중 오류가 발생했습니다.",
@@ -388,6 +445,18 @@ async def process_conversation(
                 "assistant", error_message,
                 action="error"
             )
+
+            # DB에 Gemini 실패 기록 (conversation)
+            await save_command_history(
+                db=db,
+                command_text=request.command,
+                tool="nlp_parse_conversation",
+                args={},
+                status="error",
+                error_message=str(e),
+                user_id=user_id
+            )
+
             return ConversationResponse(
                 session_id=session_id,
                 state=ConversationState.ERROR.value,
@@ -400,6 +469,17 @@ async def process_conversation(
 
         intent = interpretation.get("intent")
         entities = interpretation.get("entities", {})
+
+        # DB에 초기 저장 (conversation 엔드포인트)
+        db_history = await save_command_history(
+            db=db,
+            command_text=request.command,
+            tool=intent or "conversation",
+            args=entities,
+            status="processing",
+            user_id=user_id
+        )
+        command_id = db_history.id
 
         # 세션 조회 (컨텍스트 복원용)
         session = await conv_manager.get_session(user_id, session_id)
@@ -746,6 +826,15 @@ async def process_conversation(
                     "assistant", error_message,
                     action="error"
                 )
+
+                # DB 업데이트 - 실행 실패 (conversation)
+                await update_command_status(
+                    db=db,
+                    command_id=command_id,
+                    status="error",
+                    error_message=error_message
+                )
+
                 return ConversationResponse(
                     session_id=session_id,
                     state=ConversationState.ERROR.value,
@@ -779,6 +868,14 @@ async def process_conversation(
                 action="execution_completed"
             )
 
+            # DB 업데이트 - 성공 (conversation)
+            await update_command_status(
+                db=db,
+                command_id=command_id,
+                status="completed",
+                result=result
+            )
+
             return ConversationResponse(
                 session_id=session_id,
                 state=ConversationState.COMPLETED.value,
@@ -793,6 +890,19 @@ async def process_conversation(
         raise
     except Exception as e:
         logger.error(f"대화 처리 실패: {str(e)}", exc_info=True)
+
+        # DB 업데이트 - 전체 실패 (conversation, command_id가 있으면)
+        if 'command_id' in locals() and command_id:
+            try:
+                await update_command_status(
+                    db=db,
+                    command_id=command_id,
+                    status="failed",
+                    error_message=str(e)
+                )
+            except Exception as db_error:
+                logger.error(f"DB 업데이트 실패: {db_error}")
+
         raise HTTPException(500, f"대화 처리 중 오류가 발생했습니다: {str(e)}")
 
 
