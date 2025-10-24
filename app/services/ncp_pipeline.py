@@ -1146,7 +1146,8 @@ def mirror_to_sourcecommit(
                 k8s_dir.mkdir(parents=True, exist_ok=True)
                 manifest_path = k8s_dir / "deployment.yaml"
                 service_path = k8s_dir / "service.yaml"
-                if not manifest_path.exists() or not service_path.exists():
+                ingress_path = k8s_dir / "ingress.yaml"
+                if not manifest_path.exists() or not service_path.exists() or not ingress_path.exists():
                     repo_part_raw = Path(sc_full_url).stem if sc_full_url else (sc_repo_name or "app")
                     # Convert to lowercase for Kubernetes naming requirements
                     repo_part = repo_part_raw.lower()
@@ -1220,18 +1221,47 @@ spec:
     port: 80
     targetPort: 8080
 """.strip()
+                    ingress = f"""
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {repo_part}-ingress
+  namespace: default
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  tls:
+  - hosts:
+    - {repo_part}.klepaas.app
+    secretName: klepaas-wildcard-tls
+  rules:
+  - host: {repo_part}.klepaas.app
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: {repo_part}-svc
+            port:
+              number: 80
+""".strip()
 
                     # Write missing files only (idempotent)
                     if not manifest_path.exists():
                         manifest_path.write_text(manifest, encoding="utf-8")
                     if not service_path.exists():
                         service_path.write_text(service, encoding="utf-8")
+                    if not ingress_path.exists():
+                        ingress_path.write_text(ingress, encoding="utf-8")
                     # Ensure committer identity
                     subprocess.run(["git", "-C", str(inj_dir), "config", "user.email", "bot@k-le-paas.local"], check=False, capture_output=True, text=True)
                     subprocess.run(["git", "-C", str(inj_dir), "config", "user.name", "K-Le-PaaS Bot"], check=False, capture_output=True, text=True)
                     subprocess.run(["git", "-C", str(inj_dir), "add", "k8s/deployment.yaml"], check=True, capture_output=True, text=True)
                     subprocess.run(["git", "-C", str(inj_dir), "add", "k8s/service.yaml"], check=True, capture_output=True, text=True)
-                    
+                    subprocess.run(["git", "-C", str(inj_dir), "add", "k8s/ingress.yaml"], check=True, capture_output=True, text=True)
+
                     # Build commit message with replicas info
                     commit_msg_parts = [f"tag {image_tag}"]
                     if replicas is not None:
@@ -1240,7 +1270,7 @@ spec:
                     else:
                         commit_msg_parts.append(f"replicas {target_replicas} (preserved)")
                         commit_msg = f"chore: update k8s manifests with {', '.join(commit_msg_parts)}"
-                    
+
                     subprocess.run(["git", "-C", str(inj_dir), "commit", "-m", commit_msg], check=True, capture_output=True, text=True)
 
                     # Pull first to avoid non-fast-forward errors
@@ -1384,6 +1414,7 @@ def mirror_and_update_manifest(
         k8s_dir = sc_dir / "k8s"
         manifest_path = k8s_dir / "deployment.yaml"
         service_path = k8s_dir / "service.yaml"
+        ingress_path = k8s_dir / "ingress.yaml"
         manifest_updated = False
 
         if manifest_path.exists():
@@ -1550,10 +1581,38 @@ spec:
     targetPort: 8080
 """
 
+            # Create ingress manifest
+            ingress_content = f"""apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {repo_part}-ingress
+  namespace: default
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  tls:
+  - hosts:
+    - {repo_part}.klepaas.app
+    secretName: klepaas-wildcard-tls
+  rules:
+  - host: {repo_part}.klepaas.app
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: {repo_part}-svc
+            port:
+              number: 80
+"""
+
             # Write manifests
             manifest_path.write_text(manifest_content, encoding="utf-8")
             service_path.write_text(service_content, encoding="utf-8")
-            _dbg("MM-MANIFESTS-CREATED", deployment=str(manifest_path), service=str(service_path), replicas=target_replicas)
+            ingress_path.write_text(ingress_content, encoding="utf-8")
+            _dbg("MM-MANIFESTS-CREATED", deployment=str(manifest_path), service=str(service_path), ingress=str(ingress_path), replicas=target_replicas)
             
             # Track old_replicas (was None, now created with target_replicas)
             old_replicas = None
@@ -2456,7 +2515,8 @@ async def run_sourcedeploy(
                         "branch": "main",
                         "path": [
                             "k8s/deployment.yaml",
-                            "k8s/service.yaml"
+                            "k8s/service.yaml",
+                            "k8s/ingress.yaml"
                         ]
                     },
                     "env": {  # Environment variables for image tag injection
