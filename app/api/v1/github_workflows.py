@@ -537,10 +537,16 @@ async def get_pipelines(
         # 실제 인증된 사용자 ID 사용
         actual_user_id = str(current_user.get("id", "default"))
         logger.debug(f"Using user_id for pipelines: {actual_user_id}")
-        
-        # 배포 히스토리 조회
-        query = db.query(DeploymentHistory).filter(DeploymentHistory.user_id == actual_user_id)
-        
+
+        # 배포 히스토리 조회 (deploy 작업만 표시)
+        from sqlalchemy import and_
+        query = db.query(DeploymentHistory).filter(
+            and_(
+                DeploymentHistory.user_id == actual_user_id,
+                DeploymentHistory.operation_type == "deploy"
+            )
+        )
+
         if repository:
             if '/' in repository:
                 owner, repo_name = repository.split('/', 1)

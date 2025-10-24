@@ -35,11 +35,14 @@ async def get_deployment_histories(
     사용자의 배포 히스토리를 조회합니다. 특정 리포지토리나 상태로 필터링할 수 있습니다.
     """
     try:
-        # 기본 쿼리 (사용자별 필터링)
+        # 기본 쿼리 (사용자별 필터링 + deploy 작업만 표시)
         query = db.query(DeploymentHistory).filter(
-            DeploymentHistory.user_id == current_user["id"]
+            and_(
+                DeploymentHistory.user_id == current_user["id"],
+                DeploymentHistory.operation_type == "deploy"
+            )
         )
-        
+
         # 리포지토리 필터링
         if repository:
             if "/" not in repository:
@@ -146,15 +149,16 @@ async def get_repository_deployment_histories(
     특정 리포지토리의 모든 배포 히스토리를 조회합니다.
     """
     try:
-        # 기본 쿼리
+        # 기본 쿼리 (deploy 작업만 표시)
         query = db.query(DeploymentHistory).filter(
             and_(
                 DeploymentHistory.user_id == current_user["id"],
                 DeploymentHistory.github_owner == owner,
-                DeploymentHistory.github_repo == repo
+                DeploymentHistory.github_repo == repo,
+                DeploymentHistory.operation_type == "deploy"
             )
         )
-        
+
         # 상태 필터링
         if status:
             if status not in ["running", "success", "failed"]:
