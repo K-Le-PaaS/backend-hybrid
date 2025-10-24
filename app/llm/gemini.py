@@ -150,7 +150,7 @@ class GeminiClient(LLMClient):
                 "list_namespaces": "네임스페이스 목록 조회 명령을 해석했습니다.",
                 "overview": "통합 대시보드 조회 명령을 해석했습니다.",
                 "get_service": "Service 상세 정보 조회 명령을 해석했습니다.",
-                "get_deployment": "Deployment 상세 정보 조회 명령을 해석했습니다.",
+                "get_deployment": "Deployment 상세 정보 조 명령을 해석했습니다.",
                 "unknown": "알 수 없는 명령입니다."
             }
             
