@@ -50,7 +50,8 @@ async def get_slack_auth_url(
         raise HTTPException(status_code=500, detail="Slack redirect_uri not configured")
     auth_params = {
         "client_id": settings.slack_client_id,
-        "scope": "chat:write,channels:read,users:read,team:read",
+        # 개인 DM 전용: user_scope 사용 (워크스페이스 권한 불필요)
+        "user_scope": "chat:write,users:read",
         "redirect_uri": effective_redirect_uri,
         "state": state,
         "response_type": "code"
@@ -120,7 +121,7 @@ async def handle_slack_callback(
 
         # 성공 시 프론트로 리다이렉트 (?slack=connected)
         settings = get_settings()
-        frontend = settings.frontend_base_url or "http://localhost:3000/console"
+        frontend = settings.frontend_url or "http://localhost:3000/console"
         # Build URL safely and append slack=connected regardless of path
         try:
             from urllib.parse import urlparse, urlunparse, urlencode, parse_qsl

@@ -66,12 +66,14 @@ class SlackOAuthService:
                 
                 if data.get("ok"):
                     logger.info("slack_token_exchange_success")
+                    # user_scope 사용 시 authed_user 객체에서 토큰 추출
+                    authed_user = data.get("authed_user", {})
                     return SlackTokenResponse(
                         success=True,
-                        access_token=data.get("access_token"),
-                        refresh_token=data.get("refresh_token"),
+                        access_token=authed_user.get("access_token") or data.get("access_token"),
+                        refresh_token=authed_user.get("refresh_token") or data.get("refresh_token"),
                         team_id=data.get("team", {}).get("id"),
-                        user_id=data.get("authed_user", {}).get("id")
+                        user_id=authed_user.get("id")
                     )
                 else:
                     error = data.get("error", "Unknown error")
@@ -296,8 +298,6 @@ class SlackOAuthService:
         title: str,
         message: str,
     ) -> SlackMessageResponse:
-        """Open a DM to user and send message. Requires im:write + chat:write."""
-        channel_id = await self.open_im_channel(access_token, user_id)
-        if not channel_id:
-            return SlackMessageResponse(success=False, error="dm_channel_open_failed")
-        return await self.send_notification(access_token, channel_id, title, message)
+        """Send DM directly to user. With user_scope, we can send to user_id directly."""
+        # user_scope 사용 시 user_id로 바로 전송 가능 (conversations.open 불필요)
+        return await self.send_notification(access_token, user_id, title, message)
