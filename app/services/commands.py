@@ -245,14 +245,7 @@ def plan_command(req: CommandRequest) -> CommandPlan:
     elif command == "list_rollback":
         # 롤백 목록 조회 명령어
         if not req.github_owner or not req.github_repo:
-            raise ValueError(
-                "[ERROR] 프로젝트 정보가 필요합니다\n\n"
-                "[사용법] 올바른 사용법:\n"
-                "• K-Le-PaaS/test01 롤백 목록 보여줘\n"
-                "• owner/repo 롤백 목록\n"
-                "• 리포지토리명 롤백 목록\n\n"
-                "[팁] GitHub 저장소의 owner/repo 형식으로 입력해주세요"
-            )
+            raise ValueError("롤백 목록 조회에는 프로젝트 정보가 필요합니다. 예: 'K-Le-PaaS/test01 롤백 목록'")
         return CommandPlan(
             tool="get_rollback_list",
             args={"owner": req.github_owner, "repo": req.github_repo},
@@ -286,45 +279,7 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             },
         )
 
-    elif command == "unknown":
-        # unknown 명령어에 대한 처리
-        return CommandPlan(
-            tool="unknown",
-            args={
-                "command": req.command,
-                "message": "명령어를 이해할 수 없습니다. 올바른 형식으로 다시 입력해주세요."
-            },
-        )
-
-    else:
-        raise ValueError(
-            "[ERROR] 명령을 해석할 수 없습니다\n\n"
-            "[지원 명령어] 지원하는 명령어:\n"
-            "• 롤백: K-Le-PaaS/test01 롤백 목록 보여줘\n"
-            "• 배포: K-Le-PaaS/test01 배포해줘\n"
-            "• Pod 관리: pod 목록 보여줘, nginx-pod 로그 보여줘\n"
-            "• 서비스 관리: service 목록 보여줘\n"
-            "• 비용 분석: 비용 분석해줘\n\n"
-            "[팁] 구체적인 리소스 이름과 함께 명령어를 입력해주세요"
-        )
-
-
-async def _execute_unknown(args: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Unknown 명령어 처리
-    """
-    return {
-        "status": "error",
-        "message": "명령어를 이해할 수 없습니다. GitHub 저장소 정보와 함께 명령어를 입력해주세요.",
-        "command": args.get("command", "unknown"),
-        "suggestions": [
-            "K-Le-PaaS/test01 4개로 스케일링 해줘",
-            "K-Le-PaaS/test01 롤백 목록 보여줘", 
-            "K-Le-PaaS/test01 상태 확인",
-            "K-Le-PaaS/test01 로그 보여줘"
-        ],
-        "error_type": "command_not_understood"
-    }
+    raise ValueError("해석할 수 없는 명령입니다.")
 
 
 async def _execute_cost_analysis(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -499,18 +454,15 @@ async def _execute_deploy_github_repository(args: Dict[str, Any]) -> Dict[str, A
         short_sha = commit_info["sha"][:7]
         return {
             "status": "success",
-            "formatted": {
-                "status": "success",
-                "message": f"{owner}/{repo} 배포를 시작했습니다",
-                "repository": f"{owner}/{repo}",
-                "branch": branch,
-                "commit": {
-                    "sha": short_sha,
-                    "message": commit_info["message"][:50] + ("..." if len(commit_info["message"]) > 50 else ""),
-                    "author": commit_info["author"]["name"]
-                },
-                "deployment_status": "배포가 백그라운드에서 진행 중입니다. CI/CD Pipelines 탭에서 진행 상황을 확인하세요."
-            }
+            "message": f"{owner}/{repo} 배포를 시작했습니다",
+            "repository": f"{owner}/{repo}",
+            "branch": branch,
+            "commit": {
+                "sha": short_sha,
+                "message": commit_info["message"][:50] + ("..." if len(commit_info["message"]) > 50 else ""),
+                "author": commit_info["author"]["name"]
+            },
+            "deployment_status": "배포가 백그라운드에서 진행 중입니다. CI/CD Pipelines 탭에서 진행 상황을 확인하세요."
         }
 
     except Exception as e:
@@ -602,9 +554,6 @@ async def _execute_raw_command(plan: CommandPlan) -> Dict[str, Any]:
 
     if plan.tool == "cost_analysis":
         return await _execute_cost_analysis(plan.args)
-
-    if plan.tool == "unknown":
-        return await _execute_unknown(plan.args)
 
     raise ValueError("지원하지 않는 실행 계획입니다.")
 
@@ -1075,10 +1024,7 @@ async def _execute_ncp_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
                 "status": "success",
                 "action": "ncp_rollback_to_commit",
                 "message": f"{owner}/{repo}를 커밋 {target_commit_sha[:7]}로 롤백했습니다.",
-                "result": result,
-                "owner": owner,
-                "repo": repo,
-                "target_commit_short": target_commit_sha[:7]
+                "result": result
             }
 
         # steps_back이 지정되었으면 N번 전으로 롤백
@@ -1095,10 +1041,7 @@ async def _execute_ncp_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
                 "status": "success",
                 "action": "ncp_rollback_to_previous",
                 "message": f"{owner}/{repo}를 {steps_back}번 전 배포로 롤백했습니다.",
-                "result": result,
-                "owner": owner,
-                "repo": repo,
-                "target_commit_short": result.get("target_commit_short", "")
+                "result": result
             }
 
         else:
@@ -1115,10 +1058,7 @@ async def _execute_ncp_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
                 "status": "success",
                 "action": "ncp_rollback_to_previous",
                 "message": f"{owner}/{repo}를 이전 배포로 롤백했습니다.",
-                "result": result,
-                "owner": owner,
-                "repo": repo,
-                "target_commit_short": result.get("target_commit_short", "")
+                "result": result
             }
 
     except Exception as e:
@@ -1330,20 +1270,8 @@ async def _execute_list_all_deployments(args: Dict[str, Any]) -> Dict[str, Any]:
                     "available": deployment.status.available_replicas or 0,
                 },
                 "image": deployment.spec.template.spec.containers[0].image if deployment.spec.template.spec.containers else None,
-                "up_to_date": deployment.status.updated_replicas or 0,  # 업데이트된 레플리카 수
-                "available": deployment.status.available_replicas or 0,  # 사용 가능한 레플리카 수
-                "age": None,  # 초기값 설정
                 "status": "Running" if deployment.status.ready_replicas == deployment.spec.replicas else "Pending"
             }
-            
-            # Deployment 생성 시간 계산
-            if deployment.metadata.creation_timestamp:
-                now = datetime.now(timezone.utc)
-                age = now - deployment.metadata.creation_timestamp
-                deployment_info["age"] = str(age).split('.')[0]  # 초 단위 제거
-            else:
-                deployment_info["age"] = "알 수 없음"  # creation_timestamp가 없는 경우
-            
             deployment_list.append(deployment_info)
         
         return {
@@ -1513,8 +1441,6 @@ async def _execute_list_deployments(args: Dict[str, Any]) -> Dict[str, Any]:
                 },
                 "image": deployment.spec.template.spec.containers[0].image if deployment.spec.template.spec.containers else None,
                 "age": None,
-                "up_to_date": deployment.status.updated_replicas or 0,  # 업데이트된 레플리카 수
-                "available": deployment.status.available_replicas or 0,  # 사용 가능한 레플리카 수
                 "status": "Running" if deployment.status.ready_replicas == deployment.spec.replicas else "Pending"
             }
             
@@ -1523,8 +1449,6 @@ async def _execute_list_deployments(args: Dict[str, Any]) -> Dict[str, Any]:
                 now = datetime.now(timezone.utc)
                 age = now - deployment.metadata.creation_timestamp
                 deployment_info["age"] = str(age).split('.')[0]  # 초 단위 제거
-            else:
-                deployment_info["age"] = "알 수 없음"  # creation_timestamp가 없는 경우
             
             deployment_list.append(deployment_info)
         
@@ -1559,56 +1483,26 @@ async def _execute_get_rollback_list(args: Dict[str, Any]) -> Dict[str, Any]:
         db = SessionLocal()
         try:
             result = await get_rollback_list(owner, repo, db, limit=10)
-
-            # 디버깅 로그
-            logger.info(f"_execute_get_rollback_list - result: {result}")
-            logger.info(f"_execute_get_rollback_list - result type: {type(result)}")
-            if result:
-                logger.info(f"_execute_get_rollback_list - result.keys(): {result.keys()}")
-                logger.info(f"_execute_get_rollback_list - current_state: {result.get('current_state')}")
-
-            # 결과가 None이거나 current_state가 없는 경우 처리
-            if not result or not result.get("current_state"):
-                # 롤백 완료 직후일 수 있으므로 더 친화적인 메시지 제공
-                return {
-                    "status": "success",
-                    "message": f"[INFO] **{owner}/{repo}** 프로젝트의 배포 이력을 찾을 수 없습니다.\n\n"
-                              f"[상황 분석] 다음 중 하나일 수 있습니다:\n"
-                              f"• 롤백이 방금 완료되어 데이터가 아직 반영되지 않음\n"
-                              f"• 프로젝트가 실제로 배포된 적이 없음\n"
-                              f"• GitHub 연동이 올바르게 설정되지 않음\n\n"
-                              f"[해결방법]\n"
-                              f"• 롤백 완료 직후라면 30초 후 다시 시도해주세요\n"
-                              f"• 프로젝트를 먼저 배포한 후 롤백 목록을 조회해주세요\n\n"
-                              f"[사용법] 올바른 사용법:\n"
-                              f"• K-Le-PaaS/test01 롤백 목록 보여줘\n"
-                              f"• owner/repo 롤백 목록",
-                    "data": result or {}
-                }
             
-            # 사용자 친화적인 메시지 구성
-            current = result.get("current_state", {})
-            if not current:
+            if not result.get("current_state"):
                 return {
                     "status": "success",
-                    "message": f"❌ **{owner}/{repo}** 프로젝트에 배포 이력이 없습니다.\n\n"
-                              f"🔍 **확인 사항:**\n"
-                              f"• 프로젝트가 실제로 배포된 적이 있는지 확인해주세요\n"
-                              f"• GitHub 연동이 올바르게 설정되어 있는지 확인해주세요",
+                    "message": f"{owner}/{repo} 프로젝트에 배포 이력이 없습니다.",
                     "data": result
                 }
             
-            current_msg = f"현재: {current.get('commit_sha_short', 'unknown')} - {current.get('commit_message', '메시지 없음')[:50]}"
-            if current.get("is_rollback", False):
+            # 사용자 친화적인 메시지 구성
+            current = result["current_state"]
+            current_msg = f"현재: {current['commit_sha_short']} - {current['commit_message'][:50]}"
+            if current["is_rollback"]:
                 current_msg += " (롤백됨)"
             
-            available_count = result.get("total_available", 0)
-            rollback_count = result.get("total_rollbacks", 0)
+            available_count = result["total_available"]
+            rollback_count = result["total_rollbacks"]
             
-            message = f"✅ **{owner}/{repo}** 롤백 목록을 조회했습니다.\n\n"
-            message += f"📦 **현재 상태:** {current_msg}\n"
-            message += f"🔄 **롤백 가능한 버전:** {available_count}개\n"
-            message += f"📋 **최근 롤백:** {rollback_count}개"
+            message = f"{owner}/{repo} 롤백 목록을 조회했습니다.\n"
+            message += f"{current_msg}\n"
+            message += f"롤백 가능한 버전: {available_count}개, 최근 롤백: {rollback_count}개"
             
             return {
                 "status": "success",
@@ -1621,19 +1515,7 @@ async def _execute_get_rollback_list(args: Dict[str, Any]) -> Dict[str, Any]:
             
     except Exception as e:
         logger.error(f"롤백 목록 조회 실패: {str(e)}", exc_info=True)
-        return {
-            "status": "error", 
-            "message": f"❌ **{owner}/{repo}** 롤백 목록 조회 중 오류가 발생했습니다.\n\n"
-                      f"🔍 **가능한 원인:**\n"
-                      f"• 프로젝트가 존재하지 않습니다\n"
-                      f"• 데이터베이스 연결 문제\n"
-                      f"• 권한 문제\n\n"
-                      f"💡 **해결 방법:**\n"
-                      f"• 프로젝트 이름을 다시 확인해주세요\n"
-                      f"• 잠시 후 다시 시도해주세요\n"
-                      f"• 관리자에게 문의해주세요\n\n"
-                      f"**기술적 오류:** {str(e)}"
-        }
+        return {"status": "error", "message": f"롤백 목록 조회 실패: {str(e)}"}
 
 
 async def _execute_get_service(args: Dict[str, Any]) -> Dict[str, Any]:

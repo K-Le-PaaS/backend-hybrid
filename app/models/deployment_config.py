@@ -6,8 +6,15 @@ This serves as the source of truth for deployment configurations
 that should persist across deployments and rollbacks.
 """
 from sqlalchemy import Column, Integer, String, DateTime, UniqueConstraint
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from .base import Base
+
+# 한국 표준시 (KST) 타임존
+KST = timezone(timedelta(hours=9))
+
+def get_kst_now():
+    """현재 한국 시간(KST) 반환"""
+    return datetime.now(KST).replace(tzinfo=None)  # SQLite는 timezone-naive datetime 사용
 
 
 class DeploymentConfig(Base):
@@ -32,12 +39,12 @@ class DeploymentConfig(Base):
     last_scaled_at = Column(DateTime, nullable=True)
     last_scaled_by = Column(String, nullable=True)
 
-    # Timestamps
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    # Timestamps (한국 시간 KST로 저장)
+    created_at = Column(DateTime, default=get_kst_now, nullable=False)
     updated_at = Column(
         DateTime,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=get_kst_now,
+        onupdate=get_kst_now,
         nullable=False
     )
 
