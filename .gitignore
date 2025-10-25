@@ -97,3 +97,11 @@ mcp_logs/
 app_logs/
 deployment_logs/
 *.pem
+
+# Serena and Fenki files
+.serena/
+.serena/*
+serena_logs/
+fenki_logs/
+*.serena
+*.fenki
