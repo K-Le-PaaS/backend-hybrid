@@ -51,10 +51,8 @@ class ResponseFormatter:
                 "get_rollback_list": self.format_rollback_list,  # 롤백 목록 조회 명령어 추가
                 "scale": self.format_scale,
                 "deploy_application": self.format_deploy,
-                "deploy_github_repository": self.format_deploy_github_repository,  # GitHub 저장소 배포 명령어 추가
                 "k8s_restart_deployment": self.format_restart,
                 "cost_analysis": self.format_cost_analysis,
-                "unknown": self.format_unknown_command,
             }
             
             formatter = command_mapping.get(command)
@@ -80,7 +78,7 @@ class ResponseFormatter:
             pending = sum(1 for pod in pods if pod.get("phase") == "Pending")
             failed = sum(1 for pod in pods if pod.get("phase") == "Failed")
             
-            # 포맷된 Pod 데이터
+            # 포맷된 Pod 데이터 (나이 순으로 정렬)
             formatted_pods = []
             for pod in pods:
                 formatted_pods.append({
@@ -90,8 +88,16 @@ class ResponseFormatter:
                     "restarts": pod.get("restarts", 0),
                     "age": self._format_age(pod.get("age", "")),
                     "node": pod.get("node", ""),
-                    "namespace": pod.get("namespace", namespace)
+                    "namespace": pod.get("namespace", namespace),
+                    "_age_seconds": self._parse_age_to_seconds(pod.get("age", ""))  # 정렬용
                 })
+            
+            # 나이 순으로 정렬 (오래된 것부터)
+            formatted_pods.sort(key=lambda x: x["_age_seconds"], reverse=True)
+            
+            # 정렬용 필드 제거
+            for pod in formatted_pods:
+                del pod["_age_seconds"]
             
             return {
                 "type": "list_pods",
@@ -115,70 +121,12 @@ class ResponseFormatter:
     def format_rollback_list(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """롤백 목록을 타임라인 형식으로 포맷"""
         try:
-            # 안전한 데이터 접근
-            if not raw_data:
-                return self.format_error("list_rollback", "데이터가 없습니다")
-
-            # 디버깅 로그
-            self.logger.debug(f"format_rollback_list - raw_data keys: {raw_data.keys()}")
-
-            # 롤백 실행 응답과 롤백 목록 조회 응답 구분 처리
-            # 롤백 실행: {'status': 'success', 'action': 'ncp_rollback_to_commit', 'message': '...', 'result': {...}}
-            # 롤백 목록: {'status': 'success', 'message': '...', 'data': {'owner': ..., 'current_state': ...}}
-            if 'action' in raw_data and raw_data.get('action') in ['ncp_rollback_to_commit', 'rollback']:
-                # 이것은 롤백 실행 결과이므로 그대로 반환 (이미 포맷됨)
-                self.logger.warning(f"format_rollback_list called with rollback execution result, returning as-is")
-                return {
-                    "type": "rollback_execution",
-                    "summary": raw_data.get("message", "롤백이 실행되었습니다."),
-                    "data": {
-                        "formatted": {
-                            "status": raw_data.get("status"),
-                            "action": raw_data.get("action"),
-                            "owner": raw_data.get("owner"),
-                            "repo": raw_data.get("repo"),
-                            "target_commit": raw_data.get("target_commit_short")
-                        },
-                        "raw": raw_data
-                    },
-                    "metadata": {
-                        "is_execution_result": True
-                    }
-                }
-
             data = raw_data.get("data", {})
-            self.logger.debug(f"format_rollback_list - data: {data}")
-
-            if not data:
-                self.logger.error(f"format_rollback_list - data is empty! raw_data keys: {raw_data.keys()}")
-                return self.format_error("list_rollback", "롤백 데이터가 없습니다")
-            
             owner = data.get("owner", "")
             repo = data.get("repo", "")
             current_state = data.get("current_state", {})
             available_versions = data.get("available_versions", [])
             rollback_history = data.get("rollback_history", [])
-            
-            # current_state가 None인 경우 처리
-            if not current_state:
-                return {
-                    "type": "list_rollback",
-                    "summary": f"[INFO] **{owner}/{repo}** 프로젝트의 배포 이력을 찾을 수 없습니다.",
-                    "data": {
-                        "formatted": {
-                            "current": None,
-                            "versions": [],
-                            "history": []
-                        },
-                        "raw": raw_data
-                    },
-                    "metadata": {
-                        "owner": owner,
-                        "repo": repo,
-                        "total_available": 0,
-                        "total_rollbacks": 0
-                    }
-                }
             
             # 현재 상태 포맷
             current_formatted = {
@@ -273,59 +221,6 @@ class ResponseFormatter:
             self.logger.error(f"Error formatting status: {str(e)}")
             return self.format_error("status", str(e))
     
-    def format_rollback_execution(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """롤백 실행 결과를 카드 형식으로 포맷"""
-        try:
-            action = raw_data.get("action", "")
-            owner = raw_data.get("owner", "")
-            repo = raw_data.get("repo", "")
-            target_commit = raw_data.get("target_commit_short", "")
-            status = raw_data.get("status", "")
-            
-            # 롤백 타입에 따른 메시지 생성
-            if "to_commit" in action:
-                action_type = "커밋 기반 롤백"
-                action_description = f"커밋 {target_commit}로 롤백"
-            elif "to_previous" in action:
-                action_type = "이전 버전 롤백"
-                action_description = "이전 배포로 롤백"
-            else:
-                action_type = "롤백 실행"
-                action_description = "롤백 완료"
-            
-            return {
-                "type": "rollback_execution",
-                "summary": f"✅ **{owner}/{repo}** 롤백이 성공적으로 완료되었습니다",
-                "data": {
-                    "formatted": {
-                        "action_type": action_type,
-                        "action_description": action_description,
-                        "project": f"{owner}/{repo}",
-                        "target_commit": target_commit,
-                        "status": status,
-                        "timestamp": self._format_datetime(raw_data.get("timestamp", "")),
-                        "details": {
-                            "owner": owner,
-                            "repo": repo,
-                            "target_commit_full": raw_data.get("target_commit", ""),
-                            "action": action,
-                            "status": status
-                        }
-                    },
-                    "raw": raw_data
-                },
-                "metadata": {
-                    "owner": owner,
-                    "repo": repo,
-                    "action_type": action_type,
-                    "target_commit": target_commit,
-                    "status": status
-                }
-            }
-        except Exception as e:
-            self.logger.error(f"Error formatting rollback_execution: {str(e)}")
-            return self.format_error("rollback_execution", str(e))
-    
     def format_logs(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """로그를 읽기 쉬운 형식으로 포맷"""
         try:
@@ -404,22 +299,11 @@ class ResponseFormatter:
             
             formatted_deployments = []
             for deployment in deployments:
-                # replicas 정보 올바르게 처리
-                replicas_info = deployment.get("replicas", {})
-                if isinstance(replicas_info, dict):
-                    ready_count = replicas_info.get("ready", 0)
-                    desired_count = replicas_info.get("desired", 0)
-                    replicas_display = f"{ready_count}/{desired_count}"
-                else:
-                    replicas_display = "0/0"
-                
                 formatted_deployments.append({
                     "name": deployment.get("name", ""),
                     "namespace": deployment.get("namespace", ""),
-                    "replicas": replicas_display,
-                    "ready": replicas_display,  # ready와 replicas 동일하게 표시
-                    "up_to_date": str(deployment.get("up_to_date", 0)),  # 업데이트된 레플리카 수
-                    "available": str(deployment.get("available", 0)),  # 사용 가능한 레플리카 수
+                    "replicas": deployment.get("replicas", "0/0"),
+                    "ready": deployment.get("ready", "0/0"),
                     "age": self._format_age(deployment.get("age", "")),
                     "image": deployment.get("image", "")
                 })
@@ -609,34 +493,25 @@ class ResponseFormatter:
     def format_scale(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """스케일링 결과를 포맷"""
         try:
-            # raw_data에서 올바른 필드 추출
             owner = raw_data.get("owner", "")
             repo = raw_data.get("repo", "")
-            new_replicas = raw_data.get("new_replicas", raw_data.get("replicas", 0))
-            old_replicas = raw_data.get("old_replicas", 0)
-            
-            # 데이터가 비어있는 경우 기본값 설정
-            if not owner or not repo:
-                owner = "K-Le-PaaS"
-                repo = "test01"
+            replicas = raw_data.get("replicas", 0)
             
             return {
                 "type": "scale",
-                "summary": f"{owner}/{repo}을(를) {new_replicas}개로 스케일링했습니다.",
+                "summary": f"{owner}/{repo}을(를) {replicas}개로 스케일링했습니다.",
                 "data": {
                     "formatted": {
                         "owner": owner,
                         "repo": repo,
-                        "replicas": new_replicas,
-                        "old_replicas": old_replicas
+                        "replicas": replicas
                     },
                     "raw": raw_data
                 },
                 "metadata": {
                     "owner": owner,
                     "repo": repo,
-                    "replicas": new_replicas,
-                    "old_replicas": old_replicas
+                    "replicas": replicas
                 }
             }
         except Exception as e:
@@ -664,42 +539,6 @@ class ResponseFormatter:
         except Exception as e:
             self.logger.error(f"Error formatting deploy: {str(e)}")
             return self.format_error("deploy", str(e))
-    
-    def format_deploy_github_repository(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """GitHub 저장소 배포 결과를 포맷"""
-        try:
-            # raw_data는 이미 formatted 구조를 가지고 있음
-            formatted_data = raw_data.get("formatted", raw_data)
-            message = formatted_data.get("message", "")
-            repository = formatted_data.get("repository", "")
-            branch = formatted_data.get("branch", "")
-            commit = formatted_data.get("commit", {})
-            deployment_status = formatted_data.get("deployment_status", "")
-            
-            return {
-                "type": "deploy_github_repository",
-                "summary": message,
-                "data": {
-                    "formatted": {
-                        "status": formatted_data.get("status", "success"),
-                        "message": message,
-                        "repository": repository,
-                        "branch": branch,
-                        "commit": commit,
-                        "deployment_status": deployment_status
-                    },
-                    "raw": raw_data
-                },
-                "metadata": {
-                    "repository": repository,
-                    "branch": branch,
-                    "commit_sha": commit.get("sha", ""),
-                    "author": commit.get("author", "")
-                }
-            }
-        except Exception as e:
-            self.logger.error(f"Error formatting deploy_github_repository: {str(e)}")
-            return self.format_error("deploy_github_repository", str(e))
     
     def format_restart(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """재시작 결과를 포맷"""
@@ -748,38 +587,6 @@ class ResponseFormatter:
             self.logger.error(f"Error formatting cost_analysis: {str(e)}")
             return self.format_error("cost_analysis", str(e))
     
-    def format_unknown_command(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Unknown 명령어 포맷"""
-        try:
-            message = raw_data.get("message", "명령어를 이해할 수 없습니다.")
-            command = raw_data.get("command", "unknown")
-            suggestions = raw_data.get("suggestions", [])
-            
-            # 더 친화적인 메시지 생성
-            friendly_message = "명령어를 이해할 수 없습니다. GitHub 저장소 정보와 함께 명령어를 입력해주세요."
-            
-            return {
-                "type": "unknown",
-                "summary": friendly_message,
-                "data": {
-                    "formatted": {
-                        "message": friendly_message,
-                        "command": command,
-                        "suggestions": suggestions,
-                        "error_type": "command_not_understood"
-                    },
-                    "raw": raw_data
-                },
-                "metadata": {
-                    "command": command,
-                    "has_error": True,
-                    "error_type": "command_not_understood"
-                }
-            }
-        except Exception as e:
-            self.logger.error(f"Error formatting unknown command: {str(e)}")
-            return self.format_error("unknown", str(e))
-    
     def format_unknown(self, command: str, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """알 수 없는 명령어 포맷"""
         return {
@@ -812,13 +619,66 @@ class ResponseFormatter:
             }
         }
     
+    def _parse_age_to_seconds(self, age_str: str) -> int:
+        """Kubernetes age 문자열을 초 단위로 변환 (정렬용)"""
+        if not age_str:
+            return 0
+        
+        import re
+        
+        # Kubernetes age 형식 파싱 (예: "39d10h2m58s", "13h1m5s", "1h57m30s")
+        total_seconds = 0
+        
+        # 일 단위 (예: "39d", "11d")
+        days_match = re.search(r'(\d+)d', age_str)
+        if days_match:
+            total_seconds += int(days_match.group(1)) * 24 * 3600
+        
+        # 시간 단위 (예: "10h", "13h", "1h")
+        hours_match = re.search(r'(\d+)h', age_str)
+        if hours_match:
+            total_seconds += int(hours_match.group(1)) * 3600
+        
+        # 분 단위 (예: "2m", "1m", "57m")
+        minutes_match = re.search(r'(\d+)m', age_str)
+        if minutes_match:
+            total_seconds += int(minutes_match.group(1)) * 60
+        
+        # 초 단위 (예: "58s", "5s", "30s")
+        seconds_match = re.search(r'(\d+)s', age_str)
+        if seconds_match:
+            total_seconds += int(seconds_match.group(1))
+        
+        # 이미 포맷된 한국어 형식도 처리 (예: "39일 10시간 2분 58초")
+        if "일" in age_str:
+            days_kr = re.search(r'(\d+)일', age_str)
+            if days_kr:
+                total_seconds += int(days_kr.group(1)) * 24 * 3600
+        
+        if "시간" in age_str:
+            hours_kr = re.search(r'(\d+)시간', age_str)
+            if hours_kr:
+                total_seconds += int(hours_kr.group(1)) * 3600
+        
+        if "분" in age_str:
+            minutes_kr = re.search(r'(\d+)분', age_str)
+            if minutes_kr:
+                total_seconds += int(minutes_kr.group(1)) * 60
+        
+        if "초" in age_str:
+            seconds_kr = re.search(r'(\d+)초', age_str)
+            if seconds_kr:
+                total_seconds += int(seconds_kr.group(1))
+        
+        return total_seconds
+
     def _format_age(self, age_str: str) -> str:
         """Kubernetes age 문자열을 한국어로 포맷"""
-        if not age_str or age_str == "None":
+        if not age_str:
             return "알 수 없음"
         
         # 이미 포맷된 경우 그대로 반환
-        if "일" in age_str or "시간" in age_str or "분" in age_str or "초" in age_str:
+        if "일" in age_str or "시간" in age_str or "분" in age_str:
             return age_str
         
         # 간단한 변환 (실제로는 더 정교한 파싱이 필요)

@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any
 import logging
 from datetime import datetime
 import uuid
+import json
 from sqlalchemy.orm import Session
 
 # commands.py 연동을 위한 import
@@ -111,15 +112,17 @@ async def process_command(
             
             logger.info(f"Gemini 해석 결과: {gemini_result}")
             
-            # 명령 히스토리에 추가
-            command_id = str(uuid.uuid4())
-            history_entry = CommandHistory(
-                id=command_id,
-                command=command,
-                timestamp=datetime.now().isoformat(),
-                status="processing"
+            # 데이터베이스에 명령 히스토리 저장
+            from ...services.command_history import save_command_history
+            command_history_response = await save_command_history(
+                db=db,
+                command_text=command,
+                tool="nlp_process",
+                args={"intent": intent, "entities": entities},
+                status="processing",
+                user_id=effective_user_id
             )
-            command_history.insert(0, history_entry)
+            command_id = str(command_history_response.id)
             
             # Gemini 결과를 CommandRequest로 변환
             entities = gemini_result.get("entities", {})
@@ -189,9 +192,14 @@ async def process_command(
                 "k8s_result": {"error": str(e)}
             }
         
-        # 히스토리 업데이트
-        history_entry.status = "completed"
-        history_entry.result = result
+        # 데이터베이스 히스토리 업데이트
+        from ...services.command_history import update_command_status
+        await update_command_status(
+            db=db,
+            command_id=int(command_id),
+            status="completed",
+            result=result
+        )
         
         return CommandResponse(
             success=True,
@@ -204,10 +212,15 @@ async def process_command(
     except Exception as e:
         logger.error(f"명령 처리 실패: {str(e)}")
         
-        # 에러 히스토리 추가
+        # 에러 히스토리 업데이트
         if 'command_id' in locals():
-            history_entry.status = "failed"
-            history_entry.error = str(e)
+            from ...services.command_history import update_command_status
+            await update_command_status(
+                db=db,
+                command_id=int(command_id),
+                status="failed",
+                error_message=str(e)
+            )
         
         return CommandResponse(
             success=False,
@@ -215,16 +228,93 @@ async def process_command(
             error=str(e)
         )
 
-@router.get("/nlp/history", response_model=List[CommandHistory])
-async def get_command_history(limit: int = 10):
+@router.get("/nlp/history")
+async def get_command_history(
+    limit: int = 10,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    user_id: Optional[str] = Depends(get_current_user_id)
+):
     """
-    명령 히스토리를 조회합니다.
+    명령 히스토리를 조회합니다. (사용자 메시지만)
     """
     try:
-        return command_history[:limit]
+        from ...services.command_history import get_command_history as get_command_history_service
+        
+        # 데이터베이스에서 명령 히스토리 조회 (사용자 메시지만)
+        command_histories = await get_command_history_service(
+            db=db,
+            user_id=user_id,
+            limit=limit,
+            offset=offset
+        )
+        
+        # 사용자 메시지만 필터링 (tool이 "user_message"인 것만)
+        user_messages = [ch for ch in command_histories if ch.tool == "user_message"]
+        
+        # CommandHistory 모델로 변환 (프론트엔드 인터페이스와 일치)
+        return [
+            {
+                "id": ch.id,
+                "command_text": ch.command_text,
+                "tool": ch.tool,
+                "args": ch.args,
+                "result": ch.result,
+                "status": ch.status,
+                "error_message": ch.error_message,
+                "user_id": ch.user_id,
+                "created_at": ch.created_at.isoformat() if ch.created_at else datetime.now().isoformat(),
+                "updated_at": ch.updated_at.isoformat() if ch.updated_at else datetime.now().isoformat()
+            }
+            for ch in user_messages
+        ]
     except Exception as e:
         logger.error(f"명령 히스토리 조회 실패: {str(e)}")
         raise HTTPException(status_code=500, detail="명령 히스토리 조회에 실패했습니다.")
+
+@router.get("/nlp/conversation-history")
+async def get_conversation_history(
+    limit: int = 50,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    user_id: Optional[str] = Depends(get_current_user_id)
+):
+    """
+    대화 히스토리를 조회합니다. (사용자 메시지와 AI 응답 모두)
+    """
+    try:
+        from ...services.command_history import get_command_history as get_command_history_service
+        
+        # 데이터베이스에서 명령 히스토리 조회 (모든 메시지)
+        command_histories = await get_command_history_service(
+            db=db,
+            user_id=user_id,
+            limit=limit,
+            offset=offset
+        )
+        
+        # 대화 히스토리는 오래된 순서로 정렬 (사용자 질문 → AI 응답 순서)
+        command_histories.sort(key=lambda x: x.created_at)
+        
+        # CommandHistory 모델로 변환 (프론트엔드 인터페이스와 일치)
+        return [
+            {
+                "id": ch.id,
+                "command_text": ch.command_text,
+                "tool": ch.tool,
+                "args": ch.args,
+                "result": ch.result,
+                "status": ch.status,
+                "error_message": ch.error_message,
+                "user_id": ch.user_id,
+                "created_at": ch.created_at.isoformat() if ch.created_at else datetime.now().isoformat(),
+                "updated_at": ch.updated_at.isoformat() if ch.updated_at else datetime.now().isoformat()
+            }
+            for ch in command_histories
+        ]
+    except Exception as e:
+        logger.error(f"대화 히스토리 조회 실패: {str(e)}")
+        raise HTTPException(status_code=500, detail="대화 히스토리 조회에 실패했습니다.")
 
 @router.get("/nlp/suggestions", response_model=List[str])
 async def get_command_suggestions(context: Optional[str] = None):
@@ -356,9 +446,20 @@ async def process_conversation(
             if not session:
                 raise HTTPException(404, "세션을 찾을 수 없습니다")
 
-        # 2. 사용자 메시지 저장
+        # 2. 사용자 메시지 저장 (Redis + DB)
         await conv_manager.add_message(
             user_id, session_id, "user", request.command
+        )
+        
+        # 사용자 메시지를 command_history에 저장 (DB)
+        from ...services.command_history import save_command_history
+        await save_command_history(
+            db=db,
+            command_text=request.command,
+            tool="user_message",
+            args={"session_id": session_id, "action": "user_input"},
+            status="completed",
+            user_id=user_id
         )
 
         # 3. 상태 업데이트: INTERPRETING
@@ -434,99 +535,7 @@ async def process_conversation(
             await conv_manager.update_state(
                 user_id, session_id, ConversationState.ERROR
             )
-            
-            # 명령어에 "○○" 같은 플레이스홀더가 있는지 확인
-            if "○○" in request.command or "unknown" in request.command.lower():
-                error_message = (
-                    "❌ **명령어를 이해할 수 없습니다**\n\n"
-                    "🔍 **올바른 사용법:**\n"
-                    "• `K-Le-PaaS/test01 4개로 스케일링 해줘`\n"
-                    "• `K-Le-PaaS/test01 롤백 목록 보여줘`\n"
-                    "• `K-Le-PaaS/test01 상태 확인`\n"
-                    "• `K-Le-PaaS/test01 로그 보여줘`\n\n"
-                    "💡 **팁:** GitHub 저장소의 owner/repo 형식으로 입력해주세요"
-                )
-                
-                # 구조화된 에러 데이터 생성
-                error_data = {
-                    "error_type": "missing_info",
-                    "error_message": "프로젝트 정보가 불완전합니다",
-                    "solutions": [
-                        {
-                            "title": "프로젝트 이름을 정확히 입력하세요",
-                            "description": "GitHub 저장소의 owner/repo 형식으로 입력해주세요",
-                            "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
-                        },
-                        {
-                            "title": "리포지토리 연결 확인",
-                            "description": "GitHub에 연결된 프로젝트인지 확인해주세요",
-                            "example": "owner/repo 롤백 목록"
-                        }
-                    ],
-                    "supported_commands": [
-                        {
-                            "category": "롤백",
-                            "name": "롤백 목록 조회",
-                            "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
-                        },
-                        {
-                            "category": "배포",
-                            "name": "애플리케이션 배포",
-                            "example": "K-Le-PaaS/test01 배포해줘"
-                        }
-                    ]
-                }
-            else:
-                error_message = (
-                    "❌ **명령을 이해하지 못했습니다**\n\n"
-                    "🔍 **지원하는 명령어:**\n"
-                    "• **롤백**: `K-Le-PaaS/test01 롤백 목록 보여줘`\n"
-                    "• **배포**: `K-Le-PaaS/test01 배포해줘`\n"
-                    "• **Pod 관리**: `pod 목록 보여줘`\n"
-                    "• **서비스 관리**: `service 목록 보여줘`\n\n"
-                    "💡 **팁:** 구체적인 리소스 이름과 함께 명령어를 입력해주세요"
-                )
-                
-                # 구조화된 에러 데이터 생성
-                error_data = {
-                    "error_type": "uninterpretable",
-                    "error_message": "명령을 이해하지 못했습니다",
-                    "solutions": [
-                        {
-                            "title": "명령어 형식을 확인하세요",
-                            "description": "지원되는 명령어 형식으로 입력해주세요",
-                            "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
-                        },
-                        {
-                            "title": "리소스 이름을 명확히 하세요",
-                            "description": "구체적인 리소스 이름과 함께 명령어를 입력해주세요",
-                            "example": "nginx-pod 로그 보여줘"
-                        }
-                    ],
-                    "supported_commands": [
-                        {
-                            "category": "롤백",
-                            "name": "롤백 목록 조회",
-                            "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
-                        },
-                        {
-                            "category": "배포",
-                            "name": "애플리케이션 배포",
-                            "example": "K-Le-PaaS/test01 배포해줘"
-                        },
-                        {
-                            "category": "Pod 관리",
-                            "name": "Pod 목록 조회",
-                            "example": "pod 목록 보여줘"
-                        },
-                        {
-                            "category": "서비스 관리",
-                            "name": "서비스 목록 조회",
-                            "example": "service 목록 보여줘"
-                        }
-                    ]
-                }
-            
+            error_message = "죄송합니다. 명령을 이해하지 못했습니다. 다시 말씀해주시겠어요?"
             await conv_manager.add_message(
                 user_id, session_id,
                 "assistant", error_message,
@@ -539,19 +548,7 @@ async def process_conversation(
                 requires_confirmation=False,
                 cost_estimate=None,
                 pending_action=None,
-                result={
-                    "type": "command_error",
-                    "summary": error_message,
-                    "data": {
-                        "formatted": error_data,
-                        "raw": {"command": request.command, "error": error_message}
-                    },
-                    "metadata": {
-                        "error_type": error_data["error_type"],
-                        "timestamp": datetime.now().isoformat(),
-                        "command": request.command
-                    }
-                }
+                result=None
             )
 
         logger.info(f"명령 해석 완료: intent={intent}, entities={entities}")
@@ -657,116 +654,8 @@ async def process_conversation(
                 steps_back=entities.get("steps_back", 0)
             )
 
-            try:
-                plan = plan_command(req)
-                result = await execute_command(plan)
-            except ValueError as e:
-                logger.error(f"명령 계획 실패: {str(e)}")
-                await conv_manager.update_state(
-                    user_id, session_id, ConversationState.ERROR
-                )
-                
-                # ValueError를 새로운 에러 타입으로 변환
-                error_message = str(e)
-                
-                # 에러 타입 결정
-                if "프로젝트 정보가 필요합니다" in error_message:
-                    error_type = "missing_info"
-                    error_data = {
-                        "error_type": "missing_info",
-                        "error_message": "프로젝트 정보가 불완전합니다",
-                        "solutions": [
-                            {
-                                "title": "프로젝트 이름을 정확히 입력하세요",
-                                "description": "GitHub 저장소의 owner/repo 형식으로 입력해주세요",
-                                "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
-                            },
-                            {
-                                "title": "리포지토리 연결 확인",
-                                "description": "GitHub에 연결된 프로젝트인지 확인해주세요",
-                                "example": "owner/repo 롤백 목록"
-                            }
-                        ],
-                        "supported_commands": [
-                            {
-                                "category": "롤백",
-                                "name": "롤백 목록 조회",
-                                "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
-                            },
-                            {
-                                "category": "배포",
-                                "name": "애플리케이션 배포",
-                                "example": "K-Le-PaaS/test01 배포해줘"
-                            }
-                        ]
-                    }
-                else:
-                    error_type = "uninterpretable"
-                    error_data = {
-                        "error_type": "uninterpretable",
-                        "error_message": "명령을 이해하지 못했습니다",
-                        "solutions": [
-                            {
-                                "title": "명령어 형식을 확인하세요",
-                                "description": "지원되는 명령어 형식으로 입력해주세요",
-                                "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
-                            },
-                            {
-                                "title": "리소스 이름을 명확히 하세요",
-                                "description": "구체적인 리소스 이름과 함께 명령어를 입력해주세요",
-                                "example": "nginx-pod 로그 보여줘"
-                            }
-                        ],
-                        "supported_commands": [
-                            {
-                                "category": "롤백",
-                                "name": "롤백 목록 조회",
-                                "example": "K-Le-PaaS/test01 롤백 목록 보여줘"
-                            },
-                            {
-                                "category": "배포",
-                                "name": "애플리케이션 배포",
-                                "example": "K-Le-PaaS/test01 배포해줘"
-                            },
-                            {
-                                "category": "Pod 관리",
-                                "name": "Pod 목록 조회",
-                                "example": "pod 목록 보여줘"
-                            },
-                            {
-                                "category": "서비스 관리",
-                                "name": "서비스 목록 조회",
-                                "example": "service 목록 보여줘"
-                            }
-                        ]
-                    }
-                
-                await conv_manager.add_message(
-                    user_id, session_id,
-                    "assistant", error_message,
-                    action="error"
-                )
-                return ConversationResponse(
-                    session_id=session_id,
-                    state=ConversationState.ERROR.value,
-                    message=error_message,
-                    requires_confirmation=False,
-                    cost_estimate=None,
-                    pending_action=None,
-                    result={
-                        "type": "command_error",
-                        "summary": error_message,
-                        "data": {
-                            "formatted": error_data,
-                            "raw": {"command": request.command, "error": error_message}
-                        },
-                        "metadata": {
-                            "error_type": error_data["error_type"],
-                            "timestamp": datetime.now().isoformat(),
-                            "command": request.command
-                        }
-                    }
-                )
+            plan = plan_command(req)
+            result = await execute_command(plan)
 
             await conv_manager.update_state(
                 user_id, session_id, ConversationState.COMPLETED
@@ -776,7 +665,19 @@ async def process_conversation(
             await conv_manager.add_message(
                 user_id, session_id,
                 "assistant", response_message,
-                action="execution_completed"
+                action="execution_completed",
+                metadata={"result": result}
+            )
+            
+            # 어시스턴트 응답을 command_history에 저장 (DB)
+            await save_command_history(
+                db=db,
+                command_text=response_message,
+                tool="assistant_response",
+                args={"session_id": session_id, "action": "execution_completed", "intent": intent, "entities": entities},
+                result=result,
+                status="completed",
+                user_id=user_id
             )
 
             return ConversationResponse(
@@ -820,6 +721,7 @@ async def get_conversation_history(
         history = await conv_manager.get_conversation_history(
             user_id, session_id, limit=limit
         )
+
 
         return {
             "session_id": session_id,
@@ -1003,21 +905,11 @@ async def confirm_action(
             f"session_id={request.session_id}"
         )
 
-        # 롤백 명령어인 경우 저장소 정보가 없으면 에러 메시지 개선
         if not github_owner or not github_repo:
-            if command == "rollback":
-                error_msg = (
-                    "❌ **롤백할 저장소 정보가 없습니다**\n\n"
-                    "🔍 **해결 방법:**\n"
-                    "• `K-Le-PaaS/test01 롤백 목록 보여줘` - 먼저 롤백 목록을 확인하세요\n"
-                    "• `K-Le-PaaS/test01 롤백해줘` - 저장소 정보와 함께 롤백 명령을 입력하세요\n\n"
-                    "💡 **팁:** GitHub 저장소의 owner/repo 형식으로 입력해주세요"
-                )
-            else:
-                error_msg = (
-                    f"저장소 정보가 없습니다. 먼저 '저장소이름 롤백 목록' 명령으로 "
-                    f"롤백할 저장소를 지정해주세요. (owner={github_owner}, repo={github_repo})"
-                )
+            error_msg = (
+                f"저장소 정보가 없습니다. 먼저 '저장소이름 롤백 목록' 명령으로 "
+                f"롤백할 저장소를 지정해주세요. (owner={github_owner}, repo={github_repo})"
+            )
             logger.error(error_msg)
             raise HTTPException(400, error_msg)
 
@@ -1055,28 +947,7 @@ async def confirm_action(
         # 대기 중인 작업 제거
         await conv_manager.clear_pending_action(user_id, request.session_id)
 
-        # 롤백 완료 시 특별한 메시지 처리
-        if result.get('action') == 'ncp_rollback_to_previous' or result.get('action') == 'ncp_rollback_to_commit':
-            # 롤백 성공 메시지 생성
-            target_commit = result.get('target_commit_short', '')
-            owner = result.get('owner', '')
-            repo = result.get('repo', '')
-            
-            if target_commit:
-                result_message = f"✅ 롤백이 성공적으로 완료되었습니다!\n\n"
-                result_message += f"📦 **프로젝트**: {owner}/{repo}\n"
-                result_message += f"🔄 **롤백된 커밋**: {target_commit}\n"
-                result_message += f"🚀 **상태**: 배포 완료\n\n"
-                result_message += f"이전 배포로 성공적으로 롤백되었습니다."
-            else:
-                result_message = f"✅ 롤백이 성공적으로 완료되었습니다!\n\n"
-                result_message += f"📦 **프로젝트**: {owner}/{repo}\n"
-                result_message += f"🚀 **상태**: 배포 완료\n\n"
-                result_message += f"이전 배포로 성공적으로 롤백되었습니다."
-        else:
-            # 일반적인 작업 완료 메시지
-            result_message = f"작업이 완료되었습니다: {result.get('message', '')}"
-        
+        result_message = f"작업이 완료되었습니다: {result.get('message', '')}"
         await conv_manager.add_message(
             user_id, request.session_id,
             "assistant", result_message,

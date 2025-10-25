@@ -1,12 +1,19 @@
 """명령어 히스토리 서비스"""
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any
 import logging
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
 from ..models.command_history import CommandHistory, CommandHistoryCreate, CommandHistoryResponse
+
+# 한국 표준시 (KST) 타임존
+KST = timezone(timedelta(hours=9))
+
+def get_kst_now():
+    """현재 한국 시간(KST) 반환"""
+    return datetime.now(KST).replace(tzinfo=None)
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +146,7 @@ async def update_command_status(
             command_history.result = result
         if error_message is not None:
             command_history.error_message = error_message
-        command_history.updated_at = datetime.now(timezone.utc)
+        command_history.updated_at = get_kst_now()
         
         db.commit()
         db.refresh(command_history)

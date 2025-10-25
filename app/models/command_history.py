@@ -1,10 +1,17 @@
 """명령어 히스토리 모델"""
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 from sqlalchemy import Column, Integer, String, Text, DateTime, JSON
 from pydantic import BaseModel
 from .base import Base
+
+# 한국 표준시 (KST) 타임존
+KST = timezone(timedelta(hours=9))
+
+def get_kst_now():
+    """현재 한국 시간(KST) 반환"""
+    return datetime.now(KST).replace(tzinfo=None)  # SQLite는 timezone-naive datetime 사용
 
 
 class CommandHistory(Base):
@@ -19,8 +26,8 @@ class CommandHistory(Base):
     status = Column(String(20), nullable=False, comment="실행 상태 (success, error, pending)")
     error_message = Column(Text, comment="에러 메시지")
     user_id = Column(String(100), comment="사용자 ID")
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=get_kst_now)
+    updated_at = Column(DateTime, default=get_kst_now, onupdate=get_kst_now)
 
 
 class CommandHistoryCreate(BaseModel):
