@@ -45,8 +45,24 @@ class GeminiClient(LLMClient):
                     entities["service_name"] = parameters.get("serviceName")
 
             # namespace 기본값 포함이 필요한 명령어들
-            if command in ("status", "endpoint", "restart", "overview", "list_pods", "list_apps", "logs", "get_service", "get_deployment", "cost_analysis"):
+            if command in ("status", "endpoint", "restart", "overview", "list_pods", "list_apps", "logs", "get_service", "get_deployment", "cost_analysis", "current_node_cost", "scaling_cost", "network_cost"):
                 entities["namespace"] = parameters.get("namespace", "default")
+
+            # 현재 노드 비용 조회 파라미터
+            if command == "current_node_cost":
+                entities["node_spec"] = parameters.get("node_spec")
+                entities["node_count"] = parameters.get("node_count", 1)
+
+            # 노드 스케일링 비용 계산 파라미터
+            if command == "scaling_cost":
+                entities["node_spec"] = parameters.get("node_spec")
+                entities["current_node_count"] = parameters.get("current_node_count", 1)
+                entities["target_node_count"] = parameters.get("target_node_count")
+
+            # 네트워크 비용 계산 파라미터
+            if command == "network_cost":
+                entities["public_ip_count"] = parameters.get("public_ip_count", 1)
+                entities["traffic_gb"] = parameters.get("traffic_gb", 0)
 
             # 비용 분석 파라미터
             if command == "cost_analysis":
@@ -81,6 +97,37 @@ class GeminiClient(LLMClient):
                 if coerced_replicas > 100:  # 최대 100개로 제한
                     coerced_replicas = 100
                 entities["replicas"] = coerced_replicas
+
+            # 비용 분석 명령어 파라미터 처리
+            if command in ("current_node_cost", "scaling_cost", "network_cost", "cost_analysis"):
+                # 네임스페이스
+                entities["namespace"] = parameters.get("namespace", "default")
+                
+                if command == "current_node_cost":
+                    entities["node_spec"] = parameters.get("node_spec")
+                    entities["node_count"] = parameters.get("node_count", 1)
+                    
+                elif command == "scaling_cost":
+                    entities["node_spec"] = parameters.get("node_spec")
+                    entities["current_node_count"] = parameters.get("current_node_count", 1)
+                    entities["target_node_count"] = parameters.get("target_node_count")
+                    
+                    # 스케일링 비용 계산에서 파라미터가 부족한 경우 인터랙티브 UI 제공
+                    if not entities["node_spec"] or not entities["target_node_count"]:
+                        entities["interactive"] = True
+                        entities["type"] = "scaling_type_selection"
+                    
+                elif command == "network_cost":
+                    entities["public_ip_count"] = parameters.get("public_ip_count", 1)
+                    entities["traffic_gb"] = parameters.get("traffic_gb", 0)
+                    
+                    # 네트워크 비용 계산에서 파라미터가 부족한 경우 인터랙티브 UI 제공
+                    if entities["public_ip_count"] == 1 and entities["traffic_gb"] == 0:
+                        entities["interactive"] = True
+                        entities["type"] = "network_cost_input"
+                    
+                elif command == "cost_analysis":
+                    entities["analysis_type"] = parameters.get("analysis_type", "usage")
 
             # NCP 롤백 파라미터
             if command == "rollback":
@@ -187,6 +234,10 @@ class GeminiClient(LLMClient):
                 "overview": "통합 대시보드 조회 명령을 해석했습니다.",
                 "get_service": "Service 상세 정보 조회 명령을 해석했습니다.",
                 "get_deployment": "Deployment 상세 정보 조회 명령을 해석했습니다.",
+                "current_node_cost": "현재 노드 비용 조회 명령을 해석했습니다.",
+                "scaling_cost": "노드 스케일링 비용 계산 명령을 해석했습니다.",
+                "network_cost": "네트워크 비용 계산 명령을 해석했습니다.",
+                "cost_analysis": "비용 분석 명령을 해석했습니다.",
                 "unknown": "알 수 없는 명령입니다."
             }
             
@@ -478,18 +529,81 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 - 다양한 뉘앙스: "deployment 어떻게 설정되어 있어?", "배포 설정 확인해줘", "deployment 정보 자세히", "배포 구성 체크", "deployment 상세 분석", "배포 설정 파악", "deployment 정보 분석", "배포 상태 상세히"
 필수 JSON 형식: { "command": "get_deployment", "parameters": { "deploymentName": "<추출된_배포_이름>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-17. 비용 분석 및 최적화 (command: "cost_analysis")
-설명: 클러스터의 비용 현황을 분석하고 최적화 제안을 제공하는 명령입니다.
+17. 현재 노드 비용 조회 (command: "current_node_cost")
+설명: 현재 사용 중인 NCP 노드의 비용 정보를 조회하는 명령입니다. 스펙이나 개수가 명시되지 않은 경우 인터랙티브 UI를 제공합니다.
+사용자 입력 예시:
+- 기본 표현: "현재 내가 쓰는 노드 비용은?", "내 노드 비용 얼마나 나와?", "현재 서버 비용 확인"
+- 스펙 지정: "c2-g3 노드 비용은?", "내가 쓰는 c4-g3 비용 얼마나?", "c8-g3 비용 확인"
+- 개수 포함: "c2-g3 노드 2개 비용은?", "c4-g3 서버 3대 비용", "내 노드 5개 비용"
+- 자연스러운 표현: "현재 클러스터 비용", "노드 비용 확인", "서버 요금 조회", "내 서버 비용"
+- 다양한 뉘앙스: "노드 요금", "서버 비용", "인스턴스 비용", "컴퓨트 비용", "현재 비용"
+- 불완전한 질문: "노드 비용", "서버 비용", "비용 확인", "얼마나 나와?"
+
+추출 규칙:
+1. **노드 스펙 추출**: "c2-g3", "c4-g3", "c8-g3", "c16-g3", "c32-g3", "c48-g3", "c64-g3" 등 NCP 서버 스펙명 추출
+2. **노드 개수 추출**: "2개", "3개", "5개", "10개" 등 숫자 추출 (없으면 1개로 기본값)
+3. **현재 비용 키워드**: "현재", "내가 쓰는", "내", "지금", "현재 사용" 등
+4. **인터랙티브 UI 조건**: 스펙이나 개수가 명시되지 않은 경우 항상 인터랙티브 UI 제공
+
+필수 JSON 형식: { "command": "current_node_cost", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>", "node_spec": "<추출된_노드_스펙_없으면_null>", "node_count": <추출된_노드_개수_없으면_1> } }
+
+18. 노드 스케일링 비용 계산 (command: "scaling_cost")
+설명: 노드 개수를 늘리거나 줄일 때의 비용 변화를 계산하는 명령입니다. 스펙이나 개수가 명시되지 않은 경우 인터랙티브 UI를 제공합니다.
+사용자 입력 예시:
+- 기본 표현: "내가 쓰는 노드를 3대로 늘리면 한달에 비용은?", "노드 5개로 늘리면 얼마나?", "서버 3대 추가하면 비용은?"
+- 스펙 지정: "c2-g3을 3개로 스케일링하면 비용은?", "c4-g3을 5개로 늘리면 비용", "c8-g3 2개 추가 비용"
+- 현재+목표: "c2-g3 노드 2개에서 5개로 늘리면 비용은?", "현재 3개에서 6개로 스케일링 비용"
+- 자연스러운 표현: "스케일링 비용 계산", "노드 확장 비용", "서버 증설 비용", "스케일 아웃 비용", "스케일업 비용 계산", "스케일아웃 비용 계산"
+- 다양한 뉘앙스: "노드 늘리면 비용", "서버 추가 비용", "인스턴스 확장 비용", "스케일링 요금"
+- 불완전한 질문: "5개로 늘리면?", "3개로 스케일링하면?", "노드 늘리면?", "스케일링 비용", "확장 비용", "늘리면?", "스케일링하면?"
+
+추출 규칙:
+1. **노드 스펙 추출**: "c2-g3", "c4-g3", "c8-g3", "c16-g3", "c32-g3", "c48-g3", "c64-g3" 등 NCP 서버 스펙명 추출
+2. **현재 개수 추출**: "2개에서", "현재 3개", "지금 5개" 등 현재 노드 개수 추출 (없으면 1개로 기본값)
+3. **목표 개수 추출**: "3개로", "5개로", "10개로" 등 목표 노드 개수 추출
+4. **스케일링 키워드**: "늘리면", "스케일링", "확장", "추가", "증설" 등
+5. **인터랙티브 UI 조건**: 스펙이나 목표 개수가 명시되지 않은 경우 항상 인터랙티브 UI 제공
+
+필수 JSON 형식: { "command": "scaling_cost", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>", "node_spec": "<추출된_노드_스펙_없으면_null>", "current_node_count": <현재_노드_개수_없으면_1>, "target_node_count": <목표_노드_개수_필수> } }
+
+19. 네트워크 비용 계산 (command: "network_cost")
+설명: Public IP와 트래픽 사용량에 따른 네트워크 비용을 계산하는 명령입니다. IP 개수나 트래픽 용량이 명시되지 않은 경우 인터랙티브 UI를 제공합니다.
+사용자 입력 예시:
+- 기본 표현: "네트워크 비용은 얼마나 나올까?", "Public IP 비용 확인", "트래픽 비용 계산"
+- 트래픽 용량 지정: "아웃바운드 트래픽 100GB 비용은?", "인터넷 트래픽 1TB 비용", "트래픽 500GB 비용"
+- Public IP 개수: "Public IP 2개 비용", "공인 IP 3개 비용", "외부 IP 비용"
+- 조합: "Public IP 1개, 트래픽 200GB 비용", "네트워크 100GB 비용", "인터넷 트래픽 비용"
+- 자연스러운 표현: "네트워크 요금", "트래픽 요금", "Public IP 요금", "인터넷 비용"
+- 다양한 뉘앙스: "네트워크 비용", "트래픽 비용", "인터넷 요금", "외부 접속 비용"
+- 불완전한 질문: "네트워크 비용", "트래픽 비용", "Public IP 비용", "인터넷 비용", "네트워크 요금"
+
+추출 규칙:
+1. **트래픽 용량 추출**: "100GB", "1TB", "500GB", "200GB" 등 용량 단위 추출 (없으면 0GB)
+2. **Public IP 개수 추출**: "1개", "2개", "3개" 등 Public IP 개수 추출 (없으면 1개)
+3. **네트워크 키워드**: "네트워크", "트래픽", "Public IP", "인터넷", "아웃바운드" 등
+4. **인터랙티브 UI 조건**: IP 개수나 트래픽 용량이 명시되지 않은 경우 항상 인터랙티브 UI 제공
+
+필수 JSON 형식: { "command": "network_cost", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>", "public_ip_count": <추출된_Public_IP_개수_없으면_1>, "traffic_gb": <추출된_트래픽_용량_없으면_0> } }
+
+20. 비용 분석 및 최적화 (command: "cost_analysis")
+설명: 클러스터의 전체적인 비용 현황을 분석하고 최적화 제안을 제공하는 명령입니다.
 사용자 입력 예시:
 - 기본 표현: "비용 분석해줘", "현재 클러스터 비용 확인", "비용 현황 보여줘", "얼마나 나와?"
 - 최적화 요청: "비용 줄일 방법 알려줘", "비용 절감 방안", "저렴하게 운영하는 방법", "비용 최적화 제안"
 - 상세 분석: "사용하지 않는 리소스 찾아줘", "낭비되는 비용 확인", "불필요한 리소스 확인"
 - 예상 비용: "월간 예상 비용", "이번 달 예상 비용", "비용 예측해줘"
 - 다양한 뉘앙스: "비용 얼마나 드나?", "클러스터 운영 비용", "요금 확인", "비용 체크", "지출 현황", "예산 확인", "리소스 비용", "인프라 비용", "운영 비용 분석"
-필수 JSON 형식: { "command": "cost_analysis", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>", "analysis_type": "<optimization|usage|forecast>" } }
+
+추출 규칙:
+1. **분석 타입 결정**:
+   - 최적화: "줄일", "절감", "최적화", "저렴하게" 등
+   - 예측: "예상", "예측", "예상치" 등
+   - 기본: "현황", "분석", "확인" 등
+
+필수 JSON 형식: { "command": "cost_analysis", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>", "analysis_type": "<optimization|forecast|usage>" } }
 
 일반 규칙:
-- 사용자의 의도가 불분명하거나 위 17가지 명령어 중 어느 것과도 일치하지 않으면: { "command": "unknown", "parameters": { "query": "<사용자_원본_입력>" } }
+- 사용자의 의도가 불분명하거나 위 20가지 명령어 중 어느 것과도 일치하지 않으면: { "command": "unknown", "parameters": { "query": "<사용자_원본_입력>" } }
 - 리소스 이름이 명시되지 않은 경우, 컨텍스트상 기본 리소스가 있다면 그 이름을 사용하거나 null을 반환합니다.
 - 리소스 타입별 파라미터 사용: podName(파드), deploymentName(배포), serviceName(서비스)
 - **중요한 리소스 타입 구분 규칙:**
@@ -500,6 +614,12 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
   * commitSha와 stepsBack이 둘 다 있으면 commitSha 우선 (커밋 기반 롤백)
   * 둘 다 없으면 stepsBack=1로 기본 설정 (1번 전 배포로 롤백)
   * owner/repo가 없어도 롤백 키워드가 있으면 rollback 명령으로 인식 (저장소 정보는 컨텍스트에서 복원)
+- **불완전한 질문 처리**:
+  * "5개로 늘리면?", "3개로 스케일링하면?", "늘리면?", "스케일링하면?" → scaling_cost 명령으로 인식 (target_node_count 추출)
+  * "노드 늘리면?", "스케일링 비용", "확장 비용" → scaling_cost 명령으로 인식
+  * "네트워크 비용", "트래픽 비용", "Public IP 비용" → network_cost 명령으로 인식
+  * "노드 비용", "서버 비용", "비용 확인", "얼마나 나와?" → current_node_cost 명령으로 인식
+  * 불완전한 질문의 경우 해당 명령어로 인식하되 파라미터는 기본값으로 설정
 - 오직 JSON 객체만 반환하며, 추가 설명이나 대화는 포함하지 않습니다."""
         
         payload = {

@@ -39,10 +39,15 @@ class ActionClassifier:
         "endpoint": ActionRiskLevel.LOW,
         "overview": ActionRiskLevel.LOW,
         "cost_analysis": ActionRiskLevel.LOW,  # 비용 분석 (조회만)
+        "current_node_cost": ActionRiskLevel.LOW,  # 현재 노드 비용 분석 (조회만)
+        "network_cost": ActionRiskLevel.LOW,  # 네트워크 비용 분석 (조회만)
         "unknown": ActionRiskLevel.LOW,  # unknown 명령어는 확인 불필요
 
-        # 중간 위험 (비용 추정 + 확인, MEDIUM 위험)
-        "scale": ActionRiskLevel.MEDIUM,
+        # 낮은 위험 (직접적인 스케일링 명령은 확인 없이 바로 실행)
+        "scale": ActionRiskLevel.LOW,
+        "scale_up": ActionRiskLevel.LOW,  # 스케일업 UI 표시 (확인 불필요)
+        "scale_out": ActionRiskLevel.LOW,  # 스케일아웃 UI 표시 (확인 불필요)
+        "scaling_cost": ActionRiskLevel.LOW,  # 스케일링 비용 분석 UI 표시 (확인 불필요)
         "deploy": ActionRiskLevel.MEDIUM,
         "restart": ActionRiskLevel.MEDIUM,
 
@@ -56,8 +61,10 @@ class ActionClassifier:
 
     # 비용 추정이 필요한 명령어
     COST_ESTIMATION_COMMANDS = {
-        "scale",      # 리소스 증가/감소
-        "delete",     # 리소스 제거 (절감 비용)
+        "scale",           # 리소스 증가/감소
+        "deploy",          # 배포 (빌드/배포 비용)
+        "delete",          # 리소스 제거 (절감 비용)
+        # scale_up, scale_out, scaling_cost는 UI만 표시하므로 비용 추정 불필요
     }
 
     # 확인 메시지 템플릿
@@ -66,6 +73,21 @@ class ActionClassifier:
             "title": "스케일링 확인",
             "icon": "📊",
             "message_template": "{deployment_name}을(를) {replicas}개로 조정하시겠습니까?"
+        },
+        "scale_up": {
+            "title": "스케일업 확인",
+            "icon": "📈",
+            "message_template": "{current_spec} {current_count}개에서 {target_spec} {target_count}개로 스케일업하시겠습니까?"
+        },
+        "scale_out": {
+            "title": "스케일아웃 확인",
+            "icon": "📊",
+            "message_template": "{node_spec} 노드를 {current_count}개에서 {target_count}개로 늘리시겠습니까?"
+        },
+        "scaling_cost": {
+            "title": "스케일링 비용 분석",
+            "icon": "💰",
+            "message_template": "스케일링 비용을 분석하시겠습니까?"
         },
         "deploy": {
             "title": "배포 확인",
@@ -122,6 +144,11 @@ class ActionClassifier:
         Returns:
             확인이 필요하면 True
         """
+        # 비용 분석 명령어들은 확인 없이 바로 실행
+        cost_analysis_commands = ["current_node_cost", "scaling_cost", "network_cost", "cost_analysis"]
+        if command in cost_analysis_commands:
+            return False
+            
         risk = self.classify(command)
         needs_confirmation = risk in [
             ActionRiskLevel.MEDIUM,

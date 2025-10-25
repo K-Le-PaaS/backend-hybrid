@@ -54,6 +54,14 @@ class ResponseFormatter:
                 "deploy_github_repository": self.format_deploy_github_repository,  # GitHub 저장소 배포 명령어 추가
                 "k8s_restart_deployment": self.format_restart,
                 "cost_analysis": self.format_cost_analysis,
+                "current_node_cost": self.format_cost_analysis,
+                "scaling_cost": self.format_cost_analysis,
+                "scale_up": self.format_cost_analysis,  # 스케일업 UI 처리
+                "scale_out": self.format_cost_analysis,  # 스케일아웃 UI 처리
+                "network_cost": self.format_cost_analysis,
+                "calculate_current_cost": self.format_cost_analysis,
+                "calculate_scaling_cost": self.format_cost_analysis,
+                "calculate_network_cost": self.format_cost_analysis,
                 "unknown": self.format_unknown_command,
             }
             
@@ -726,6 +734,111 @@ class ResponseFormatter:
     def format_cost_analysis(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """비용 분석 결과를 포맷"""
         try:
+            # 인터랙티브 UI 데이터가 있는 경우 그대로 반환
+            if raw_data.get("interactive"):
+                return {
+                    "type": "cost_analysis",
+                    "summary": raw_data.get("message", "비용 분석을 위한 정보를 입력해주세요."),
+                    "data": {
+                        "formatted": raw_data,
+                        "raw": raw_data,
+                        "interactive": True,  # ← 이게 빠져있었습니다!
+                        "type": raw_data.get("type")  # ← 이것도 추가
+                    },
+                    "metadata": {
+                        "interactive": True,
+                        "ui_type": raw_data.get("type", "unknown")
+                    }
+                }
+            
+            # 비용 분석 결과가 있는 경우 처리
+            cost_analysis = raw_data.get("cost_analysis", {})
+            if cost_analysis:
+                # 스케일링 비용 분석
+                if cost_analysis.get("analysis_type") == "scaling_cost":
+                    costs = cost_analysis.get("costs", {})
+                    scaling = cost_analysis.get("scaling", {})
+                    
+                    current_cost = costs.get("current_monthly", 0)
+                    target_cost = costs.get("target_monthly", 0)
+                    additional_cost = costs.get("additional_cost", 0)
+                    
+                    summary = f"{cost_analysis.get('node_spec')} 노드를 {scaling.get('current_count')}개에서 {scaling.get('target_count')}개로 스케일링 시 추가 비용은 ₩{additional_cost:,}입니다."
+                    
+                    return {
+                        "type": "cost_analysis",
+                        "summary": summary,
+                        "data": {
+                            "formatted": {
+                                "current_cost": current_cost,
+                                "target_cost": target_cost,
+                                "additional_cost": additional_cost,
+                                "analysis_type": "scaling_cost",
+                                "node_spec": cost_analysis.get("node_spec"),
+                                "scaling": scaling,
+                                "costs": costs
+                            },
+                            "raw": raw_data
+                        },
+                        "metadata": {
+                            "current_cost": current_cost,
+                            "target_cost": target_cost,
+                            "additional_cost": additional_cost,
+                            "analysis_type": "scaling_cost"
+                        }
+                    }
+                
+                # 현재 노드 비용 분석
+                elif cost_analysis.get("analysis_type") == "current_cost":
+                    costs = cost_analysis.get("costs", {})
+                    monthly_cost = costs.get("monthly", 0)
+                    
+                    summary = f"{cost_analysis.get('node_spec')} 노드 {cost_analysis.get('node_count')}개의 월 비용은 ₩{monthly_cost:,}입니다."
+                    
+                    return {
+                        "type": "cost_analysis",
+                        "summary": summary,
+                        "data": {
+                            "formatted": {
+                                "current_cost": monthly_cost,
+                                "analysis_type": "current_cost",
+                                "node_spec": cost_analysis.get("node_spec"),
+                                "node_count": cost_analysis.get("node_count"),
+                                "costs": costs
+                            },
+                            "raw": raw_data
+                        },
+                        "metadata": {
+                            "current_cost": monthly_cost,
+                            "analysis_type": "current_cost"
+                        }
+                    }
+                
+                # 네트워크 비용 분석
+                elif cost_analysis.get("analysis_type") == "network_cost":
+                    costs = cost_analysis.get("costs", {})
+                    total_cost = costs.get("total_monthly", 0)
+                    
+                    summary = f"네트워크 월 비용은 ₩{total_cost:,}입니다."
+                    
+                    return {
+                        "type": "cost_analysis",
+                        "summary": summary,
+                        "data": {
+                            "formatted": {
+                                "current_cost": total_cost,
+                                "analysis_type": "network_cost",
+                                "costs": costs
+                            },
+                            "raw": raw_data
+                        },
+                        "metadata": {
+                            "current_cost": total_cost,
+                            "analysis_type": "network_cost"
+                        }
+                    }
+            
+            # 기존 비용 분석 결과 처리 (fallback)
             current_cost = raw_data.get("current_cost", 0)
             optimizations = raw_data.get("optimizations", [])
             

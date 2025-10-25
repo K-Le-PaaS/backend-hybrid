@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any
 import logging
 from datetime import datetime
 import uuid
+import json
 from sqlalchemy.orm import Session
 
 # commands.py 연동을 위한 import
@@ -302,6 +303,7 @@ class ConversationRequest(BaseModel):
     session_id: Optional[str] = None
     timestamp: str
     context: Optional[Dict[str, Any]] = None
+    parameters: Optional[Dict[str, Any]] = None
 
 
 class ConversationResponse(BaseModel):
@@ -366,40 +368,54 @@ async def process_conversation(
             user_id, session_id, ConversationState.INTERPRETING
         )
 
-        # 4. Gemini로 명령 해석
-        from ...llm.gemini import GeminiClient
-        gemini_client = GeminiClient()
+        # 4. Gemini로 명령 해석 (파라미터에 intent가 있으면 건너뛰기)
+        logger.info(f"요청 정보: command={request.command}, parameters={request.parameters}")
 
-        try:
-            interpretation = await gemini_client.interpret(
-                prompt=request.command,
-                user_id=user_id,
-                project_name="default"
-            )
-        except Exception as e:
-            logger.error(f"Gemini API 호출 실패: {str(e)}")
-            # Gemini 실패 시 에러 응답 반환
-            await conv_manager.update_state(
-                user_id, session_id, ConversationState.ERROR
-            )
-            error_message = f"죄송합니다. AI 서비스에 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해주세요.\n오류: {str(e)}"
-            await conv_manager.add_message(
-                user_id, session_id,
-                "assistant", error_message,
-                action="error"
-            )
-            return ConversationResponse(
-                session_id=session_id,
-                state=ConversationState.ERROR.value,
-                message=error_message,
-                requires_confirmation=False,
-                cost_estimate=None,
-                pending_action=None,
-                result=None
-            )
+        if request.parameters and "intent" in request.parameters:
+            # 이미 해석된 명령 - Gemini 우회
+            intent = request.parameters.get("intent")
+            entities = {k: v for k, v in request.parameters.items() if k != "intent"}
+            logger.info(f"✅ 파라미터에서 intent 직접 사용: {intent}, entities: {entities}")
+        else:
+            # 일반 자연어 명령 - Gemini로 해석
+            from ...llm.gemini import GeminiClient
+            gemini_client = GeminiClient()
 
-        intent = interpretation.get("intent")
-        entities = interpretation.get("entities", {})
+            try:
+                interpretation = await gemini_client.interpret(
+                    prompt=request.command,
+                    user_id=user_id,
+                    project_name="default"
+                )
+            except Exception as e:
+                logger.error(f"Gemini API 호출 실패: {str(e)}")
+                # Gemini 실패 시 에러 응답 반환
+                await conv_manager.update_state(
+                    user_id, session_id, ConversationState.ERROR
+                )
+                error_message = f"죄송합니다. AI 서비스에 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해주세요.\n오류: {str(e)}"
+                await conv_manager.add_message(
+                    user_id, session_id,
+                    "assistant", error_message,
+                    action="error"
+                )
+                return ConversationResponse(
+                    session_id=session_id,
+                    state=ConversationState.ERROR.value,
+                    message=error_message,
+                    requires_confirmation=False,
+                    cost_estimate=None,
+                    pending_action=None,
+                    result=None
+                )
+
+            intent = interpretation.get("intent")
+            entities = interpretation.get("entities", {})
+
+        # 비용 분석 명령의 경우 request.parameters를 우선적으로 사용
+        if intent in ["current_node_cost", "scaling_cost", "network_cost", "cost_analysis", "scale_up", "scale_out"] and request.parameters:
+            entities.update(request.parameters)
+            logger.info(f"비용 분석 명령 파라미터 적용: {request.parameters}")
 
         # 세션 조회 (컨텍스트 복원용)
         session = await conv_manager.get_session(user_id, session_id)
@@ -577,12 +593,22 @@ async def process_conversation(
                 # 현재 replicas 조회 (여기서는 가정, 실제로는 K8s에서 조회)
                 current_replicas = 2  # TODO: K8s API로 조회
                 target_replicas = entities.get("replicas", 3)
+                node_spec = entities.get("node_spec", "c2-g3a")
 
                 cost_estimate = await estimator.estimate_scaling_cost(
                     current_replicas=current_replicas,
                     target_replicas=target_replicas,
+                    node_spec=node_spec,
                     db=db
                 )
+
+            elif intent == "scaling_cost":
+                # 스케일링 비용 분석 (선택 UI 제공)
+                cost_estimate = {
+                    "message": "스케일링 방식을 선택해주세요.",
+                    "interactive": True,
+                    "type": "scaling_type_selection"
+                }
 
             elif intent == "deploy":
                 owner = entities.get("github_owner", "")
@@ -640,25 +666,50 @@ async def process_conversation(
                 user_id, session_id, ConversationState.EXECUTING
             )
 
-            # CommandRequest 생성 및 실행
-            req = CommandRequest(
-                command=intent,
-                pod_name=entities.get("pod_name") or "",
-                deployment_name=entities.get("deployment_name") or "",
-                service_name=entities.get("service_name") or "",
-                replicas=entities.get("replicas", 1),
-                lines=entities.get("lines", 30),
-                version=entities.get("version") or "",
-                namespace=entities.get("namespace") or "default",
-                previous=bool(entities.get("previous", False)),
-                github_owner=entities.get("github_owner") or "",
-                github_repo=entities.get("github_repo") or "",
-                target_commit_sha=entities.get("target_commit_sha") or "",
-                steps_back=entities.get("steps_back", 0)
-            )
+            # 비용 분석 명령어들은 직접 실행 (CommandRequest 우회)
+            cost_analysis_commands = ["current_node_cost", "scaling_cost", "network_cost", "cost_analysis", 
+                                     "calculate_current_cost", "calculate_scaling_cost", "calculate_network_cost"]
+            
+            if intent in cost_analysis_commands:
+                # 비용 분석 명령어는 직접 실행
+                from ...services.commands import CommandPlan
+                plan = CommandPlan(
+                    tool=intent,
+                    args=entities
+                )
+            else:
+                # 기존 명령어들은 CommandRequest 사용
+                req = CommandRequest(
+                    command=intent,
+                    pod_name=entities.get("pod_name") or "",
+                    deployment_name=entities.get("deployment_name") or "",
+                    service_name=entities.get("service_name") or "",
+                    replicas=entities.get("replicas", 1),
+                    lines=entities.get("lines", 30),
+                    version=entities.get("version") or "",
+                    namespace=entities.get("namespace") or "default",
+                    previous=bool(entities.get("previous", False)),
+                    github_owner=entities.get("github_owner") or "",
+                    github_repo=entities.get("github_repo") or "",
+                    target_commit_sha=entities.get("target_commit_sha") or "",
+                    steps_back=entities.get("steps_back", 0),
+                    # 비용 분석 관련 필드
+                    analysis_type=entities.get("analysis_type") or "usage",
+                    node_spec=entities.get("target_node_spec") or entities.get("node_spec") or "",
+                    node_count=entities.get("node_count", 1),
+                    current_node_count=entities.get("current_node_count", 1),
+                    target_node_count=entities.get("target_node_count"),
+                    public_ip_count=entities.get("public_ip_count"),
+                    traffic_gb=entities.get("traffic_gb")
+                )
+                plan = plan_command(req)
+
+            # user_id를 plan.args에 추가
+            if not plan.args:
+                plan.args = {}
+            plan.args["user_id"] = user_id
 
             try:
-                plan = plan_command(req)
                 result = await execute_command(plan)
             except ValueError as e:
                 logger.error(f"명령 계획 실패: {str(e)}")
@@ -779,6 +830,9 @@ async def process_conversation(
                 action="execution_completed"
             )
 
+            # result를 NLPResponse 형식으로 변환 - 더 이상 여기서 변환하지 않고 result를 그대로 반환
+            logger.info(f"결과 반환: result={result}")
+
             return ConversationResponse(
                 session_id=session_id,
                 state=ConversationState.COMPLETED.value,
@@ -786,7 +840,7 @@ async def process_conversation(
                 requires_confirmation=False,
                 cost_estimate=None,
                 pending_action=None,
-                result=result
+                result=result  # result를 그대로 반환 - ResponseFormatter가 이미 처리함
             )
 
     except HTTPException:
@@ -1003,8 +1057,9 @@ async def confirm_action(
             f"session_id={request.session_id}"
         )
 
-        # 롤백 명령어인 경우 저장소 정보가 없으면 에러 메시지 개선
-        if not github_owner or not github_repo:
+        # 저장소 정보가 필요한 명령어들만 검증
+        commands_requiring_repo = ["rollback", "deploy", "scale"]
+        if command in commands_requiring_repo and (not github_owner or not github_repo):
             if command == "rollback":
                 error_msg = (
                     "❌ **롤백할 저장소 정보가 없습니다**\n\n"
@@ -1021,24 +1076,35 @@ async def confirm_action(
             logger.error(error_msg)
             raise HTTPException(400, error_msg)
 
-        req = CommandRequest(
-            command=pending_action["type"],
-            pod_name=params.get("pod_name") or "",
-            deployment_name=params.get("deployment_name") or "",
-            service_name=params.get("service_name") or "",
-            replicas=params.get("replicas", 1),
-            lines=params.get("lines", 30),
-            version=params.get("version") or "",
-            namespace=params.get("namespace") or "default",
-            previous=bool(params.get("previous", False)),
-            github_owner=github_owner,
-            github_repo=github_repo,
-            target_commit_sha=params.get("target_commit_sha") or "",
-            steps_back=params.get("steps_back") or 0
-        )
-
-        # 명령 실행
-        plan = plan_command(req)
+        # 비용 분석 명령어들은 직접 실행 (CommandRequest 우회)
+        cost_analysis_commands = ["current_node_cost", "scaling_cost", "network_cost", "cost_analysis", 
+                                 "calculate_current_cost", "calculate_scaling_cost", "calculate_network_cost"]
+        
+        if command in cost_analysis_commands:
+            # 비용 분석 명령어는 직접 실행
+            from ...services.commands import CommandPlan
+            plan = CommandPlan(
+                tool=command,
+                args=params
+            )
+        else:
+            # 기존 명령어들은 CommandRequest 사용
+            req = CommandRequest(
+                command=pending_action["type"],
+                pod_name=params.get("pod_name") or "",
+                deployment_name=params.get("deployment_name") or "",
+                service_name=params.get("service_name") or "",
+                replicas=params.get("replicas", 1),
+                lines=params.get("lines", 30),
+                version=params.get("version") or "",
+                namespace=params.get("namespace") or "default",
+                previous=bool(params.get("previous", False)),
+                github_owner=github_owner,
+                github_repo=github_repo,
+                target_commit_sha=params.get("target_commit_sha") or "",
+                steps_back=params.get("steps_back") or 0
+            )
+            plan = plan_command(req)
 
         # user_id를 plan.args에 추가
         if not plan.args:

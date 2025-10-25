@@ -17,28 +17,141 @@ logger = structlog.get_logger(__name__)
 class CostEstimator:
     """클라우드 리소스 비용 추정기"""
 
-    # NCP 가격표 (2025년 기준, 월 단위 원화)
-    # 실제 운영 환경에서는 API나 DB에서 조회
+    # NCP 가격표 (2025년 기준, 실제 NCP 가격 정보)
+    # 서버 스펙별 시간당/월간 가격 (원화)
     NCP_PRICING = {
-        "nks_worker_node": {
-            "standard": {
-                "name": "Standard (2vCPU, 4GB)",
+        "server_specs": {
+            "c2-g3": {
+                "name": "c2-g3 (2vCPU, 4GB)",
                 "vcpu": 2,
                 "memory_gb": 4,
-                "price_monthly": 50000
+                "storage_gb": 0,
+                "price_hourly": 92,
+                "price_monthly": 66240
             },
-            "high_cpu": {
-                "name": "High CPU (4vCPU, 8GB)",
+            "c2-g3a": {
+                "name": "c2-g3a (2vCPU, 4GB)",
+                "vcpu": 2,
+                "memory_gb": 4,
+                "storage_gb": 0,
+                "price_hourly": 92,
+                "price_monthly": 66240
+            },
+            "c4-g3": {
+                "name": "c4-g3 (4vCPU, 8GB)",
                 "vcpu": 4,
                 "memory_gb": 8,
-                "price_monthly": 100000
+                "storage_gb": 0,
+                "price_hourly": 192,
+                "price_monthly": 138240
             },
-            "high_memory": {
-                "name": "High Memory (4vCPU, 16GB)",
+            "c4-g3a": {
+                "name": "c4-g3a (4vCPU, 8GB)",
                 "vcpu": 4,
+                "memory_gb": 8,
+                "storage_gb": 0,
+                "price_hourly": 192,
+                "price_monthly": 138240
+            },
+            "c8-g3": {
+                "name": "c8-g3 (8vCPU, 16GB)",
+                "vcpu": 8,
                 "memory_gb": 16,
-                "price_monthly": 120000
+                "storage_gb": 0,
+                "price_hourly": 392,
+                "price_monthly": 282240
+            },
+            "c8-g3a": {
+                "name": "c8-g3a (8vCPU, 16GB)",
+                "vcpu": 8,
+                "memory_gb": 16,
+                "storage_gb": 0,
+                "price_hourly": 392,
+                "price_monthly": 282240
+            },
+            "c16-g3": {
+                "name": "c16-g3 (16vCPU, 32GB)",
+                "vcpu": 16,
+                "memory_gb": 32,
+                "storage_gb": 0,
+                "price_hourly": 792,
+                "price_monthly": 570240
+            },
+            "c16-g3a": {
+                "name": "c16-g3a (16vCPU, 32GB)",
+                "vcpu": 16,
+                "memory_gb": 32,
+                "storage_gb": 0,
+                "price_hourly": 792,
+                "price_monthly": 570240
+            },
+            "c32-g3": {
+                "name": "c32-g3 (32vCPU, 64GB)",
+                "vcpu": 32,
+                "memory_gb": 64,
+                "storage_gb": 0,
+                "price_hourly": 1592,
+                "price_monthly": 1146240
+            },
+            "c32-g3a": {
+                "name": "c32-g3a (32vCPU, 64GB)",
+                "vcpu": 32,
+                "memory_gb": 64,
+                "storage_gb": 0,
+                "price_hourly": 1592,
+                "price_monthly": 1146240
+            },
+            "c48-g3": {
+                "name": "c48-g3 (48vCPU, 96GB)",
+                "vcpu": 48,
+                "memory_gb": 96,
+                "storage_gb": 0,
+                "price_hourly": 2392,
+                "price_monthly": 1722240
+            },
+            "c48-g3a": {
+                "name": "c48-g3a (48vCPU, 96GB)",
+                "vcpu": 48,
+                "memory_gb": 96,
+                "storage_gb": 0,
+                "price_hourly": 2392,
+                "price_monthly": 1722240
+            },
+            "c64-g3": {
+                "name": "c64-g3 (64vCPU, 128GB)",
+                "vcpu": 64,
+                "memory_gb": 128,
+                "storage_gb": 0,
+                "price_hourly": 3192,
+                "price_monthly": 2298240
+            },
+            "c64-g3a": {
+                "name": "c64-g3a (64vCPU, 128GB)",
+                "vcpu": 64,
+                "memory_gb": 128,
+                "storage_gb": 0,
+                "price_hourly": 3192,
+                "price_monthly": 2298240
             }
+        },
+        "network": {
+            "public_ip": {
+                "price_hourly": 5.6,
+                "price_monthly": 4032  # 30일 기준
+            },
+            "outbound_traffic": {
+                "internet": {
+                    "0_20gb": 0,      # 20GB 이하
+                    "20gb_5tb": 100,  # 20GB 초과 ~ 5TB 이하
+                    "5tb_10tb": 90,   # 5TB 초과 ~ 10TB 이하
+                    "10tb_30tb": 80,  # 10TB 초과 ~ 30TB 이하
+                    "30tb_over": 70   # 30TB 초과
+                },
+                "public_ip_cross_zone": 10,  # 다른 존/같은 존 공인 IP
+                "private_same_zone": 0,      # 같은 존 비공인 IP
+                "private_cross_zone": 10     # 다른 존 비공인 IP
+            },
+            "inbound_traffic": 0  # 인바운드 트래픽 무료
         },
         "ncr_storage": {
             "price_per_gb_monthly": 100  # GB당 월
@@ -75,23 +188,28 @@ class CostEstimator:
         self,
         current_replicas: int,
         target_replicas: int,
-        node_type: str = "standard",
+        node_spec: str = "c2-g3a",
         db: Optional[Session] = None
     ) -> Dict[str, Any]:
         """
-        스케일링 비용 추정
+        스케일링 비용 추정 (레플리카 수 변경)
 
         Args:
             current_replicas: 현재 레플리카 수
             target_replicas: 목표 레플리카 수
-            node_type: 노드 타입 ("standard", "high_cpu", "high_memory")
+            node_spec: 노드 스펙 (예: "c2-g3a", "c4-g3")
             db: 데이터베이스 세션 (선택)
 
         Returns:
             비용 추정 결과
         """
         if self.provider == "NCP":
-            pricing = self.NCP_PRICING["nks_worker_node"][node_type]
+            # 노드 스펙 검증
+            if node_spec not in self.NCP_PRICING["server_specs"]:
+                available_specs = list(self.NCP_PRICING["server_specs"].keys())
+                raise ValueError(f"지원하지 않는 노드 스펙입니다. 사용 가능한 스펙: {available_specs}")
+            
+            pricing = self.NCP_PRICING["server_specs"][node_spec]
         else:
             pricing = self.GCP_PRICING["gke_node"]["n1_standard_2"]
 
@@ -103,6 +221,7 @@ class CostEstimator:
         estimate = {
             "provider": self.provider,
             "resource_type": "Worker Node",
+            "node_spec": node_spec,
             "node_type": pricing["name"],
             "current": current_replicas,
             "target": target_replicas,
@@ -120,6 +239,7 @@ class CostEstimator:
             "scaling_cost_estimated",
             current=current_replicas,
             target=target_replicas,
+            node_spec=node_spec,
             additional_cost=additional_cost
         )
 
@@ -185,6 +305,265 @@ class CostEstimator:
         )
 
         return estimate
+
+    async def get_current_node_cost(
+        self,
+        node_spec: str,
+        node_count: int = 1,
+        namespace: str = "default"
+    ) -> Dict[str, Any]:
+        """
+        현재 노드 비용 조회 (케이스 1: 현재 내가 쓰는 노드 비용은?)
+
+        Args:
+            node_spec: 노드 스펙 (예: "s2-g2-h50", "s4-g2-h100")
+            node_count: 노드 개수
+            namespace: 네임스페이스
+
+        Returns:
+            현재 노드 비용 정보
+        """
+        if self.provider != "NCP":
+            raise ValueError("현재 NCP만 지원됩니다")
+
+        # 노드 스펙 검증
+        if node_spec not in self.NCP_PRICING["server_specs"]:
+            available_specs = list(self.NCP_PRICING["server_specs"].keys())
+            raise ValueError(f"지원하지 않는 노드 스펙입니다. 사용 가능한 스펙: {available_specs}")
+
+        spec_info = self.NCP_PRICING["server_specs"][node_spec]
+        
+        # 현재 비용 계산
+        current_monthly_cost = node_count * spec_info["price_monthly"]
+        current_hourly_cost = node_count * spec_info["price_hourly"]
+
+        result = {
+            "provider": self.provider,
+            "analysis_type": "current_cost",
+            "namespace": namespace,
+            "node_spec": node_spec,
+            "node_count": node_count,
+            "spec_details": {
+                "name": spec_info["name"],
+                "vcpu": spec_info["vcpu"],
+                "memory_gb": spec_info["memory_gb"],
+                "storage_gb": spec_info["storage_gb"]
+            },
+            "costs": {
+                "hourly": current_hourly_cost,
+                "monthly": current_monthly_cost,
+                "currency": "KRW"
+            },
+            "breakdown": {
+                "per_node_hourly": spec_info["price_hourly"],
+                "per_node_monthly": spec_info["price_monthly"],
+                "total_nodes": node_count
+            }
+        }
+
+        logger.info(
+            "current_node_cost_calculated",
+            node_spec=node_spec,
+            node_count=node_count,
+            monthly_cost=current_monthly_cost
+        )
+
+        return result
+
+    async def estimate_scaling_cost_with_specs(
+        self,
+        current_node_spec: str,
+        current_node_count: int,
+        target_node_spec: str,
+        target_node_count: int,
+        namespace: str = "default"
+    ) -> Dict[str, Any]:
+        """
+        노드 스펙과 개수를 모두 고려한 스케일링 비용 계산
+
+        Args:
+            current_node_spec: 현재 노드 스펙
+            current_node_count: 현재 노드 개수
+            target_node_spec: 목표 노드 스펙
+            target_node_count: 목표 노드 개수
+            namespace: 네임스페이스
+
+        Returns:
+            스케일링 비용 정보
+        """
+        if self.provider != "NCP":
+            raise ValueError("현재 NCP만 지원됩니다")
+
+        # 현재 노드 스펙 검증
+        if current_node_spec not in self.NCP_PRICING["server_specs"]:
+            available_specs = list(self.NCP_PRICING["server_specs"].keys())
+            raise ValueError(f"지원하지 않는 현재 노드 스펙입니다. 사용 가능한 스펙: {available_specs}")
+
+        # 목표 노드 스펙 검증
+        if target_node_spec not in self.NCP_PRICING["server_specs"]:
+            available_specs = list(self.NCP_PRICING["server_specs"].keys())
+            raise ValueError(f"지원하지 않는 목표 노드 스펙입니다. 사용 가능한 스펙: {available_specs}")
+
+        current_spec_info = self.NCP_PRICING["server_specs"][current_node_spec]
+        target_spec_info = self.NCP_PRICING["server_specs"][target_node_spec]
+        
+        # 비용 계산
+        current_monthly_cost = current_node_count * current_spec_info["price_monthly"]
+        target_monthly_cost = target_node_count * target_spec_info["price_monthly"]
+        additional_cost = target_monthly_cost - current_monthly_cost
+        change_count = target_node_count - current_node_count
+
+        result = {
+            "provider": self.provider,
+            "analysis_type": "scaling_cost",
+            "namespace": namespace,
+            "current_node_spec": current_node_spec,
+            "target_node_spec": target_node_spec,
+            "scaling": {
+                "current_count": current_node_count,
+                "target_count": target_node_count,
+                "change_count": change_count,
+                "change_type": "증가" if change_count > 0 else "감소" if change_count < 0 else "변화 없음"
+            },
+            "costs": {
+                "current_monthly": current_monthly_cost,
+                "target_monthly": target_monthly_cost,
+                "additional_cost": additional_cost,
+                "currency": "KRW"
+            },
+            "spec_details": {
+                "current": {
+                    "name": current_spec_info["name"],
+                    "vcpu": current_spec_info["vcpu"],
+                    "memory_gb": current_spec_info["memory_gb"],
+                    "storage_gb": current_spec_info["storage_gb"],
+                    "price_per_node_monthly": current_spec_info["price_monthly"]
+                },
+                "target": {
+                    "name": target_spec_info["name"],
+                    "vcpu": target_spec_info["vcpu"],
+                    "memory_gb": target_spec_info["memory_gb"],
+                    "storage_gb": target_spec_info["storage_gb"],
+                    "price_per_node_monthly": target_spec_info["price_monthly"]
+                }
+            },
+            "breakdown": {
+                "per_node_monthly": target_spec_info["price_monthly"],
+                "total_change_cost": additional_cost,
+                "monthly_savings": abs(additional_cost) if additional_cost < 0 else 0
+            }
+        }
+
+        logger.info(
+            "scaling_cost_calculated",
+            current_spec=current_node_spec,
+            current_count=current_node_count,
+            target_spec=target_node_spec,
+            target_count=target_node_count,
+            additional_cost=additional_cost
+        )
+
+        return result
+
+    async def estimate_network_cost(
+        self,
+        public_ip_count: int = 1,
+        outbound_traffic_gb: float = 0,
+        traffic_type: str = "internet",
+        namespace: str = "default"
+    ) -> Dict[str, Any]:
+        """
+        네트워크 비용 계산 (케이스 3: 네트워크 비용은 얼마나 나올까?)
+
+        Args:
+            public_ip_count: Public IP 개수
+            outbound_traffic_gb: 아웃바운드 트래픽 (GB)
+            traffic_type: 트래픽 타입 ("internet", "public_ip_cross_zone", "private_same_zone", "private_cross_zone")
+            namespace: 네임스페이스
+
+        Returns:
+            네트워크 비용 정보
+        """
+        if self.provider != "NCP":
+            raise ValueError("현재 NCP만 지원됩니다")
+
+        network_pricing = self.NCP_PRICING["network"]
+        
+        # Public IP 비용 계산
+        public_ip_monthly_cost = public_ip_count * network_pricing["public_ip"]["price_monthly"]
+        public_ip_hourly_cost = public_ip_count * network_pricing["public_ip"]["price_hourly"]
+
+        # 트래픽 비용 계산
+        traffic_cost = 0
+        traffic_breakdown = {}
+
+        if traffic_type == "internet":
+            # 인터넷 트래픽 비용 계산
+            if outbound_traffic_gb <= 20:
+                traffic_cost = 0
+                traffic_breakdown["free_tier"] = f"20GB 이하 무료 (사용량: {outbound_traffic_gb}GB)"
+            elif outbound_traffic_gb <= 5000:  # 5TB
+                traffic_cost = outbound_traffic_gb * network_pricing["outbound_traffic"]["internet"]["20gb_5tb"]
+                traffic_breakdown["tier_1"] = f"20GB 초과 ~ 5TB 이하: {outbound_traffic_gb}GB × 100원 = {traffic_cost:,}원"
+            elif outbound_traffic_gb <= 10000:  # 10TB
+                traffic_cost = outbound_traffic_gb * network_pricing["outbound_traffic"]["internet"]["5tb_10tb"]
+                traffic_breakdown["tier_2"] = f"5TB 초과 ~ 10TB 이하: {outbound_traffic_gb}GB × 90원 = {traffic_cost:,}원"
+            elif outbound_traffic_gb <= 30000:  # 30TB
+                traffic_cost = outbound_traffic_gb * network_pricing["outbound_traffic"]["internet"]["10tb_30tb"]
+                traffic_breakdown["tier_3"] = f"10TB 초과 ~ 30TB 이하: {outbound_traffic_gb}GB × 80원 = {traffic_cost:,}원"
+            else:
+                traffic_cost = outbound_traffic_gb * network_pricing["outbound_traffic"]["internet"]["30tb_over"]
+                traffic_breakdown["tier_4"] = f"30TB 초과: {outbound_traffic_gb}GB × 70원 = {traffic_cost:,}원"
+        else:
+            # 다른 트래픽 타입
+            price_per_gb = network_pricing["outbound_traffic"][traffic_type]
+            traffic_cost = outbound_traffic_gb * price_per_gb
+            traffic_breakdown[traffic_type] = f"{traffic_type}: {outbound_traffic_gb}GB × {price_per_gb}원 = {traffic_cost:,}원"
+
+        # 총 네트워크 비용
+        total_monthly_cost = public_ip_monthly_cost + traffic_cost
+        total_hourly_cost = public_ip_hourly_cost
+
+        result = {
+            "provider": self.provider,
+            "analysis_type": "network_cost",
+            "namespace": namespace,
+            "network_components": {
+                "public_ip": {
+                    "count": public_ip_count,
+                    "monthly_cost": public_ip_monthly_cost,
+                    "hourly_cost": public_ip_hourly_cost,
+                    "price_per_ip_monthly": network_pricing["public_ip"]["price_monthly"]
+                },
+                "traffic": {
+                    "type": traffic_type,
+                    "outbound_gb": outbound_traffic_gb,
+                    "cost": traffic_cost,
+                    "breakdown": traffic_breakdown
+                }
+            },
+            "costs": {
+                "public_ip_monthly": public_ip_monthly_cost,
+                "traffic_cost": traffic_cost,
+                "total_monthly": total_monthly_cost,
+                "total_hourly": total_hourly_cost,
+                "currency": "KRW"
+            },
+            "summary": {
+                "inbound_traffic_cost": 0,  # 인바운드 무료
+                "outbound_traffic_cost": traffic_cost,
+                "public_ip_cost": public_ip_monthly_cost
+            }
+        }
+
+        logger.info(
+            "network_cost_calculated",
+            public_ip_count=public_ip_count,
+            traffic_gb=outbound_traffic_gb,
+            total_cost=total_monthly_cost
+        )
+
+        return result
 
     async def estimate_storage_cost(
         self,

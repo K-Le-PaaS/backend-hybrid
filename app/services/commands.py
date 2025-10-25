@@ -40,7 +40,15 @@ class CommandRequest(BaseModel):
     target_commit_sha: str = Field(default="") # 롤백할 커밋 SHA
     steps_back: int = Field(default=0, ge=0)   # 몇 번 전으로 롤백할지
     # 비용 분석 관련 필드
-    analysis_type: str = Field(default="usage")  # usage, optimization, forecast   # 몇 번 전으로 롤백할지
+    analysis_type: str = Field(default="usage")  # usage, optimization, forecast
+    # 노드 비용 분석 필드
+    node_spec: str = Field(default="")           # 노드 스펙 (예: s2-g2-h50)
+    node_count: int = Field(default=1)            # 노드 개수
+    current_node_count: int = Field(default=1)    # 현재 노드 개수
+    target_node_count: Optional[int] = Field(default=None)  # 목표 노드 개수
+    # 네트워크 비용 분석 필드
+    public_ip_count: Optional[int] = Field(default=None)    # Public IP 개수
+    traffic_gb: Optional[int] = Field(default=None)        # 트래픽 GB
 
 
 @dataclass
@@ -286,6 +294,61 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             },
         )
 
+    elif command == "current_node_cost":
+        # 현재 노드 비용 분석
+        return CommandPlan(
+            tool="current_node_cost",
+            args={
+                "namespace": ns,
+                "node_spec": getattr(req, "node_spec", None),
+                "node_count": getattr(req, "node_count", 1)
+            },
+        )
+
+    elif command == "scaling_cost":
+        # 스케일링 비용 분석 (스케일업/스케일아웃 선택)
+        return CommandPlan(
+            tool="scaling_cost",
+            args={
+                "namespace": ns,
+                "node_spec": getattr(req, "node_spec", None),
+                "current_node_count": getattr(req, "current_node_count", 1),
+                "target_node_count": getattr(req, "target_node_count", None)
+            },
+        )
+    elif command == "scale_up":
+        # 스케일업 비용 분석
+        return CommandPlan(
+            tool="scale_up",
+            args={
+                "namespace": ns,
+                "node_spec": getattr(req, "node_spec", None),
+                "target_node_count": getattr(req, "target_node_count", None)
+            },
+        )
+
+    elif command == "scale_out":
+        # 스케일아웃 비용 분석
+        return CommandPlan(
+            tool="scale_out",
+            args={
+                "namespace": ns,
+                "node_spec": getattr(req, "node_spec", None),
+                "target_node_count": getattr(req, "target_node_count", None)
+            },
+        )
+
+    elif command == "network_cost":
+        # 네트워크 비용 분석
+        return CommandPlan(
+            tool="network_cost",
+            args={
+                "namespace": ns,
+                "public_ip_count": getattr(req, "public_ip_count", None),
+                "traffic_gb": getattr(req, "traffic_gb", None)
+            },
+        )
+
     elif command == "unknown":
         # unknown 명령어에 대한 처리
         return CommandPlan(
@@ -327,72 +390,535 @@ async def _execute_unknown(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+async def _execute_current_node_cost(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    현재 노드 비용 조회 실행
+    """
+    from ..services.cost_estimator import CostEstimator
+    
+    node_spec = args.get("node_spec")
+    node_count = args.get("node_count", 1)
+    
+    estimator = CostEstimator(provider="NCP")
+    
+    try:
+        if not node_spec:
+            # 사용 가능한 노드 스펙 목록을 상세 정보와 함께 반환
+            available_specs = []
+            for spec_key, spec_info in estimator.NCP_PRICING["server_specs"].items():
+                available_specs.append({
+                    "spec": spec_key,
+                    "name": spec_info["name"],
+                    "vcpu": spec_info["vcpu"],
+                    "memory_gb": spec_info["memory_gb"],
+                    "storage_gb": spec_info["storage_gb"],
+                    "price_hourly": spec_info["price_hourly"],
+                    "price_monthly": spec_info["price_monthly"]
+                })
+            
+            return {
+                "message": "노드 스펙을 선택해주세요. 아래 목록에서 원하는 스펙을 클릭하세요.",
+                "interactive": True,
+                "type": "node_spec_selection",
+                "available_specs": available_specs,
+                "next_step": "노드 스펙 선택 후 개수를 입력하세요."
+            }
+            
+        cost_result = await estimator.get_current_node_cost(
+            node_spec=node_spec,
+            node_count=node_count,
+            namespace="default"
+        )
+        
+        return {
+            "message": f"현재 {node_spec} 노드 {node_count}개의 비용 정보입니다.",
+            "cost_analysis": cost_result,
+            "analysis_type": "current_cost"
+        }
+            
+    except ValueError as e:
+        return {
+            "message": f"현재 노드 비용 조회 중 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+    except Exception as e:
+        return {
+            "message": f"현재 노드 비용 조회 중 예상치 못한 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+
+
+async def _execute_scaling_cost(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    스케일링 비용 계산 실행 (스케일업/스케일아웃 선택)
+    """
+    from ..services.cost_estimator import CostEstimator
+    
+    logger.info(f"_execute_scaling_cost 호출됨: args={args}")
+    
+    # c2-g3a 노드 1개를 기본값으로 고정
+    current_node_spec = "c2-g3a"
+    current_node_count = 1
+    
+    estimator = CostEstimator(provider="NCP")
+    
+    try:
+        # 스케일링 방식 선택 UI 반환
+        result = {
+            "message": "스케일링 방식을 선택해주세요.",
+            "interactive": True,
+            "type": "scaling_type_selection",
+            "current_spec": current_node_spec,
+            "current_count": current_node_count,
+            "next_step": "스케일업 또는 스케일아웃을 선택하세요.",
+            "options": [
+                {
+                    "type": "scale_up",
+                    "title": "스케일업 (Scale Up)",
+                    "description": "더 높은 스펙으로 변경하기",
+                    "example": f"{current_node_spec} 1개 → c4-g3 1개"
+                },
+                {
+                    "type": "scale_out",
+                    "title": "스케일아웃 (Scale Out)",
+                    "description": "같은 스펙에서 노드 개수만 늘리기",
+                    "example": f"{current_node_spec} 1개 → {current_node_spec} 5개"
+                }
+            ]
+        }
+        logger.info(f"🔥 _execute_scaling_cost 반환값: interactive={result.get('interactive')}, type={result.get('type')}")
+        logger.info(f"🔥 _execute_scaling_cost 전체 result: {result}")
+        return result
+            
+    except Exception as e:
+        return {
+            "message": f"스케일링 비용 계산 중 예상치 못한 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+
+
+async def _execute_scale_up(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    스케일업 비용 계산 실행 (더 높은 스펙으로 변경)
+    """
+    from ..services.cost_estimator import CostEstimator
+    
+    logger.info(f"_execute_scale_up 호출됨: args={args}")
+    
+    target_node_spec = args.get("node_spec")
+    target_node_count = args.get("target_node_count", 1)
+    
+    # c2-g3a 노드 1개를 기본값으로 고정
+    current_node_spec = "c2-g3a"
+    current_node_count = 1
+    
+    logger.info(f"파라미터: target_node_spec={target_node_spec}, target_node_count={target_node_count}")
+    logger.info(f"고정값: current_node_spec={current_node_spec}, current_node_count={current_node_count}")
+    
+    estimator = CostEstimator(provider="NCP")
+    
+    try:
+        if not target_node_spec:
+            # 사용 가능한 노드 스펙 목록을 상세 정보와 함께 반환
+            available_specs = []
+            for spec_key, spec_info in estimator.NCP_PRICING["server_specs"].items():
+                # 현재 스펙보다 높은 스펙만 표시
+                if spec_key != current_node_spec:
+                    available_specs.append({
+                        "spec": spec_key,
+                        "name": spec_info["name"],
+                        "vcpu": spec_info["vcpu"],
+                        "memory_gb": spec_info["memory_gb"],
+                        "storage_gb": spec_info["storage_gb"],
+                        "price_hourly": spec_info["price_hourly"],
+                        "price_monthly": spec_info["price_monthly"]
+                    })
+            
+            return {
+                "message": f"스케일업할 노드 스펙을 선택해주세요. 현재 스펙: {current_node_spec}",
+                "interactive": True,
+                "type": "scale_up_spec_selection",
+                "current_spec": current_node_spec,
+                "current_count": current_node_count,
+                "available_specs": available_specs,
+                "next_step": "노드 스펙 선택 후 개수를 입력하세요."
+            }
+
+        if not target_node_count:
+            # 노드 개수 입력 UI 반환
+            return {
+                "message": f"스케일업할 노드 개수를 입력해주세요. 선택된 스펙: {target_node_spec}",
+                "interactive": True,
+                "type": "scale_up_count_input",
+                "current_spec": current_node_spec,
+                "current_count": current_node_count,
+                "target_spec": target_node_spec,
+                "next_step": "목표 노드 개수를 입력하세요."
+            }
+
+        # 스케일업 비용 계산
+        cost_result = await estimator.estimate_scaling_cost_with_specs(
+            current_node_spec=current_node_spec,
+            current_node_count=current_node_count,
+            target_node_spec=target_node_spec,
+            target_node_count=target_node_count,
+            namespace="default"
+        )
+        
+        return {
+            "message": f"스케일업 비용 계산 완료: {current_node_spec} {current_node_count}개 → {target_node_spec} {target_node_count}개",
+            "cost_analysis": cost_result,
+            "analysis_type": "scale_up_cost"
+        }
+            
+    except ValueError as e:
+        return {
+            "message": f"스케일업 비용 계산 중 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+    except Exception as e:
+        return {
+            "message": f"스케일업 비용 계산 중 예상치 못한 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+
+
+async def _execute_scale_out(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    스케일아웃 비용 계산 실행 (같은 스펙에서 개수만 늘리기)
+    """
+    from ..services.cost_estimator import CostEstimator
+    
+    logger.info(f"_execute_scale_out 호출됨: args={args}")
+    
+    target_node_count = args.get("target_node_count")
+    
+    # c2-g3a 노드 1개를 기본값으로 고정
+    current_node_spec = "c2-g3a"
+    current_node_count = 1
+    
+    logger.info(f"파라미터: target_node_count={target_node_count}")
+    logger.info(f"고정값: current_node_spec={current_node_spec}, current_node_count={current_node_count}")
+    
+    estimator = CostEstimator(provider="NCP")
+    
+    try:
+        if not target_node_count:
+            return {
+                "message": f"스케일아웃할 노드 개수를 입력해주세요. 현재: {current_node_spec} {current_node_count}개",
+                "interactive": True,
+                "type": "scale_out_count_input",
+                "current_spec": current_node_spec,
+                "current_count": current_node_count,
+                "next_step": "목표 노드 개수를 입력하세요."
+            }
+        
+        # 스케일아웃 비용 계산 (같은 스펙에서 개수만 변경)
+        cost_result = await estimator.estimate_scaling_cost(
+            current_replicas=current_node_count,
+            target_replicas=target_node_count,
+            node_spec=current_node_spec,
+            db=None
+        )
+        
+        return {
+            "message": f"스케일아웃 비용 계산 완료: {current_node_spec} {current_node_count}개 → {current_node_spec} {target_node_count}개",
+            "cost_analysis": cost_result,
+            "analysis_type": "scale_out_cost"
+        }
+            
+    except ValueError as e:
+        return {
+            "message": f"스케일아웃 비용 계산 중 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+    except Exception as e:
+        return {
+            "message": f"스케일아웃 비용 계산 중 예상치 못한 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+
+
+async def _execute_network_cost(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    네트워크 비용 계산 실행
+    """
+    from ..services.cost_estimator import CostEstimator
+    
+    public_ip_count = args.get("public_ip_count", 1)
+    traffic_gb = args.get("traffic_gb", 0)
+    
+    estimator = CostEstimator(provider="NCP")
+    
+    try:
+        # 네트워크 비용 계산을 위한 인터랙티브 입력 폼 제공
+        return {
+            "message": "네트워크 비용을 계산하기 위해 다음 정보를 입력해주세요.",
+            "interactive": True,
+            "type": "network_cost_input",
+            "form": {
+                "public_ip_count": {
+                    "label": "Public IP 개수",
+                    "type": "number",
+                    "default": public_ip_count,
+                    "min": 0,
+                    "max": 10,
+                    "description": "사용할 Public IP 개수를 입력하세요 (0-10개)"
+                },
+                "traffic_gb": {
+                    "label": "아웃바운드 트래픽 (GB)",
+                    "type": "number",
+                    "default": traffic_gb,
+                    "min": 0,
+                    "max": 100000,
+                    "description": "예상 아웃바운드 트래픽 용량을 GB 단위로 입력하세요"
+                }
+            },
+            "next_step": "Public IP 개수와 트래픽 용량을 입력한 후 계산 버튼을 클릭하세요."
+        }
+            
+    except Exception as e:
+        return {
+            "message": f"네트워크 비용 계산 중 예상치 못한 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+
+
+async def _execute_calculate_current_cost(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    선택된 노드 스펙으로 현재 비용 계산 실행
+    """
+    from ..services.cost_estimator import CostEstimator
+    
+    node_spec = args.get("node_spec")
+    node_count = args.get("node_count", 1)
+    
+    estimator = CostEstimator(provider="NCP")
+    
+    try:
+        cost_result = await estimator.get_current_node_cost(
+            node_spec=node_spec,
+            node_count=node_count,
+            namespace="default"
+        )
+        
+        return {
+            "message": f"현재 {node_spec} 노드 {node_count}개의 비용 정보입니다.",
+            "cost_analysis": cost_result,
+            "analysis_type": "current_cost"
+        }
+            
+    except ValueError as e:
+        return {
+            "message": f"현재 노드 비용 조회 중 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+    except Exception as e:
+        return {
+            "message": f"현재 노드 비용 조회 중 예상치 못한 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+
+
+async def _execute_calculate_scale_up(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    스케일업 비용 계산 실행 (c2-g3a 1개 기준)
+    """
+    from ..services.cost_estimator import CostEstimator
+    
+    target_node_spec = args.get("node_spec", "c4-g3")  # 기본 스케일업 스펙
+    target_node_count = args.get("target_node_count", 1)
+    
+    # c2-g3a 노드 1개를 기본값으로 고정
+    current_node_spec = "c2-g3a"
+    current_node_count = 1
+    
+    estimator = CostEstimator(provider="NCP")
+    
+    try:
+        cost_result = await estimator.estimate_scaling_cost_with_specs(
+            current_node_spec=current_node_spec,
+            current_node_count=current_node_count,
+            target_node_spec=target_node_spec,
+            target_node_count=target_node_count,
+            namespace="default"
+        )
+        
+        return {
+            "message": f"스케일업 비용 계산 완료: {current_node_spec} {current_node_count}개 → {target_node_spec} {target_node_count}개",
+            "cost_analysis": cost_result,
+            "analysis_type": "scale_up_cost"
+        }
+            
+    except ValueError as e:
+        return {
+            "message": f"스케일업 비용 계산 중 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+    except Exception as e:
+        return {
+            "message": f"스케일업 비용 계산 중 예상치 못한 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+
+
+async def _execute_calculate_scale_out(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    스케일아웃 비용 계산 실행 (c2-g3a 1개 기준)
+    """
+    from ..services.cost_estimator import CostEstimator
+    
+    node_spec = args.get("node_spec")
+    target_node_count = args.get("target_node_count")
+    
+    # c2-g3a 노드 1개를 기본값으로 고정
+    current_node_spec = "c2-g3a"
+    current_node_count = 1
+    
+    estimator = CostEstimator(provider="NCP")
+    
+    try:
+        cost_result = await estimator.estimate_scaling_cost_with_specs(
+            current_node_spec=current_node_spec,
+            current_node_count=current_node_count,
+            target_node_spec=node_spec,
+            target_node_count=target_node_count,
+            namespace="default"
+        )
+        
+        return {
+            "message": f"{current_node_spec} {current_node_count}개에서 {node_spec} {target_node_count}개로 스케일아웃 시 비용 정보입니다.",
+            "cost_analysis": cost_result,
+            "analysis_type": "scale_out"
+        }
+            
+    except ValueError as e:
+        return {
+            "message": f"스케일아웃 비용 계산 중 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+    except Exception as e:
+        return {
+            "message": f"스케일아웃 비용 계산 중 예상치 못한 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+
+
+async def _execute_calculate_network_cost(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    입력된 네트워크 정보로 비용 계산 실행
+    """
+    from ..services.cost_estimator import CostEstimator
+    
+    public_ip_count = args.get("public_ip_count", 1)
+    traffic_gb = args.get("traffic_gb", 0)
+    
+    estimator = CostEstimator(provider="NCP")
+    
+    try:
+        cost_result = await estimator.estimate_network_cost(
+            public_ip_count=public_ip_count,
+            outbound_traffic_gb=traffic_gb,
+            traffic_type="internet",
+            namespace="default"
+        )
+        
+        return {
+            "message": f"네트워크 비용 정보입니다. (Public IP {public_ip_count}개, 트래픽 {traffic_gb}GB)",
+            "cost_analysis": cost_result,
+            "analysis_type": "network_cost"
+        }
+            
+    except ValueError as e:
+        return {
+            "message": f"네트워크 비용 계산 중 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+    except Exception as e:
+        return {
+            "message": f"네트워크 비용 계산 중 예상치 못한 오류가 발생했습니다: {str(e)}",
+            "error": str(e)
+        }
+
+
 async def _execute_cost_analysis(args: Dict[str, Any]) -> Dict[str, Any]:
     """
-    클러스터 비용 분석 실행
+    비용 분석 및 최적화 실행
     """
     namespace = args.get("namespace", "default")
     analysis_type = args.get("analysis_type", "usage")
     
-    # TODO: 실제 비용 분석 로직 구현
-    # 현재는 mock 데이터 반환
-    
-    if analysis_type == "optimization":
-        return {
-            "message": f"{namespace} 네임스페이스의 비용 최적화 제안을 생성했습니다.",
-            "cost_estimate": {
-                "current_cost": 150000,
-                "estimated_cost": 105000,
-                "savings": 45000,
-                "currency": "KRW",
-                "period": "월간",
-                "breakdown": {
-                    "compute": 80000,
-                    "storage": 30000,
-                    "network": 25000,
-                    "idle_resources": -45000
-                }
-            },
-            "recommendations": [
-                "미사용 Pod 3개 제거 시 월 20,000원 절감",
-                "스토리지 최적화로 월 15,000원 절감",
-                "인스턴스 다운사이징으로 월 10,000원 절감"
-            ]
-        }
-    elif analysis_type == "forecast":
-        return {
-            "message": f"{namespace} 네임스페이스의 월간 예상 비용을 계산했습니다.",
-            "cost_estimate": {
-                "estimated_cost": 150000,
-                "currency": "KRW",
-                "period": "월간 예상",
-                "breakdown": {
-                    "compute": 85000,
-                    "storage": 35000,
-                    "network": 30000
-                }
-            },
-            "trend": "지난달 대비 5% 증가 예상"
-        }
-    else:  # usage
-        return {
-            "message": f"{namespace} 네임스페이스의 현재 비용 현황입니다.",
-            "cost_estimate": {
-                "current_cost": 150000,
-                "currency": "KRW",
-                "period": "이번 달",
-                "breakdown": {
-                    "compute": 85000,
-                    "storage": 35000,
-                    "network": 30000
-                }
-            },
-            "resource_usage": {
-                "pods": 12,
-                "deployments": 5,
-                "services": 8,
-                "storage_gb": 150
+    try:
+        if analysis_type == "optimization":
+            # 비용 최적화 제안 (기존 mock 데이터 유지)
+            return {
+                "message": f"{namespace} 네임스페이스의 비용 최적화 제안을 생성했습니다.",
+                "cost_estimate": {
+                    "current_cost": 150000,
+                    "estimated_cost": 105000,
+                    "savings": 45000,
+                    "currency": "KRW",
+                    "period": "월간",
+                    "breakdown": {
+                        "compute": 80000,
+                        "storage": 30000,
+                        "network": 25000,
+                        "idle_resources": -45000
+                    }
+                },
+                "recommendations": [
+                    "미사용 Pod 3개 제거 시 월 20,000원 절감",
+                    "스토리지 최적화로 월 15,000원 절감",
+                    "인스턴스 다운사이징으로 월 10,000원 절감"
+                ],
+                "analysis_type": "optimization"
             }
+            
+        elif analysis_type == "forecast":
+            # 예상 비용 (기존 mock 데이터 유지)
+            return {
+                "message": f"{namespace} 네임스페이스의 월간 예상 비용을 계산했습니다.",
+                "cost_estimate": {
+                    "estimated_cost": 150000,
+                    "currency": "KRW",
+                    "period": "월간 예상",
+                    "breakdown": {
+                        "compute": 85000,
+                        "storage": 35000,
+                        "network": 30000
+                    }
+                },
+                "trend": "지난달 대비 5% 증가 예상",
+                "analysis_type": "forecast"
+            }
+            
+        else:  # usage - 기본 비용 현황
+            return {
+                "message": f"{namespace} 네임스페이스의 현재 비용 현황입니다.",
+                "cost_estimate": {
+                    "current_cost": 150000,
+                    "currency": "KRW",
+                    "period": "이번 달",
+                    "breakdown": {
+                        "compute": 85000,
+                        "storage": 35000,
+                        "network": 30000
+                    }
+                },
+                "resource_usage": {
+                    "pods": 12,
+                    "deployments": 5,
+                    "services": 8,
+                    "storage_gb": 150
+                },
+                "analysis_type": "usage"
+            }
+            
+    except Exception as e:
+        return {
+            "message": f"비용 분석 중 예상치 못한 오류가 발생했습니다: {str(e)}",
+            "error": str(e),
+            "analysis_type": analysis_type
         }
 
 
@@ -531,6 +1057,8 @@ async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
     명령 실행 계획을 실제 Kubernetes API 호출로 변환하여 실행
     ResponseFormatter를 사용하여 사용자 친화적인 형식으로 응답을 포맷팅합니다.
     """
+    logger.info(f"🎯 execute_command 시작: tool={plan.tool}")
+
     # 원본 실행 결과를 가져옵니다
     raw_result = await _execute_raw_command(plan)
     
@@ -600,8 +1128,44 @@ async def _execute_raw_command(plan: CommandPlan) -> Dict[str, Any]:
     if plan.tool == "k8s_get_deployment":
         return await _execute_get_deployment(plan.args)
 
+    if plan.tool == "current_node_cost":
+        return await _execute_current_node_cost(plan.args)
+
+    if plan.tool == "scaling_cost":
+        return await _execute_scaling_cost(plan.args)
+
+    if plan.tool == "scale_up":
+        return await _execute_scale_up(plan.args)
+
+    if plan.tool == "scale_out":
+        return await _execute_scale_out(plan.args)
+
+    if plan.tool == "scale_up_count_input":
+        return await _execute_scale_up(plan.args)
+
+    if plan.tool == "scale_out_spec_selection":
+        return await _execute_scale_out(plan.args)
+
+    if plan.tool == "scale_out_count_input":
+        return await _execute_scale_out(plan.args)
+
+    if plan.tool == "network_cost":
+        return await _execute_network_cost(plan.args)
+
     if plan.tool == "cost_analysis":
         return await _execute_cost_analysis(plan.args)
+
+    if plan.tool == "calculate_current_cost":
+        return await _execute_calculate_current_cost(plan.args)
+
+    if plan.tool == "calculate_scale_up":
+        return await _execute_calculate_scale_up(plan.args)
+
+    if plan.tool == "calculate_scale_out":
+        return await _execute_calculate_scale_out(plan.args)
+
+    if plan.tool == "calculate_network_cost":
+        return await _execute_calculate_network_cost(plan.args)
 
     if plan.tool == "unknown":
         return await _execute_unknown(plan.args)

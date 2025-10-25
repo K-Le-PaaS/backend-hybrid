@@ -9,7 +9,11 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 from starlette.middleware.cors import CORSMiddleware
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+try:
+    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
 from fastapi import Response
 
 from .api.v1.system import router as system_router
@@ -168,7 +172,10 @@ def create_app() -> FastAPI:
 
     @app.get("/metrics")
     async def metrics() -> Response:
-        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+        if PROMETHEUS_AVAILABLE:
+            return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+        else:
+            return Response("Prometheus metrics not available", status_code=503)
 
 
     # MCP mount (stub or real based on availability)
