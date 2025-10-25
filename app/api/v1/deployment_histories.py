@@ -334,6 +334,16 @@ async def get_repositories_latest_deployments(
                 deployment_dict = latest_deployment.to_dict()
                 deployment_dict["cluster"] = k8s_info
 
+                # service_url 추가
+                from ...services.pipeline_user_url import get_deployment_url
+                deployment_url = get_deployment_url(
+                    db=db,
+                    user_id=current_user["id"],
+                    github_owner=integration.github_owner,
+                    github_repo=integration.github_repo
+                )
+                deployment_dict["service_url"] = deployment_url.url if deployment_url else None
+
                 repositories.append({
                     "owner": integration.github_owner,
                     "repo": integration.github_repo,
