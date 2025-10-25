@@ -97,6 +97,73 @@ def _generate_ncr_image_name(owner: str, repo: str) -> str:
     return f"{safe_owner}-{safe_repo}"
 
 
+def read_dockerfile_from_github_simple(
+    owner: str,
+    repo: str,
+    github_token: str
+) -> str | None:
+    """GitHub 레포지토리에서 Dockerfile 내용을 단순하게 읽어옵니다.
+    
+    Returns:
+        Dockerfile 내용 (str) 또는 None (파일 없음)
+    """
+    import requests
+    import base64
+    
+    try:
+        # 단순한 requests 사용 (비동기 없이)
+        response = requests.get(
+            f"https://api.github.com/repos/{owner}/{repo}/contents/Dockerfile",
+            headers={
+                "Authorization": f"Bearer {github_token}",
+                "Accept": "application/vnd.github+json"
+            },
+            params={"ref": "main"},
+            timeout=2  # 2초 타임아웃
+        )
+        
+        if response.status_code == 200:
+            content_b64 = response.json().get("content", "")
+            content = base64.b64decode(content_b64).decode("utf-8")
+            return content
+        
+        return None
+    except Exception:
+        return None
+
+
+def parse_expose_port_from_dockerfile(dockerfile_content: str) -> int:
+    """Dockerfile에서 EXPOSE 포트 번호를 추출합니다.
+    
+    Args:
+        dockerfile_content: Dockerfile 전체 내용
+    
+    Returns:
+        EXPOSE된 첫 번째 포트 번호 (int), 없으면 8080 (기본값)
+    
+    Examples:
+        - "EXPOSE 3000" -> 3000
+        - "EXPOSE 80" -> 80
+        - "expose 5000" -> 5000 (대소문자 무시)
+    """
+    import re
+    
+    # EXPOSE 지시어 찾기 (대소문자 무시)
+    # 형식: EXPOSE 포트번호 또는 EXPOSE 포트/프로토콜
+    pattern = r'^\s*EXPOSE\s+(\d+)'
+    
+    for line in dockerfile_content.split('\n'):
+        match = re.match(pattern, line.strip(), re.IGNORECASE)
+        if match:
+            port = int(match.group(1))
+            _dbg("DOCKERFILE-EXPOSE-FOUND", port=port)
+            return port
+    
+    # EXPOSE가 없으면 기본값 8080 반환
+    _dbg("DOCKERFILE-EXPOSE-NOT-FOUND", default_port=8080)
+    return 8080
+
+
 def get_sourcecommit_repo_public_url(project_id: str, repo_name: str) -> str | None:
     """Get the actual clone URL from SourceCommit API.
 
@@ -1031,6 +1098,17 @@ def mirror_to_sourcecommit(
     work_dir = Path("/tmp") / f"mirror-{uuid.uuid4().hex[:8]}"
     work_dir.mkdir(parents=True, exist_ok=True)
     bare_dir = work_dir / "bare.git"
+    
+    # 🆕 GitHub 레포지토리 정보 추출 (owner/repo)
+    owner = None
+    repo = None
+    if "github.com/" in github_repo_url:
+        parts = github_repo_url.split("github.com/")[-1].replace(".git", "").split("/")
+        if len(parts) >= 2:
+            owner = parts[0]
+            repo = parts[1]
+    
+    # 포트 감지는 매니페스트 생성 시에만 수행 (성능 최적화)
     try:
         # Prepare authenticated GitHub URL
         gh_url = github_repo_url
@@ -1183,6 +1261,21 @@ def mirror_to_sourcecommit(
                         target_replicas = current_replicas  # Preserve existing value
                         _dbg("SC-INJECT-REPLICAS", replicas=target_replicas, provided=replicas, action="preserve")
                     
+                    # 🆕 매니페스트 생성 직전에 포트 감지 (단순한 GitHub API 호출)
+                    manifest_container_port = 8080  # 기본값
+                    if owner and repo and installation_or_access_token:
+                        try:
+                            dockerfile_content = read_dockerfile_from_github_simple(
+                                owner=owner,
+                                repo=repo,
+                                github_token=installation_or_access_token
+                            )
+                            if dockerfile_content:
+                                manifest_container_port = parse_expose_port_from_dockerfile(dockerfile_content)
+                                _dbg("SC-MANIFEST-PORT-DETECTED", port=manifest_container_port)
+                        except Exception as e:
+                            _dbg("SC-MANIFEST-PORT-ERROR", error=str(e)[:200])
+                    
                     manifest = f"""
 apiVersion: apps/v1
 kind: Deployment
@@ -1205,7 +1298,7 @@ spec:
       - name: {repo_part}
         image: {image_full}
         ports:
-        - containerPort: 8080
+        - containerPort: {manifest_container_port}
 """.strip()
                     service = f"""
 apiVersion: v1
@@ -1219,7 +1312,7 @@ spec:
   ports:
   - name: http
     port: 80
-    targetPort: 8080
+    targetPort: {manifest_container_port}
 """.strip()
                     ingress = f"""
 apiVersion: networking.k8s.io/v1
@@ -1336,6 +1429,31 @@ def mirror_and_update_manifest(
     Returns:
     - dict with status, manifest_updated flag, and deployed image
     """
+
+    # 🆕 GitHub 레포지토리 정보 추출 (owner/repo)
+    owner = None
+    repo = None
+    if "github.com/" in github_repo_url:
+        parts = github_repo_url.split("github.com/")[-1].replace(".git", "").split("/")
+        if len(parts) >= 2:
+            owner = parts[0]
+            repo = parts[1]
+    
+    # 🆕 Dockerfile에서 포트 읽기 (단순한 GitHub API 호출)
+    container_port = 8080  # 기본값
+    if owner and repo and installation_or_access_token:
+        try:
+            dockerfile_content = read_dockerfile_from_github_simple(
+                owner=owner,
+                repo=repo,
+                github_token=installation_or_access_token
+            )
+            if dockerfile_content:
+                container_port = parse_expose_port_from_dockerfile(dockerfile_content)
+                _dbg("MM-DOCKERFILE-PORT-DETECTED", owner=owner, repo=repo, port=container_port)
+        except Exception as e:
+            _dbg("MM-DOCKERFILE-PORT-ERROR", error=str(e)[:200])
+            # 실패해도 기본값(8080) 사용하므로 계속 진행
 
     # Step 1: Use existing mirror function to sync GitHub → SourceCommit with commit SHA tag and replicas
     _dbg("MM-STEP1-MIRROR", github=github_repo_url, sc_repo=sc_repo_name, image_tag=image_tag, replicas=replicas)
@@ -1563,7 +1681,7 @@ spec:
       - name: {repo_part}
         image: {image_repo}:{image_tag}
         ports:
-        - containerPort: 8080
+        - containerPort: {container_port}
 """
 
             # Create service manifest
@@ -1578,7 +1696,7 @@ spec:
   ports:
   - name: http
     port: 80
-    targetPort: 8080
+    targetPort: {container_port}
 """
 
             # Create ingress manifest
@@ -2747,7 +2865,26 @@ async def run_sourcedeploy(
     # Deploy with empty body (manifest already has correct image tag)
     deploy_body = {}
 
-    _dbg("SD-DEPLOY", path=deploy_path, manifest_updated=manifest_updated, image_tag=effective_tag)
+    # 배포 직전: 인그레스 매니페스트 기준으로 서비스 URL을 DB에 저장
+    service_url = None
+    if db is not None and user_id is not None and owner and repo and sc_repo_name:
+        try:
+            from .pipeline_user_url import update_deployment_url_from_manifest
+            deployment_url_record = update_deployment_url_from_manifest(
+                db=db,
+                user_id=user_id,
+                github_owner=owner,
+                github_repo=repo,
+                sc_repo_name=sc_repo_name
+            )
+            if deployment_url_record:
+                service_url = deployment_url_record.url
+                _dbg("SD-SERVICE-URL-SAVED", url=service_url, owner=owner, repo=repo)
+        except Exception as url_err:
+            _dbg("SD-SERVICE-URL-ERROR", error=str(url_err)[:300])
+            # Don't fail deployment if URL saving fails
+
+    _dbg("SD-DEPLOY", path=deploy_path, manifest_updated=manifest_updated, image_tag=effective_tag, service_url=service_url)
     data = await _call_ncp_rest_api('POST', base, deploy_path, deploy_body)
     result = data.get('result') if isinstance(data, dict) else None
 
@@ -2873,7 +3010,8 @@ async def run_sourcedeploy(
         "deploy_history_id": deploy_history_id,
         "response": (result or {}).get('historyId') or data,
         "stage_id": stage_id,
-        "scenario_id": scenario_id
+        "scenario_id": scenario_id,
+        "service_url": service_url  # 배포된 서비스 URL (https://{repo}.klepaas.app)
     }
 
 # Helper: compose NCR image repo path using repo + optional build_project_id digits
