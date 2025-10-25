@@ -29,6 +29,7 @@ class ConversationState(Enum):
     INTERPRETING = "interpreting"
     ESTIMATING = "estimating"
     WAITING_CONFIRMATION = "waiting_confirmation"
+    IN_PROGRESS = "in_progress"  # 대화형 플로우 진행 중 (예: 도메인 변경)
     EXECUTING = "executing"
     COMPLETED = "completed"
     CANCELLED = "cancelled"

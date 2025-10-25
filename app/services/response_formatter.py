@@ -363,35 +363,97 @@ class ResponseFormatter:
     def format_endpoint(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """Service 엔드포인트 정보를 포맷"""
         try:
-            service_name = raw_data.get("name", "")
-            namespace = raw_data.get("namespace", "default")
-            endpoints = raw_data.get("endpoints", [])
-            
-            formatted_endpoints = []
-            for endpoint in endpoints:
-                formatted_endpoints.append({
-                    "type": endpoint.get("type", ""),
-                    "address": endpoint.get("address", ""),
-                    "port": endpoint.get("port", ""),
-                    "protocol": endpoint.get("protocol", "TCP")
-                })
-            
-            return {
-                "type": "endpoint",
-                "summary": f"{service_name} Service의 엔드포인트 {len(endpoints)}개를 찾았습니다.",
-                "data": {
-                    "formatted": {
-                        "service_name": service_name,
-                        "namespace": namespace,
-                        "endpoints": formatted_endpoints
+            # 새로운 데이터 구조 지원 (우리가 수정한 _execute_get_endpoints에서 반환)
+            if "original_name" in raw_data:
+                service_name = raw_data.get("original_name", "")
+                matched_service = raw_data.get("matched_service", "")
+                namespace = raw_data.get("namespace", "default")
+                endpoints = raw_data.get("endpoints", [])
+                ingress_name = raw_data.get("ingress_name", "")
+                path = raw_data.get("path", "/")
+                
+                # 단순한 도메인 문자열들을 포맷된 엔드포인트로 변환
+                formatted_endpoints = []
+                for endpoint in endpoints:
+                    if isinstance(endpoint, str):
+                        # 문자열인 경우 (예: "https://example.com")
+                        formatted_endpoints.append({
+                            "type": "Ingress",
+                            "address": endpoint,
+                            "path": path,
+                            "protocol": "HTTPS"
+                        })
+                    else:
+                        # 딕셔너리인 경우 (기존 형식)
+                        formatted_endpoints.append({
+                            "type": endpoint.get("type", "Ingress"),
+                            "address": endpoint.get("address", ""),
+                            "port": endpoint.get("port", ""),
+                            "protocol": endpoint.get("protocol", "HTTPS")
+                        })
+                
+                return {
+                    "type": "endpoint",
+                    "summary": f"'{service_name}' → '{matched_service}' 서비스의 Ingress 도메인을 찾았습니다.",
+                    "data": {
+                        "formatted": {
+                            "original_name": service_name,
+                            "matched_service": matched_service,
+                            "namespace": namespace,
+                            "ingress_name": ingress_name,
+                            "path": path,
+                            "endpoints": formatted_endpoints
+                        },
+                        "raw": raw_data
                     },
-                    "raw": raw_data
-                },
-                "metadata": {
-                    "namespace": namespace,
-                    "total_endpoints": len(endpoints)
+                    "metadata": {
+                        "namespace": namespace,
+                        "total_endpoints": len(formatted_endpoints),
+                        "ingress_name": ingress_name
+                    }
                 }
-            }
+            
+            # 기존 데이터 구조 지원 (하위 호환성)
+            else:
+                service_name = raw_data.get("name", "")
+                namespace = raw_data.get("namespace", "default")
+                endpoints = raw_data.get("endpoints", [])
+                
+                formatted_endpoints = []
+                for endpoint in endpoints:
+                    if isinstance(endpoint, str):
+                        # 문자열인 경우
+                        formatted_endpoints.append({
+                            "type": "Ingress",
+                            "address": endpoint,
+                            "protocol": "HTTPS"
+                        })
+                    else:
+                        # 딕셔너리인 경우
+                        formatted_endpoints.append({
+                            "type": endpoint.get("type", ""),
+                            "address": endpoint.get("address", ""),
+                            "port": endpoint.get("port", ""),
+                            "protocol": endpoint.get("protocol", "TCP")
+                        })
+                
+                return {
+                    "type": "endpoint",
+                    "summary": f"{service_name} Service의 엔드포인트 {len(endpoints)}개를 찾았습니다.",
+                    "data": {
+                        "formatted": {
+                            "service_name": service_name,
+                            "namespace": namespace,
+                            "endpoints": formatted_endpoints
+                        },
+                        "raw": raw_data
+                    },
+                    "metadata": {
+                        "namespace": namespace,
+                        "total_endpoints": len(endpoints)
+                    }
+                }
+            
         except Exception as e:
             self.logger.error(f"Error formatting endpoint: {str(e)}")
             return self.format_error("endpoint", str(e))

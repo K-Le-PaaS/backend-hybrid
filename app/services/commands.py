@@ -39,8 +39,10 @@ class CommandRequest(BaseModel):
     github_repo: str = Field(default="")       # GitHub 저장소 이름
     target_commit_sha: str = Field(default="") # 롤백할 커밋 SHA
     steps_back: int = Field(default=0, ge=0)   # 몇 번 전으로 롤백할지
+    # URL 변경 관련 필드
+    new_domain: str = Field(default="")        # 변경할 새로운 도메인
     # 비용 분석 관련 필드
-    analysis_type: str = Field(default="usage")  # usage, optimization, forecast   # 몇 번 전으로 롤백할지
+    analysis_type: str = Field(default="usage")  # usage, optimization, forecast
 
 
 @dataclass
@@ -286,6 +288,28 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             },
         )
 
+    elif command in ("change_url", "change_domain"):
+        # 도메인 변경은 대화형 엔드포인트 필요
+        raise ValueError(
+            "🔄 [도메인 변경 요청]\n\n"
+            "도메인 변경은 대화형 방식으로 진행됩니다.\n"
+            "아래 엔드포인트를 사용해주세요:\n\n"
+            "📍 엔드포인트: POST /api/v1/nlp/conversation\n"
+            "📝 요청 본문:\n"
+            "{\n"
+            '  "command": "' + (req.github_repo or "도메인 바꿔줘") + ' 도메인 바꿔줘",\n'
+            '  "session_id": null\n'
+            "}\n\n"
+            "💡 대화형 플로우:\n"
+            "1️⃣ 서비스 선택 (또는 자동 인식)\n"
+            "2️⃣ 새 도메인 입력\n"
+            "3️⃣ 검증 및 중복 체크\n"
+            "4️⃣ 최종 확인\n"
+            "5️⃣ 도메인 변경 완료\n\n"
+            "ℹ️ 서비스 이름을 함께 말씀하시면 더 빠릅니다!\n"
+            "예: 'test02 도메인 바꿔줘'"
+        )
+
     elif command == "unknown":
         # unknown 명령어에 대한 처리
         return CommandPlan(
@@ -304,7 +328,8 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             "• 배포: K-Le-PaaS/test01 배포해줘\n"
             "• Pod 관리: pod 목록 보여줘, nginx-pod 로그 보여줘\n"
             "• 서비스 관리: service 목록 보여줘\n"
-            "• 비용 분석: 비용 분석해줘\n\n"
+            "• 비용 분석: 비용 분석해줘\n"
+            "• 도메인 변경: /api/v1/nlp/conversation 엔드포인트 사용\n\n"
             "[팁] 구체적인 리소스 이름과 함께 명령어를 입력해주세요"
         )
 
@@ -570,6 +595,9 @@ async def _execute_raw_command(plan: CommandPlan) -> Dict[str, Any]:
     if plan.tool == "rollback_deployment":
         return await _execute_ncp_rollback(plan.args)
 
+    if plan.tool == "change_url":
+        return await _execute_change_url(plan.args)
+
     if plan.tool == "get_rollback_list":
         return await _execute_get_rollback_list(plan.args)
 
@@ -823,8 +851,9 @@ async def _execute_get_logs(args: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _execute_get_endpoints(args: Dict[str, Any]) -> Dict[str, Any]:
     """
-    서비스 엔드포인트 조회 - Ingress 도메인만 반환 (endpoint 명령어)
-    예: "내 앱 접속 주소 알려줘", "서비스 URL 뭐야?"
+    서비스 엔드포인트 조회 - Ingress 도메인 반환 (endpoint 명령어)
+    서비스 이름이나 레포지토리 이름으로 Ingress 접속 주소 조회
+    예: "k-le-paas-test01-svc 엔드포인트", "k-le-paas-test01 접속 주소"
     """
     name = args["name"]
     namespace = args["namespace"]
@@ -832,35 +861,53 @@ async def _execute_get_endpoints(args: Dict[str, Any]) -> Dict[str, Any]:
     try:
         networking_v1 = get_networking_v1_api()
         
-        # Ingress 조회 - 해당 서비스와 연결된 Ingress 찾기
+        # 가능한 서비스 이름 패턴들 생성
+        possible_service_names = []
+        
+        # 1. 입력된 이름 그대로
+        possible_service_names.append(name)
+        
+        # 2. 레포지토리 이름인 경우 서비스 이름으로 변환
+        if not name.endswith('-svc'):
+            # k-le-paas-test01 -> k-le-paas-test01-svc
+            possible_service_names.append(f"{name}-svc")
+        
+        # 3. 서비스 이름인 경우 레포지토리 이름으로도 시도
+        if name.endswith('-svc'):
+            # k-le-paas-test01-svc -> k-le-paas-test01
+            repo_name = name[:-4]  # -svc 제거
+            possible_service_names.append(repo_name)
+        
+        logger.info(f"Searching for Ingress with possible service names: {possible_service_names}")
+        
+        # 모든 네임스페이스의 Ingress 조회 (더 넓은 범위에서 검색)
         try:
-            # 네임스페이스의 모든 Ingress 조회
+            # 먼저 지정된 네임스페이스에서 검색
             ingresses = networking_v1.list_namespaced_ingress(namespace=namespace)
+            found_ingress = _find_ingress_for_services(ingresses.items, possible_service_names, name)
             
-            for ingress in ingresses.items:
-                # Ingress 규칙에서 해당 서비스를 백엔드로 사용하는지 확인
-                for rule in ingress.spec.rules or []:
-                    for path in rule.http.paths or []:
-                        if hasattr(path.backend.service, 'name') and path.backend.service.name == name:
-                            # 도메인 추출
-                            host = rule.host
-                            if host:
-                                # HTTPS 도메인 반환
-                                domain = f"https://{host}"
-                                return {
-                                    "status": "success",
-                                    "service_name": name,
-                                    "namespace": namespace,
-                                    "endpoints": [domain],
-                                    "message": "Ingress 도메인으로 접속 가능합니다."
-                                }
+            if found_ingress:
+                return found_ingress
             
-            # Ingress를 찾지 못한 경우
+            # 지정된 네임스페이스에서 찾지 못한 경우 모든 네임스페이스에서 검색
+            all_ingresses = networking_v1.list_ingress_for_all_namespaces()
+            found_ingress = _find_ingress_for_services(all_ingresses.items, possible_service_names, name)
+            
+            if found_ingress:
+                return found_ingress
+            
+            # 모든 패턴으로 찾지 못한 경우
             return {
                 "status": "error",
                 "service_name": name,
                 "namespace": namespace,
-                "message": f"'{name}' 서비스에 대한 Ingress 도메인이 설정되지 않았습니다. 도메인 설정이 필요합니다."
+                "searched_patterns": possible_service_names,
+                "message": f"'{name}'에 대한 Ingress 도메인을 찾을 수 없습니다.\n\n"
+                          f"🔍 **검색한 패턴:** {', '.join(possible_service_names)}\n"
+                          f"📋 **확인 사항:**\n"
+                          f"• 서비스가 배포되어 있는지 확인\n"
+                          f"• Ingress가 설정되어 있는지 확인\n"
+                          f"• 네임스페이스가 올바른지 확인"
             }
             
         except ApiException as e:
@@ -869,17 +916,53 @@ async def _execute_get_endpoints(args: Dict[str, Any]) -> Dict[str, Any]:
                     "status": "error", 
                     "service_name": name,
                     "namespace": namespace,
-                    "message": f"'{name}' 서비스에 대한 Ingress를 찾을 수 없습니다. 도메인 설정이 필요합니다."
+                    "message": f"'{name}'에 대한 Ingress를 찾을 수 없습니다. 서비스가 배포되어 있는지 확인해주세요."
                 }
             raise
         
     except Exception as e:
+        logger.error(f"Endpoint lookup failed: {str(e)}")
         return {
             "status": "error",
             "service_name": name,
             "namespace": namespace,
             "message": f"엔드포인트 조회 실패: {str(e)}"
         }
+
+
+def _find_ingress_for_services(ingresses: list, service_names: list, original_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Ingress 목록에서 지정된 서비스 이름들과 매칭되는 Ingress 찾기
+    """
+    for ingress in ingresses:
+        # Ingress 규칙에서 해당 서비스를 백엔드로 사용하는지 확인
+        for rule in ingress.spec.rules or []:
+            for path in rule.http.paths or []:
+                if hasattr(path.backend.service, 'name'):
+                    backend_service_name = path.backend.service.name
+                    
+                    # 가능한 서비스 이름들과 매칭 확인
+                    if backend_service_name in service_names:
+                        host = rule.host
+                        if host:
+                            # HTTPS 도메인 반환
+                            domain = f"https://{host}"
+                            
+                            # 매칭된 서비스 이름과 경로 정보 포함
+                            matched_service = backend_service_name
+                            path_info = path.path if path.path else "/"
+                            
+                            return {
+                                "status": "success",
+                                "original_name": original_name,
+                                "matched_service": matched_service,
+                                "namespace": ingress.metadata.namespace,
+                                "ingress_name": ingress.metadata.name,
+                                "endpoints": [domain],
+                                "path": path_info,
+                                "message": f"'{original_name}' → '{matched_service}' 서비스의 Ingress 도메인을 찾았습니다."
+                            }
+    return None
 
 
 async def _execute_restart(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1131,6 +1214,58 @@ async def _execute_ncp_rollback(args: Dict[str, Any]) -> Dict[str, Any]:
         }
     finally:
         # 데이터베이스 세션 정리
+        db.close()
+
+
+async def _execute_change_url(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    배포 애플리케이션의 URL(도메인) 변경
+    인그레스 매니페스트의 도메인만 변경하고 빌드 없이 재배포
+    예: "owner/repo의 도메인을 newapp.klepaas.app으로 변경"
+    """
+    from .pipeline_user_url import change_deployment_url
+    from ..database import get_db
+
+    owner = args["owner"]
+    repo = args["repo"]
+    new_domain = args["new_domain"]
+    user_id = args.get("user_id", "nlp_user")
+
+    # 데이터베이스 세션 생성
+    db = next(get_db())
+
+    try:
+        result = await change_deployment_url(
+            owner=owner,
+            repo=repo,
+            new_domain=new_domain,
+            db=db,
+            user_id=user_id
+        )
+
+        return {
+            "status": "success",
+            "action": "change_url",
+            "message": f"{owner}/{repo}의 도메인이 {result['new_domain']}으로 변경되었습니다.",
+            "result": result,
+            "owner": owner,
+            "repo": repo,
+            "old_domain": result.get("old_domain", ""),
+            "new_domain": result.get("new_domain", ""),
+            "new_url": result.get("new_url", "")
+        }
+
+    except Exception as e:
+        logger.error(f"URL 변경 실패: {str(e)}")
+        return {
+            "status": "error",
+            "action": "change_url",
+            "message": f"URL 변경 실패: {str(e)}",
+            "owner": owner,
+            "repo": repo,
+            "new_domain": new_domain
+        }
+    finally:
         db.close()
 
 

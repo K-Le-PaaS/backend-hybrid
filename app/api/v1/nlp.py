@@ -556,6 +556,82 @@ async def process_conversation(
 
         logger.info(f"명령 해석 완료: intent={intent}, entities={entities}")
 
+        # 4.5. 도메인 변경 대화형 플로우 처리
+        if intent in ["change_url", "change_domain"]:
+            from ...services.domain_change_conversation import (
+                get_or_create_conversation,
+                clear_conversation
+            )
+
+            # 대화 세션 가져오기 또는 생성
+            # session_id를 conversation_id로 재사용
+            domain_conv, conv_id = get_or_create_conversation(
+                db=db,
+                user_id=user_id,
+                conversation_id=session_id
+            )
+
+            # 대화 처리
+            domain_result = await domain_conv.process_message(
+                user_message=request.command,
+                extracted_entities=entities
+            )
+
+            logger.info(f"도메인 변경 대화 처리: step={domain_result.get('step')}, completed={domain_result.get('completed')}")
+
+            # 응답 메시지 저장
+            await conv_manager.add_message(
+                user_id, session_id,
+                "assistant", domain_result["message"],
+                action=f"domain_change_{domain_result.get('step')}"
+            )
+
+            # 대화 완료 여부 확인
+            if domain_result.get("completed"):
+                # 대화 완료 또는 취소
+                clear_conversation(conv_id)
+
+                if domain_result.get("step") == "completed":
+                    await conv_manager.update_state(
+                        user_id, session_id, ConversationState.COMPLETED
+                    )
+                    state = ConversationState.COMPLETED.value
+                else:
+                    await conv_manager.update_state(
+                        user_id, session_id, ConversationState.CANCELLED
+                    )
+                    state = ConversationState.CANCELLED.value
+
+                return ConversationResponse(
+                    session_id=session_id,
+                    state=state,
+                    message=domain_result["message"],
+                    requires_confirmation=False,
+                    cost_estimate=None,
+                    pending_action=None,
+                    result=domain_result.get("result")
+                )
+            else:
+                # 대화 진행 중
+                await conv_manager.update_state(
+                    user_id, session_id, ConversationState.IN_PROGRESS
+                )
+
+                return ConversationResponse(
+                    session_id=session_id,
+                    state=ConversationState.IN_PROGRESS.value,
+                    message=domain_result["message"],
+                    requires_confirmation=False,
+                    cost_estimate=None,
+                    pending_action=None,
+                    result={
+                        "type": "domain_change_in_progress",
+                        "step": domain_result.get("step"),
+                        "options": domain_result.get("options"),
+                        "context": domain_result.get("context")
+                    }
+                )
+
         # 5. 위험도 분류
         risk_level = classifier.classify(intent)
         requires_confirmation = classifier.requires_confirmation(intent)

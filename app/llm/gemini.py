@@ -167,7 +167,26 @@ class GeminiClient(LLMClient):
                     entities["previous"] = False
 
             # list_deployments / list_services / list_ingresses / list_namespaces 는 파라미터 없음
-            
+
+            # 도메인/URL 변경 파라미터
+            if command in ("change_url", "change_domain"):
+                # GitHub 저장소 정보 (선택적 - 없으면 대화형 플로우에서 선택)
+                entities["github_owner"] = parameters.get("owner", "")
+                entities["github_repo"] = parameters.get("repo", "")
+
+                # 새 도메인 (선택적 - 없으면 대화형 플로우에서 입력 요청)
+                new_domain_raw = parameters.get("newDomain", "")
+                if new_domain_raw:
+                    # URL 형식에서 서브도메인만 추출
+                    import re
+                    # https:// 제거
+                    new_domain_clean = re.sub(r'^https?://', '', new_domain_raw)
+                    # .klepaas.app 제거
+                    new_domain_clean = re.sub(r'\.klepaas\.app$', '', new_domain_clean)
+                    entities["new_domain"] = new_domain_clean.strip().lower()
+                else:
+                    entities["new_domain"] = ""
+
             # 명령어에 따른 기본 메시지 생성
             messages = {
                 "deploy": "배포 명령을 해석했습니다.",
@@ -187,6 +206,8 @@ class GeminiClient(LLMClient):
                 "overview": "통합 대시보드 조회 명령을 해석했습니다.",
                 "get_service": "Service 상세 정보 조회 명령을 해석했습니다.",
                 "get_deployment": "Deployment 상세 정보 조회 명령을 해석했습니다.",
+                "change_url": "도메인 변경 명령을 해석했습니다.",
+                "change_domain": "도메인 변경 명령을 해석했습니다.",
                 "unknown": "알 수 없는 명령입니다."
             }
             
@@ -488,8 +509,49 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 - 다양한 뉘앙스: "비용 얼마나 드나?", "클러스터 운영 비용", "요금 확인", "비용 체크", "지출 현황", "예산 확인", "리소스 비용", "인프라 비용", "운영 비용 분석"
 필수 JSON 형식: { "command": "cost_analysis", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>", "analysis_type": "<optimization|usage|forecast>" } }
 
+18. 도메인/URL 변경 (command: "change_url" 또는 "change_domain")
+설명: 배포된 애플리케이션의 접속 주소(도메인)를 변경하는 대화형 명령입니다.
+중요:
+- 이 명령은 대화형 플로우를 시작합니다.
+- GitHub 저장소 정보가 있으면 바로 도메인 입력으로 진행, 없으면 서비스 선택부터 시작합니다.
+- 도메인 형식은 https://(원하는이름).klepaas.app 형태입니다.
+
+사용자 입력 예시:
+- 기본 표현: "도메인을 바꾸고 싶어", "URL 변경하고 싶어", "접속 주소 변경", "도메인 바꾸기"
+- 서비스 특정: "test01 서비스의 도메인을 바꾸고 싶어", "K-Le-PaaS/test01 URL 변경", "myapp의 접속 주소 변경"
+- 자연스러운 표현: "우리 서비스 주소 바꿀 수 있어?", "도메인 변경 가능해?", "새 URL로 바꾸고 싶은데"
+- 다양한 뉘앙스: "접속 URL 수정", "도메인 주소 변경", "서비스 주소 바꾸기", "URL 업데이트", "도메인 설정 변경"
+
+추출 규칙:
+1. **도메인 변경 키워드 감지**: "도메인", "URL", "주소", "접속", "change_url", "change_domain" 등과 "변경", "바꾸", "수정", "업데이트" 조합
+2. **owner/repo 패턴 추출**: "K-Le-PaaS/test01", "owner/repo" 형식이 있으면 추출 (없어도 대화형으로 진행)
+3. **서비스 이름만 있는 경우**: "test01 도메인 변경" → repo만 추출, owner는 빈 문자열
+4. **새 도메인 추출** (선택적):
+   - "~을/를 ~으로/로 바꿔줘" 패턴에서 목적어 추출
+   - "myapp으로", "newdomain으로" 등에서 도메인 이름 추출
+   - URL 형식도 인식: "https://myapp.klepaas.app", "myapp.klepaas.app" → "myapp" 추출
+   - 없으면 빈 문자열 또는 null
+
+필수 JSON 형식:
+{
+  "command": "change_url",
+  "parameters": {
+    "owner": "<추출된_GitHub_owner_없으면_빈_문자열>",
+    "repo": "<추출된_GitHub_repo_없으면_빈_문자열>",
+    "newDomain": "<추출된_새_도메인_없으면_빈_문자열>"
+  }
+}
+
+예시 변환:
+- "도메인을 바꾸고 싶어" → { "command": "change_url", "parameters": { "owner": "", "repo": "", "newDomain": "" } }
+- "test01 서비스의 도메인 변경" → { "command": "change_url", "parameters": { "owner": "", "repo": "test01", "newDomain": "" } }
+- "test01 도메인을 myapp으로 바꿔줘" → { "command": "change_url", "parameters": { "owner": "", "repo": "test01", "newDomain": "myapp" } }
+- "K-Le-PaaS/test02 URL을 https://newapp.klepaas.app으로 변경" → { "command": "change_url", "parameters": { "owner": "K-Le-PaaS", "repo": "test02", "newDomain": "newapp" } }
+- "K-Le-PaaS/test01 URL 바꾸고 싶어" → { "command": "change_url", "parameters": { "owner": "K-Le-PaaS", "repo": "test01" } }
+- "접속 주소 변경하고 싶은데" → { "command": "change_url", "parameters": { "owner": "", "repo": "" } }
+
 일반 규칙:
-- 사용자의 의도가 불분명하거나 위 17가지 명령어 중 어느 것과도 일치하지 않으면: { "command": "unknown", "parameters": { "query": "<사용자_원본_입력>" } }
+- 사용자의 의도가 불분명하거나 위 18가지 명령어 중 어느 것과도 일치하지 않으면: { "command": "unknown", "parameters": { "query": "<사용자_원본_입력>" } }
 - 리소스 이름이 명시되지 않은 경우, 컨텍스트상 기본 리소스가 있다면 그 이름을 사용하거나 null을 반환합니다.
 - 리소스 타입별 파라미터 사용: podName(파드), deploymentName(배포), serviceName(서비스)
 - **중요한 리소스 타입 구분 규칙:**
