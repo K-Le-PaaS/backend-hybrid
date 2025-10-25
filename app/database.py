@@ -106,6 +106,11 @@ def init_database():
             _ensure_deployment_config_table()
         except Exception as e:
             logger.warning(f"DeploymentConfig table ensure failed: {e}")
+
+        try:
+            _ensure_deployment_url_table()
+        except Exception as e:
+            logger.warning(f"DeploymentUrl table ensure failed: {e}")
         logger.info("Database tables created successfully")
         
     except Exception as e:
@@ -240,6 +245,23 @@ def _ensure_deployment_config_table() -> None:
 
         # Create only the deployment_configs table if it doesn't exist
         DeploymentConfig.__table__.create(bind=engine, checkfirst=True)
+    except Exception:
+        # Best-effort; do not crash app on migration failure
+        raise
+
+
+def _ensure_deployment_url_table() -> None:
+    """Ensure deployment_urls table exists.
+
+    This is a minimal migration to create the deployment_urls table
+    if it doesn't exist yet.
+    """
+    try:
+        from .models.deployment_url import DeploymentUrl
+        from .models.base import Base
+
+        # Create only the deployment_urls table if it doesn't exist
+        DeploymentUrl.__table__.create(bind=engine, checkfirst=True)
     except Exception:
         # Best-effort; do not crash app on migration failure
         raise

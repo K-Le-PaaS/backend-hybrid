@@ -2747,7 +2747,26 @@ async def run_sourcedeploy(
     # Deploy with empty body (manifest already has correct image tag)
     deploy_body = {}
 
-    _dbg("SD-DEPLOY", path=deploy_path, manifest_updated=manifest_updated, image_tag=effective_tag)
+    # 배포 직전: 인그레스 매니페스트 기준으로 서비스 URL을 DB에 저장
+    service_url = None
+    if db is not None and user_id is not None and owner and repo and sc_repo_name:
+        try:
+            from .pipeline_user_url import update_deployment_url_from_manifest
+            deployment_url_record = update_deployment_url_from_manifest(
+                db=db,
+                user_id=user_id,
+                github_owner=owner,
+                github_repo=repo,
+                sc_repo_name=sc_repo_name
+            )
+            if deployment_url_record:
+                service_url = deployment_url_record.url
+                _dbg("SD-SERVICE-URL-SAVED", url=service_url, owner=owner, repo=repo)
+        except Exception as url_err:
+            _dbg("SD-SERVICE-URL-ERROR", error=str(url_err)[:300])
+            # Don't fail deployment if URL saving fails
+
+    _dbg("SD-DEPLOY", path=deploy_path, manifest_updated=manifest_updated, image_tag=effective_tag, service_url=service_url)
     data = await _call_ncp_rest_api('POST', base, deploy_path, deploy_body)
     result = data.get('result') if isinstance(data, dict) else None
 
@@ -2873,7 +2892,8 @@ async def run_sourcedeploy(
         "deploy_history_id": deploy_history_id,
         "response": (result or {}).get('historyId') or data,
         "stage_id": stage_id,
-        "scenario_id": scenario_id
+        "scenario_id": scenario_id,
+        "service_url": service_url  # 배포된 서비스 URL (https://{repo}.klepaas.app)
     }
 
 # Helper: compose NCR image repo path using repo + optional build_project_id digits
