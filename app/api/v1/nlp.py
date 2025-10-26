@@ -563,25 +563,14 @@ async def process_conversation(
             f"confirmation={requires_confirmation}, cost={requires_cost}"
         )
 
-        # 6. 비용 추정 (필요시)
+        # 6. 비용 추정 (필요시, 스케일링 제외)
         cost_estimate = None
-        if requires_cost:
+        if requires_cost and intent != "scale":
             await conv_manager.update_state(
                 user_id, session_id, ConversationState.ESTIMATING
             )
 
-            if intent == "scale":
-                # 현재 replicas 조회 (여기서는 가정, 실제로는 K8s에서 조회)
-                current_replicas = 2  # TODO: K8s API로 조회
-                target_replicas = entities.get("replicas", 3)
-
-                cost_estimate = await estimator.estimate_scaling_cost(
-                    current_replicas=current_replicas,
-                    target_replicas=target_replicas,
-                    db=db
-                )
-
-            elif intent == "deploy":
+            if intent == "deploy":
                 owner = entities.get("github_owner", "")
                 repo = entities.get("github_repo", "")
 
@@ -610,9 +599,10 @@ async def process_conversation(
                 pending_action=pending_action
             )
 
-            # 확인 메시지 생성
+            # 확인 메시지 생성 (스케일링 명령은 비용 정보 제외)
+            show_cost_info = intent != "scale"
             confirmation_message = classifier.get_confirmation_message(
-                intent, entities, cost_estimate
+                intent, entities, cost_estimate, show_cost_info
             )
 
             await conv_manager.add_message(
@@ -661,25 +651,60 @@ async def process_conversation(
                 user_id, session_id, ConversationState.COMPLETED
             )
 
-            response_message = result.get("message", "작업이 완료되었습니다.")
+            # ResponseFormatter를 사용하여 결과 포맷팅
+            from ...services.response_formatter import ResponseFormatter
+            formatter = ResponseFormatter()
+            
+            # 스케일링 명령의 경우 특별 처리
+            if intent == "scale":
+                # 데이터베이스에서 이전 레플리카 개수 가져오기
+                try:
+                    from ...services.deployment_config import DeploymentConfigService
+                    config_service = DeploymentConfigService()
+                    github_owner = entities.get("github_owner", "")
+                    github_repo = entities.get("github_repo", "")
+                    db_old_replicas = config_service.get_replica_count(db, github_owner, github_repo)
+                    logger.info(f"데이터베이스에서 가져온 이전 레플리카 개수: {db_old_replicas}")
+                    
+                    # result에 이전 레플리카 개수 추가
+                    if "old_replicas" not in result or result.get("old_replicas", 0) == 0:
+                        result["old_replicas"] = db_old_replicas
+                        logger.info(f"result에 old_replicas 추가: {result['old_replicas']}")
+                except Exception as e:
+                    logger.error(f"데이터베이스에서 이전 레플리카 개수 가져오기 실패: {str(e)}")
+                
+                formatted_result = formatter.format_scale({
+                    "k8s_result": result,
+                    "entities": entities
+                })
+                response_message = formatted_result.get("summary", "스케일링이 완료되었습니다.")
+            else:
+                response_message = result.get("message", "작업이 완료되었습니다.")
+            
             await conv_manager.add_message(
                 user_id, session_id,
                 "assistant", response_message,
                 action="execution_completed",
-                metadata={"result": result}
+                metadata={"result": formatted_result if intent == "scale" else result}
             )
             
             # 어시스턴트 응답을 command_history에 저장 (DB)
+            # 스케일링의 경우 formatted_result를 저장, 그렇지 않으면 result 저장
             await save_command_history(
                 db=db,
                 command_text=response_message,
                 tool="assistant_response",
                 args={"session_id": session_id, "action": "execution_completed", "intent": intent, "entities": entities},
-                result=result,
+                result=formatted_result if intent == "scale" else result,
                 status="completed",
                 user_id=user_id
             )
 
+            # 디버깅을 위한 로그 추가
+            logger.info(f"ConversationResponse 생성 - intent: {intent}, formatted_result 존재: {formatted_result is not None if intent == 'scale' else 'N/A'}")
+            if intent == "scale" and formatted_result:
+                logger.info(f"formatted_result 내용: {formatted_result}")
+            
             return ConversationResponse(
                 session_id=session_id,
                 state=ConversationState.COMPLETED.value,
@@ -687,7 +712,7 @@ async def process_conversation(
                 requires_confirmation=False,
                 cost_estimate=None,
                 pending_action=None,
-                result=result
+                result=formatted_result if intent == "scale" else result  # 스케일링일 때만 formatted_result 사용
             )
 
     except HTTPException:
@@ -947,18 +972,55 @@ async def confirm_action(
         # 대기 중인 작업 제거
         await conv_manager.clear_pending_action(user_id, request.session_id)
 
-        result_message = f"작업이 완료되었습니다: {result.get('message', '')}"
+        # ResponseFormatter를 사용하여 결과 포맷팅
+        from ...services.response_formatter import ResponseFormatter
+        formatter = ResponseFormatter()
+        
+        # 스케일링 명령의 경우 특별 처리
+        if pending_action["type"] == "scale":
+            # 디버깅을 위한 로그 추가
+            logger.info(f"스케일링 결과 포맷팅 - result: {result}")
+            logger.info(f"스케일링 결과 포맷팅 - params: {params}")
+            
+            # scale_deployment에서 이미 올바른 old_replicas를 반환하므로 추가로 덮어쓰지 않음
+            # result.data에서 old_replicas를 추출하여 result에 추가
+            if "data" in result and "old_replicas" in result["data"]:
+                result["old_replicas"] = result["data"]["old_replicas"]
+                logger.info(f"scale_deployment에서 반환된 old_replicas 사용: {result['old_replicas']}")
+            
+            formatted_result = formatter.format_scale({
+                "k8s_result": result,
+                "entities": params
+            })
+            logger.info(f"포맷된 결과: {formatted_result}")
+            result_message = formatted_result.get("summary", "스케일링이 완료되었습니다.")
+        else:
+            result_message = f"작업이 완료되었습니다: {result.get('message', '')}"
+        
         await conv_manager.add_message(
             user_id, request.session_id,
             "assistant", result_message,
             action="execution_completed",
-            metadata={"result": result}
+            metadata={"result": formatted_result if pending_action["type"] == "scale" else result}
+        )
+
+        # 어시스턴트 응답을 command_history에 저장 (DB)
+        # 스케일링의 경우 formatted_result를 저장, 그렇지 않으면 result 저장
+        from ...services.command_history import save_command_history
+        await save_command_history(
+            db=db,
+            command_text=result_message,
+            tool="assistant_response",
+            args={"session_id": request.session_id, "action": "execution_completed", "type": pending_action["type"], "parameters": params},
+            result=formatted_result if pending_action["type"] == "scale" else result,
+            status="completed",
+            user_id=user_id
         )
 
         return {
             "status": "completed",
             "message": result_message,
-            "result": result,
+            "result": formatted_result if pending_action["type"] == "scale" else result,
             "session_id": request.session_id
         }
 

@@ -6,7 +6,7 @@ NLP Response Formatter
 """
 
 from typing import Any, Dict, List, Optional, Union
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -491,29 +491,93 @@ class ResponseFormatter:
             return self.format_error("overview", str(e))
     
     def format_scale(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """스케일링 결과를 포맷"""
+        """스케일링 결과를 상세 테이블 형식으로 포맷"""
         try:
-            owner = raw_data.get("owner", "")
-            repo = raw_data.get("repo", "")
-            replicas = raw_data.get("replicas", 0)
+            # 디버깅을 위한 로그
+            self.logger.info(f"format_scale 호출됨 - raw_data: {raw_data}")
+            
+            # k8s_result에서 실제 스케일링 결과 추출 (이제 원시 결과)
+            k8s_result = raw_data.get("k8s_result", {})
+            entities = raw_data.get("entities", {})
+            
+            self.logger.info(f"k8s_result: {k8s_result}")
+            self.logger.info(f"entities: {entities}")
+            
+            # 스케일링 실행 결과에서 정보 추출
+            owner = k8s_result.get("owner", "")
+            repo = k8s_result.get("repo", "")
+            old_replicas = k8s_result.get("old_replicas", 0)
+            new_replicas = k8s_result.get("new_replicas", 0)
+            status = k8s_result.get("status", "unknown")
+            message = k8s_result.get("message", "")
+            
+            # 저장소 정보가 없으면 entities에서 추출 (실패 시에도 사용자 입력 정보 사용)
+            if not owner or not repo:
+                owner = entities.get("github_owner", "")
+                repo = entities.get("github_repo", "")
+                self.logger.info(f"entities에서 추출한 저장소 정보: {owner}/{repo}")
+            
+            # replicas 정보가 없으면 entities에서 추출 (실패 시에도 사용자 입력 정보 사용)
+            if new_replicas == 0:
+                new_replicas = entities.get("replicas", 0)
+                self.logger.info(f"entities에서 추출한 replicas: {new_replicas}")
+            
+            # old_replicas가 없으면 기본값 1 사용 (실패 시에도 의미있는 값 표시)
+            if old_replicas == 0:
+                old_replicas = 1  # 기본값
+                self.logger.info(f"기본값으로 설정한 old_replicas: {old_replicas}")
+            
+            # 최종 데이터 검증
+            self.logger.info(f"최종 추출된 데이터 - owner: {owner}, repo: {repo}, old_replicas: {old_replicas}, new_replicas: {new_replicas}, status: {status}")
+            
+            # 스케일링 상세 정보 구성
+            # 현재 시간을 한국 시간(KST)으로 생성
+            kst_timezone = timezone(timedelta(hours=9))
+            now_kst = datetime.now(kst_timezone)
+
+            scaling_details = {
+                "repository": f"{owner}/{repo}",
+                "old_replicas": old_replicas,
+                "new_replicas": new_replicas,
+                "change": f"{old_replicas} → {new_replicas}",
+                "status": "성공" if status == "success" else "실패",
+                "timestamp": self._format_datetime(now_kst.isoformat()),
+                "action": "스케일링"
+            }
+            
+            # 배포 정보 추출 (있는 경우)
+            deploy_result = k8s_result.get("deploy_result", {})
+            if deploy_result:
+                scaling_details.update({
+                    "deploy_project_id": deploy_result.get("deploy_project_id", ""),
+                    "stage_id": deploy_result.get("stage_id", ""),
+                    "scenario_id": deploy_result.get("scenario_id", ""),
+                    "service_url": deploy_result.get("service_url", ""),
+                    "image_tag": k8s_result.get("image_tag", "")
+                })
+            
+            # 요약 메시지
+            if status == "success":
+                summary = f"{owner}/{repo}을(를) {old_replicas}개에서 {new_replicas}개로 스케일링했습니다."
+            else:
+                summary = f"{owner}/{repo} 스케일링이 실패했습니다."
             
             return {
                 "type": "scale",
-                "summary": f"{owner}/{repo}을(를) {replicas}개로 스케일링했습니다.",
+                "summary": summary,
                 "data": {
-                    "formatted": {
-                        "owner": owner,
-                        "repo": repo,
-                        "replicas": replicas
-                    },
+                    "formatted": scaling_details,
                     "raw": raw_data
                 },
                 "metadata": {
                     "owner": owner,
                     "repo": repo,
-                    "replicas": replicas
+                    "old_replicas": old_replicas,
+                    "new_replicas": new_replicas,
+                    "status": status
                 }
             }
+            
         except Exception as e:
             self.logger.error(f"Error formatting scale: {str(e)}")
             return self.format_error("scale", str(e))
@@ -685,15 +749,16 @@ class ResponseFormatter:
         return age_str
     
     def _format_datetime(self, datetime_str: str) -> str:
-        """ISO datetime을 한국어 형식으로 포맷"""
+        """ISO datetime을 한국 시간(KST, UTC+9) 형식으로 포맷"""
         if not datetime_str:
             return "알 수 없음"
-        
+
         try:
             # ISO 형식 파싱
             dt = datetime.fromisoformat(datetime_str.replace('Z', '+00:00'))
-            # 한국 시간으로 변환
-            kst = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            # 한국 시간(KST, UTC+9)으로 변환
+            kst_timezone = timezone(timedelta(hours=9))
+            kst = dt.astimezone(kst_timezone)
             return kst.strftime("%Y-%m-%d %H:%M")
         except:
             return datetime_str
