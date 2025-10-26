@@ -714,6 +714,8 @@ async def scale_deployment(
         image_repo=image_repo,
         image_tag=current_image_tag,  # Keep same image
         sc_endpoint=settings.ncp_sourcecommit_endpoint,
+        sc_username=settings.ncp_sourcecommit_username,  # Add SourceCommit auth
+        sc_password=settings.ncp_sourcecommit_password,  # Add SourceCommit auth
         replicas=replicas  # Update replicas
     )
 
