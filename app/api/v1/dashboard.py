@@ -4,12 +4,16 @@ import asyncio
 import random
 import logging
 
-from fastapi import APIRouter, Request, HTTPException, status
+from fastapi import APIRouter, Request, HTTPException, status, Depends
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from ...services.monitoring import get_system_metrics
 from ...services.deployment import get_deployment_stats
 from ...services.cluster import get_cluster_info
+from ...database import get_db
+from .auth_verify import get_current_user
+from ...services.user_repository import get_user_repositories
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,26 @@ class SystemHealth(BaseModel):
     status: str  # 'healthy', 'warning', 'error'
 
 
+class ConnectedRepository(BaseModel):
+    """연결된 리포지토리 정보 모델"""
+    id: str
+    name: str
+    fullName: str
+    branch: str
+    lastSync: str
+
+
+class PullRequest(BaseModel):
+    """Pull Request 정보 모델"""
+    id: str
+    number: int
+    title: str
+    author: str
+    status: str
+    createdAt: str
+    htmlUrl: str
+
+
 class DashboardData(BaseModel):
     """대시보드 데이터 모델"""
     clusters: int
@@ -41,10 +65,16 @@ class DashboardData(BaseModel):
     memoryUsage: int
     recentDeployments: List[RecentDeployment]
     systemHealth: List[SystemHealth]
+    connectedRepositories: List[ConnectedRepository]
+    pullRequests: List[PullRequest]
 
 
 @router.get("/dashboard/overview", response_model=DashboardData)
-async def get_dashboard_overview(request: Request) -> DashboardData:
+async def get_dashboard_overview(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+) -> DashboardData:
     """대시보드 개요 데이터를 반환합니다."""
     try:
         # 실제 서비스에서 데이터를 가져오는 로직
@@ -65,30 +95,25 @@ async def get_dashboard_overview(request: Request) -> DashboardData:
         cpu_usage = int(metrics.get('cpu_usage', 68))
         memory_usage = int(metrics.get('memory_usage', 45))
         
-        # 최근 배포 이력
-        recent_deployments = [
-            RecentDeployment(
-                name="frontend-app",
-                version="v2.1.0",
-                status="success",
-                time="2 minutes ago",
-                message="Deployed 2 minutes ago"
-            ),
-            RecentDeployment(
-                name="api-service",
-                version="v1.8.3",
-                status="in-progress",
-                time="5 minutes ago",
-                message="Deploying for 5 minutes"
-            ),
-            RecentDeployment(
-                name="database-migration",
-                version="",
-                status="failed",
-                time="1 hour ago",
-                message="Failed 1 hour ago"
-            )
-        ]
+        # 최근 배포 이력 (실제 데이터 조회)
+        recent_deployments = []
+        try:
+            from .deployment_histories import get_repositories_latest_deployments
+            deployment_response = await get_repositories_latest_deployments(db=db, current_user=current_user)
+            if deployment_response.get("status") == "success":
+                deployments = deployment_response.get("repositories", [])
+                for deployment in deployments[:3]:  # 최대 3개만
+                    recent_deployments.append(RecentDeployment(
+                        name=deployment.get("full_name", ""),
+                        version=deployment.get("latest_deployment", {}).get("image", {}).get("tag", ""),
+                        status=deployment.get("latest_deployment", {}).get("status", "unknown"),
+                        time=deployment.get("latest_deployment", {}).get("created_at", ""),
+                        message=f"Deployed {deployment.get('latest_deployment', {}).get('created_at', '')}"
+                    ))
+        except Exception as e:
+            logger.warning(f"Failed to fetch recent deployments: {e}")
+            # 데이터가 없으면 빈 배열 반환
+            recent_deployments = []
         
         # 시스템 상태
         system_health = [
@@ -98,6 +123,99 @@ async def get_dashboard_overview(request: Request) -> DashboardData:
             SystemHealth(service="Monitoring", status="healthy")
         ]
         
+        # 연결된 리포지토리 정보 가져오기 (사용자별)
+        connected_repositories = []
+        try:
+            user_repos = await get_user_repositories(db, str(current_user.get("id", "")))
+            # 최대 3개만 표시
+            for repo in user_repos[:3]:
+                connected_repositories.append(ConnectedRepository(
+                    id=repo.get("id", ""),
+                    name=repo.get("name", ""),
+                    fullName=repo.get("fullName", ""),
+                    branch=repo.get("branch", "main"),
+                    lastSync=repo.get("lastSync", "")
+                ))
+        except Exception as e:
+            logger.warning(f"Failed to fetch user repositories: {e}")
+            # 데이터가 없으면 빈 배열 반환
+            connected_repositories = []
+        
+        # Pull Request 정보 가져오기 (사용자 리포지토리에서만) - 병렬 처리로 최적화
+        pull_requests = []
+        try:
+            # 사용자 리포지토리 목록 가져오기
+            user_repos = await get_user_repositories(db, str(current_user.get("id", "")))
+            
+            if not user_repos:
+                pull_requests = []
+            else:
+                # GitHub App 토큰 가져오기
+                from ...services.github_app import github_app_auth
+                installations = await github_app_auth.get_app_installations()
+                
+                if installations:
+                    installation_id = installations[0]["id"]
+                    token = await github_app_auth.get_installation_token(str(installation_id))
+                    
+                    import httpx
+                    import asyncio
+                    async with httpx.AsyncClient(timeout=10.0) as client:  # 타임아웃 설정
+                        # 병렬로 모든 리포지토리의 PR 조회
+                        async def fetch_repo_prs(repo_name):
+                            try:
+                                response = await client.get(
+                                    f"https://api.github.com/repos/{repo_name}/pulls",
+                                    headers={
+                                        "Authorization": f"Bearer {token}",
+                                        "Accept": "application/vnd.github+json",
+                                        "X-GitHub-Api-Version": "2022-11-28"
+                                    },
+                                    params={"state": "open", "per_page": 3}  # 최대 3개로 제한
+                                )
+                                if response.status_code == 200:
+                                    return response.json()
+                                return []
+                            except Exception as e:
+                                logger.warning(f"Failed to fetch PRs for {repo_name}: {e}")
+                                return []
+                        
+                        # 모든 리포지토리의 PR을 병렬로 조회
+                        repo_names = [repo.get("fullName") for repo in user_repos if repo.get("fullName")]
+                        pr_responses = await asyncio.gather(*[fetch_repo_prs(name) for name in repo_names], return_exceptions=True)
+                        
+                        # 결과 수집
+                        all_prs = []
+                        for prs_data in pr_responses:
+                            if isinstance(prs_data, list):
+                                for pr in prs_data:
+                                    all_prs.append({
+                                        "id": str(pr["id"]),
+                                        "number": pr["number"],
+                                        "title": pr["title"],
+                                        "author": pr["user"]["login"],
+                                        "status": pr["state"],
+                                        "createdAt": pr["created_at"],
+                                        "htmlUrl": pr["html_url"]
+                                    })
+                        
+                        # 생성일 기준으로 정렬하고 최신 3개만 선택
+                        all_prs.sort(key=lambda x: x.get("createdAt", ""), reverse=True)
+                        for pr in all_prs[:3]:
+                            pull_requests.append(PullRequest(
+                                id=pr.get("id", ""),
+                                number=pr.get("number", 0),
+                                title=pr.get("title", ""),
+                                author=pr.get("author", ""),
+                                status=pr.get("status", "open"),
+                                createdAt=pr.get("createdAt", ""),
+                                htmlUrl=pr.get("htmlUrl", "")
+                            ))
+        except Exception as e:
+            logger.warning(f"Failed to fetch pull requests: {e}")
+            # 데이터가 없으면 빈 배열 반환
+            pull_requests = []
+        
         return DashboardData(
             clusters=clusters,
             deployments=total_deployments,
@@ -106,7 +224,9 @@ async def get_dashboard_overview(request: Request) -> DashboardData:
             cpuUsage=cpu_usage,
             memoryUsage=memory_usage,
             recentDeployments=recent_deployments,
-            systemHealth=system_health
+            systemHealth=system_health,
+            connectedRepositories=connected_repositories,
+            pullRequests=pull_requests
         )
         
     except Exception as e:
