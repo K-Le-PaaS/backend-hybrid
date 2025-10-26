@@ -51,6 +51,7 @@ class ResponseFormatter:
                 "get_rollback_list": self.format_rollback_list,  # 롤백 목록 조회 명령어 추가
                 "scale": self.format_scale,
                 "deploy_application": self.format_deploy,
+                "deploy_github_repository": self.format_deploy,  # GitHub 레포지토리 배포
                 "k8s_restart_deployment": self.format_restart,
                 "cost_analysis": self.format_cost_analysis,
             }
@@ -585,19 +586,65 @@ class ResponseFormatter:
     def format_deploy(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """배포 결과를 포맷"""
         try:
-            app_name = raw_data.get("app_name", "")
-            environment = raw_data.get("environment", "")
-            
+            # 레포지토리 정보 추출
+            repository = raw_data.get("repository", "")
+            branch = raw_data.get("branch", "main")
+
+            # 커밋 정보 추출 및 구조화
+            commit_info = raw_data.get("commit", {})
+            if isinstance(commit_info, dict):
+                commit = {
+                    "sha": commit_info.get("sha", "unknown"),
+                    "message": commit_info.get("message", "커밋 정보 없음"),
+                    "author": commit_info.get("author", "Unknown"),
+                    "url": commit_info.get("url", "")
+                }
+            else:
+                commit = {
+                    "sha": "unknown",
+                    "message": "커밋 정보 없음",
+                    "author": "Unknown",
+                    "url": ""
+                }
+
+            # 배포 상태 메시지
+            status = raw_data.get("status", "success")
+            deployment_status = raw_data.get("deployment_status", "배포가 백그라운드에서 진행됩니다. CI/CD Pipelines 탭에서 진행 상황을 확인하세요.")
+
+            # 메시지 생성
+            if status == "success":
+                message = raw_data.get("message", f"{repository} 배포를 시작했습니다")
+                summary = f"✅ {repository} 배포 시작"
+            else:
+                message = raw_data.get("message", f"{repository} 배포 시작 중 문제가 발생했습니다")
+                summary = f"⚠️ {repository} 배포 오류"
+
+            # 포맷된 응답 구조 (프론트엔드 DeployResponseRenderer와 호환)
+            formatted_data = {
+                "status": status,
+                "message": message,
+                "repository": repository,
+                "branch": branch,
+                "commit": commit,
+                "deployment_status": deployment_status
+            }
+
+            # 타입 결정 (deploy 또는 deploy_github_repository)
+            response_type = "deploy_github_repository" if "github" in repository.lower() or raw_data.get("type") == "deploy_github_repository" else "deploy"
+
             return {
-                "type": "deploy",
-                "summary": f"{app_name}을(를) {environment} 환경에 배포했습니다.",
+                "type": response_type,
+                "summary": summary,
                 "data": {
-                    "formatted": raw_data,
+                    "formatted": formatted_data,
                     "raw": raw_data
                 },
                 "metadata": {
-                    "app_name": app_name,
-                    "environment": environment
+                    "app_name": raw_data.get("app_name", repository.split("/")[-1] if "/" in repository else repository),
+                    "environment": raw_data.get("environment", "production"),
+                    "repository": repository,
+                    "branch": branch,
+                    "status": status
                 }
             }
         except Exception as e:
