@@ -1,0 +1,27 @@
+{
+  "blocks": [
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "```\n╔════════════════════════════════════════════════════════════╗\n║               K-LE-PAAS DEPLOYMENT SYSTEM                  ║\n╚════════════════════════════════════════════════════════════╝\n```"
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "```\n$ k-le-paas deploy failed --id {{ deployment_id }}\n\n╔══════════════════════════════════════════════════════════════╗\n║                    💥 DEPLOYMENT FAILED 💥                    ║\n╠══════════════════════════════════════════════════════════════╣\n║ Repository:    {{ (repo[:42] + ' ' * (42 - repo[:42]|length))[:42] }} ║\n║ Branch:        {{ (branch[:42] + ' ' * (42 - branch[:42]|length))[:42] }} ║\n║ Commit:        {{ (commit_short[:37] + ' ' * (37 - commit_short[:37]|length))[:37] }} ║\n║ Author:        {{ (author[:42] + ' ' * (42 - author[:42]|length))[:42] }} ║\n║ Deploy ID:     #{{ deployment_id }}{{ ' ' * (39 - deployment_id|string|length) }} ║\n║ Duration:      {{ duration_str }} ({{ duration_seconds }}s){{ ' ' * (32 - (duration_str + ' (' + duration_seconds|string + 's)')|length) }} ║\n╚══════════════════════════════════════════════════════════════╝\n\n❌ [ERROR] Deployment failed with errors:\n{% if error_section %}{{ error_section }}{% endif %}{% if log_section %}{{ log_section }}{% endif %}\n\n🔴 [ERROR] Deployment aborted 💥\n🔄 [INFO] Rolling back to previous stable version...\n\n💀 Exit code: 1 (FAILED)\n```"
+      }
+    },
+    {
+      "type": "context",
+      "elements": [
+        {
+          "type": "mrkdwn",
+          "text": "❌ Failed <!date^{{ timestamp }}^{date_short_pretty} at {time}|just now> by *{{ author }}* | Deployment #{{ deployment_id }}"
+        }
+      ]
+    }
+  ]
+}

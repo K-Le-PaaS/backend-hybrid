@@ -1,0 +1,27 @@
+{
+  "blocks": [
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "```\n╔════════════════════════════════════════════════════════════╗\n║               K-LE-PAAS DEPLOYMENT SYSTEM                  ║\n╚════════════════════════════════════════════════════════════╝\n```"
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "```\n$ k-le-paas deploy start --repo {{ repo }} --branch {{ branch }}\n\n╔══════════════════════════════════════════════════════════════╗\n║                    🚀 DEPLOYMENT INITIATED 🚀                 ║\n╠══════════════════════════════════════════════════════════════╣\n║ Repository:    {{ (repo[:42] + ' ' * (42 - repo[:42]|length))[:42] }} ║\n║ Branch:        {{ (branch[:42] + ' ' * (42 - branch[:42]|length))[:42] }} ║\n║ Commit:        {{ (commit_short[:37] + ' ' * (37 - commit_short[:37]|length))[:37] }} ║\n║ Author:        {{ (author[:42] + ' ' * (42 - author[:42]|length))[:42] }} ║\n║ Deploy ID:     #{{ deployment_id }}{{ ' ' * (39 - deployment_id|string|length) }} ║\n║ Status:        IN PROGRESS 🔄{{ ' ' * 32 }} ║\n╚══════════════════════════════════════════════════════════════╝\n\n🔵 [INFO] Initializing deployment pipeline...\n🔵 [INFO] Validating configuration\n🔵 [INFO] Building container image\n🔵 [INFO] Running pre-deployment tests\n🔵 [INFO] Preparing deployment manifest\n\n⏳ Deployment in progress... Please wait.\n```"
+      }
+    },
+    {
+      "type": "context",
+      "elements": [
+        {
+          "type": "mrkdwn",
+          "text": "🚀 Started <!date^{{ timestamp }}^{date_short_pretty} at {time}|just now> by *{{ author }}* | Track progress in real-time"
+        }
+      ]
+    }
+  ]
+}
