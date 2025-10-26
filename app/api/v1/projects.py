@@ -525,17 +525,25 @@ async def list_project_integrations(db: Session = Depends(get_db), current_user:
     return [dict(r) for r in raw_maps]
 
 
+class ConnectGitHubRepoRequest(BaseModel):
+    """간소화된 GitHub 리포지토리 연동 요청"""
+    owner: str
+    repo: str
+
+
 @router.post("/github/connect")
 async def connect_github_repository(
-    req: MirrorToSCRequest,
+    req: ConnectGitHubRepoRequest,
     db: Session = Depends(get_db),
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """GitHub 레포지토리 연동 (NCP 연동 없이)"""
-    # Parse owner/repo from URL
-    tail = req.repo_url.split("github.com/")[-1].rstrip("/")
-    owner = tail.split("/")[0]
-    repo_name = tail.split("/")[1].replace('.git','') if '/' in tail else tail
+    # Owner and repo are directly provided
+    owner = req.owner
+    repo_name = req.repo
+
+    # Construct GitHub URL with .git extension
+    repo_url = f"https://github.com/{owner}/{repo_name}.git"
     
     # GitHub App 설치 상태를 확인 (DB 우선 + API 폴백)
     try:
@@ -567,7 +575,7 @@ async def connect_github_repository(
         "repository": {
             "owner": owner,
             "repo": repo_name,
-            "url": req.repo_url
+            "url": repo_url
         },
         "integration_id": integration.id
     }

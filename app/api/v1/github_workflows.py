@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ...services.github_workflow import create_or_update_workflow, DEFAULT_CI_YAML
 from ...services.github_app import github_app_auth
+from ...services.notification import SlackNotificationService
 from ...models.deployment_history import DeploymentHistory, get_kst_now
 from datetime import datetime
 from ...services.user_repository import get_user_repositories, add_user_repository, remove_user_repository
@@ -25,11 +26,12 @@ async def _send_user_slack_message(
     user_id: str,
     text: str,
     channel: Optional[str] = None,
+    deployment_context: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """저장된 사용자 Slack 설정으로 간단 메시지를 보냅니다.
+    """저장된 사용자 Slack 설정으로 메시지를 보냅니다.
 
-    OAuth 설정이 있으면 chat.postMessage, 아니면 Webhook이 있으면 Webhook으로 전송.
-    실패는 배포 흐름에 영향을 주지 않고 로그만 남깁니다.
+    deployment_context가 제공되면 터미널 스타일 배포 알림을 전송하고,
+    그렇지 않으면 간단한 텍스트 메시지를 전송합니다.
     """
     try:
         from ...services.user_slack_config_service import get_user_slack_config
@@ -43,6 +45,127 @@ async def _send_user_slack_message(
 
         target_channel = channel or cfg.deployment_channel or cfg.default_channel or "#general"
 
+        # 터미널 스타일 배포 알림 (deployment_context가 있으면)
+        if deployment_context:
+            try:
+                event_type = deployment_context.get("event_type")
+                blocks = None
+
+                # Webhook URL이 있으면 notifier 사용 (blocks 생성)
+                if cfg.webhook_url:
+                    notifier = SlackNotificationService(cfg.webhook_url)
+
+                    if event_type == "started":
+                        notifier.send_deployment_started(
+                            repo=deployment_context["repo"],
+                            commit_sha=deployment_context["commit_sha"],
+                            commit_message=deployment_context["commit_message"],
+                            author=deployment_context["author"],
+                            deployment_id=deployment_context["deployment_id"],
+                            branch=deployment_context.get("branch", "main"),
+                            channel=target_channel if not cfg.dm_enabled else None
+                        )
+                        logger.info(f"Terminal-style deployment started notification sent via webhook")
+                        return
+                    elif event_type == "success":
+                        notifier.send_deployment_success(
+                            repo=deployment_context["repo"],
+                            commit_sha=deployment_context["commit_sha"],
+                            commit_message=deployment_context["commit_message"],
+                            author=deployment_context["author"],
+                            deployment_id=deployment_context["deployment_id"],
+                            duration_seconds=deployment_context.get("duration_seconds", 0),
+                            branch=deployment_context.get("branch", "main"),
+                            app_url=deployment_context.get("app_url"),
+                            channel=target_channel if not cfg.dm_enabled else None
+                        )
+                        logger.info(f"Terminal-style deployment success notification sent via webhook")
+                        return
+                    elif event_type == "failed":
+                        notifier.send_deployment_failed(
+                            repo=deployment_context["repo"],
+                            commit_sha=deployment_context["commit_sha"],
+                            commit_message=deployment_context["commit_message"],
+                            author=deployment_context["author"],
+                            deployment_id=deployment_context["deployment_id"],
+                            duration_seconds=deployment_context.get("duration_seconds", 0),
+                            error_message=deployment_context.get("error_message", "Unknown error"),
+                            branch=deployment_context.get("branch", "main"),
+                            channel=target_channel if not cfg.dm_enabled else None
+                        )
+                        logger.info(f"Terminal-style deployment failed notification sent via webhook")
+                        return
+
+                # OAuth 사용자의 경우 blocks 생성하여 OAuth API로 전송
+                elif cfg.integration_type == "oauth" and cfg.access_token:
+                    from ...services.notification import SlackNotificationService
+                    # 임시 notifier 생성하여 blocks만 가져오기
+                    temp_notifier = SlackNotificationService(webhook_url="https://hooks.slack.com/dummy")
+
+                    if event_type == "started":
+                        payload = temp_notifier._build_deployment_started(
+                            repo=deployment_context["repo"],
+                            commit_sha=deployment_context["commit_sha"],
+                            commit_message=deployment_context["commit_message"],
+                            author=deployment_context["author"],
+                            deployment_id=deployment_context["deployment_id"],
+                            branch=deployment_context.get("branch", "main")
+                        )
+                        blocks = payload.get("blocks")
+                    elif event_type == "success":
+                        payload = temp_notifier._build_deployment_success(
+                            repo=deployment_context["repo"],
+                            commit_sha=deployment_context["commit_sha"],
+                            commit_message=deployment_context["commit_message"],
+                            author=deployment_context["author"],
+                            deployment_id=deployment_context["deployment_id"],
+                            duration_seconds=deployment_context.get("duration_seconds", 0),
+                            branch=deployment_context.get("branch", "main"),
+                            app_url=deployment_context.get("app_url"),
+                            logs=None
+                        )
+                        blocks = payload.get("blocks")
+                    elif event_type == "failed":
+                        payload = temp_notifier._build_deployment_failed(
+                            repo=deployment_context["repo"],
+                            commit_sha=deployment_context["commit_sha"],
+                            commit_message=deployment_context["commit_message"],
+                            author=deployment_context["author"],
+                            deployment_id=deployment_context["deployment_id"],
+                            duration_seconds=deployment_context.get("duration_seconds", 0),
+                            error_message=deployment_context.get("error_message", "Unknown error"),
+                            branch=deployment_context.get("branch", "main"),
+                            logs=None
+                        )
+                        blocks = payload.get("blocks")
+
+                    # OAuth로 blocks 전송
+                    if blocks:
+                        svc = SlackOAuthService()
+                        if cfg.dm_enabled and cfg.dm_user_id:
+                            result = await svc.send_notification(
+                                access_token=cfg.access_token,
+                                channel=cfg.dm_user_id,
+                                title="K-Le-PaaS Deployment",
+                                message=text,
+                                blocks=blocks
+                            )
+                        else:
+                            result = await svc.send_notification(
+                                access_token=cfg.access_token,
+                                channel=target_channel,
+                                title="K-Le-PaaS Deployment",
+                                message=text,
+                                blocks=blocks
+                            )
+                        logger.info(f"Terminal-style deployment notification sent via OAuth: success={getattr(result, 'success', True)}")
+                        return
+
+            except Exception as e:
+                logger.warning(f"Terminal-style notification failed, falling back to text: {str(e)}")
+                # Fallback to text message below
+
+        # 기본 텍스트 메시지 (OAuth DM 또는 Webhook)
         if cfg.integration_type == "webhook" and cfg.webhook_url and not cfg.dm_enabled:
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
@@ -1282,14 +1405,29 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
             logger.error(f"Failed to send deployment_started message: {str(e)}")
             raise
 
-        # Slack: 배포 시작 알림 (2회 알림 중 첫 번째)
+        # Slack: 배포 시작 알림 (터미널 스타일)
+        deployment_start_context = {
+            "event_type": "started",
+            "repo": f"{integration.github_owner}/{integration.github_repo}",
+            "commit_sha": head_commit.get("id", ""),
+            "commit_message": head_commit.get("message", ""),
+            "author": head_commit.get("author", {}).get("name", "Unknown"),
+            "deployment_id": deployment_history.id,
+            "branch": "main"
+        }
+
         short_sha = (head_commit.get("id") or "")[:7]
         start_msg = (
             f"🚀 배포 시작 — {integration.github_owner}/{integration.github_repo}"
             f"\ncommit {short_sha} | by {head_commit.get('author', {}).get('name', '')}"
             f"\ndeployment_id={deployment_history.id}"
         )
-        await _send_user_slack_message(db, integration.user_id, start_msg)
+        await _send_user_slack_message(
+            db,
+            integration.user_id,
+            start_msg,
+            deployment_context=deployment_start_context
+        )
         
         # Step 1: SourceCommit 연동 확인 및 미러링
         # SourceCommit 시작 알림
@@ -1331,7 +1469,7 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
                 data=sourcecommit_result
             )
 
-            # Slack: 실패 즉시 알림
+            # Slack: 배포 실패 알림 (기존 방식 - 호환성)
             fail_msg = (
                 f"❌ 배포 실패 — {integration.github_owner}/{integration.github_repo}"
                 f"\nstage=sourcecommit · reason={deployment_history.error_message}"
@@ -1339,6 +1477,27 @@ async def handle_push_webhook(payload: Dict[str, Any], integration: UserProjectI
             )
             try:
                 await _send_user_slack_message(db, integration.user_id, fail_msg)
+            except Exception as _:
+                pass
+
+            # Slack: 배포 실패 알림 (터미널 스타일 - 추가)
+            try:
+                from ...services.user_slack_config_service import get_user_slack_config
+                user_slack_config = get_user_slack_config(db, integration.user_id)
+
+                if user_slack_config and user_slack_config.webhook_url:
+                    notifier = SlackNotificationService(user_slack_config.webhook_url)
+                    duration = (deployment_history.completed_at - deployment_history.started_at).total_seconds() if deployment_history.completed_at else 0
+                    notifier.send_deployment_failed(
+                        repo=f"{integration.github_owner}/{integration.github_repo}",
+                        commit_sha=deployment_history.github_commit_sha or "",
+                        commit_message=deployment_history.github_commit_message or "",
+                        author=deployment_history.github_commit_author or "Unknown",
+                        deployment_id=deployment_history.id,
+                        duration_seconds=int(duration),
+                        error_message=deployment_history.error_message or "SourceCommit failed",
+                        branch="main"
+                    )
             except Exception as _:
                 pass
             
@@ -1816,14 +1975,31 @@ spec:
             }
         )
 
-        # Slack: 배포 종료 알림 (2회 알림 중 두 번째)
+        # Slack: 배포 완료 알림 (터미널 스타일)
+        deployment_complete_context = {
+            "event_type": "success" if deployment_history.status == "success" else "failed",
+            "repo": f"{integration.github_owner}/{integration.github_repo}",
+            "commit_sha": deployment_history.github_commit_sha or "",
+            "commit_message": deployment_history.github_commit_message or "",
+            "author": deployment_history.github_commit_author or "Unknown",
+            "deployment_id": deployment_history.id,
+            "duration_seconds": deployment_history.total_duration or 0,
+            "error_message": deployment_history.error_message or "Unknown error",
+            "branch": "main"
+        }
+
         final_status = "✅ 성공" if deployment_history.status == "success" else "❌ 실패"
         end_msg = (
             f"{final_status} — {integration.github_owner}/{integration.github_repo}"
             f"\ncommit {(deployment_history.github_commit_sha or '')[:7]}"
             f"\n총 소요 {deployment_history.total_duration}s"
         )
-        await _send_user_slack_message(db, integration.user_id, end_msg)
+        await _send_user_slack_message(
+            db,
+            integration.user_id,
+            end_msg,
+            deployment_context=deployment_complete_context
+        )
         
         return {
             "status": "success",
