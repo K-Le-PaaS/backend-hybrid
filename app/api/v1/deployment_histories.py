@@ -313,12 +313,13 @@ async def get_repositories_latest_deployments(
         repositories = []
 
         for integration in integrations:
-            # 각 repository의 최신 배포 조회
+            # 각 repository의 최신 배포 조회 (operation_type이 "deploy"인 것만)
             latest_deployment = db.query(DeploymentHistory).filter(
                 and_(
                     DeploymentHistory.user_id == current_user["id"],
                     DeploymentHistory.github_owner == integration.github_owner,
-                    DeploymentHistory.github_repo == integration.github_repo
+                    DeploymentHistory.github_repo == integration.github_repo,
+                    DeploymentHistory.operation_type == "deploy"  # 배포 작업만 필터링
                 )
             ).order_by(desc(DeploymentHistory.started_at)).first()
 
