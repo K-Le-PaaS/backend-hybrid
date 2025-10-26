@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 SlackTemplateBuilder 테스트 스크립트
-템플릿 중앙화가 올바르게 작동하는지 확인합니다.
+템플릿 중앙화가 올바르게 작동하는지 확인합니다. 
 """
 
 import sys
