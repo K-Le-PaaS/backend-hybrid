@@ -717,8 +717,21 @@ async def scale_deployment(
         replicas=replicas  # Update replicas
     )
 
-    old_replicas = mirror_result.get("old_replicas", 1)
-    logger.info(f"Manifest updated via mirror_and_update_manifest")
+    # 실제 매니페스트에서 읽은 old_replicas와 DB에서 읽은 값이 다를 수 있으므로
+    # DB에서 읽은 값을 우선 사용 (확인 메시지와 일치시키기 위해)
+    manifest_old_replicas = mirror_result.get("old_replicas", 1)
+    
+    # DB에서 현재 레플리카 개수 가져오기
+    from .deployment_config import DeploymentConfigService
+    config_service = DeploymentConfigService()
+    db_old_replicas = config_service.get_replica_count(db, owner, repo)
+    
+    # DB 값이 있으면 DB 값을 사용, 없으면 매니페스트 값 사용
+    old_replicas = db_old_replicas if db_old_replicas > 0 else manifest_old_replicas
+    
+    logger.info(
+        f"Scaling replicas - DB: {db_old_replicas}, Manifest: {manifest_old_replicas}, Using: {old_replicas}"
+    )
 
     # Commit DB transaction before triggering deploy
     db.commit()

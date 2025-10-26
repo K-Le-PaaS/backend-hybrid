@@ -65,7 +65,7 @@ class ActionClassifier:
         "scale": {
             "title": "스케일링 확인",
             "icon": "📊",
-            "message_template": "{deployment_name}을(를) {replicas}개로 조정하시겠습니까?"
+            "message_template": "{github_owner}/{github_repo}을(를) {replicas}개로 조정하시겠습니까?"
         },
         "deploy": {
             "title": "배포 확인",
@@ -160,7 +160,8 @@ class ActionClassifier:
         self,
         command: str,
         parameters: Dict[str, Any],
-        cost_estimate: Dict[str, Any] = None
+        cost_estimate: Dict[str, Any] = None,
+        show_cost_info: bool = True
     ) -> str:
         """
         확인 메시지 생성
@@ -190,13 +191,41 @@ class ActionClassifier:
 
         # 기본 메시지 (파라미터 포맷팅)
         try:
-            formatted_message = template_info["message_template"].format(**parameters)
+            # 스케일링 명령의 경우 특별 처리 - 이전 레플리카 개수 포함
+            if command == "scale":
+                github_owner = parameters.get("github_owner", "")
+                github_repo = parameters.get("github_repo", "")
+                new_replicas = parameters.get("replicas", 0)
+                
+                # 데이터베이스에서 이전 레플리카 개수 가져오기
+                old_replicas = 1  # 기본값
+                try:
+                    from ..database import get_db
+                    db = next(get_db())
+                    try:
+                        from .deployment_config import DeploymentConfigService
+                        config_service = DeploymentConfigService()
+                        old_replicas = config_service.get_replica_count(db, github_owner, github_repo)
+                        logger.info(f"확인 메시지용 이전 레플리카 개수: {old_replicas}")
+                    finally:
+                        db.close()
+                except Exception as e:
+                    logger.error(f"확인 메시지용 이전 레플리카 개수 가져오기 실패: {str(e)}")
+                
+                # 이전 레플리카 개수를 포함한 메시지 생성
+                if old_replicas == new_replicas:
+                    formatted_message = f"{github_owner}/{github_repo}의 레플리카는 이미 {new_replicas}개입니다."
+                else:
+                    formatted_message = f"{github_owner}/{github_repo}을(를) {old_replicas}개에서 {new_replicas}개로 조정하시겠습니까?"
+            else:
+                formatted_message = template_info["message_template"].format(**parameters)
+            
             message_parts.append(formatted_message)
         except KeyError:
             message_parts.append(template_info["message_template"])
 
-        # 비용 정보 추가
-        if cost_estimate:
+        # 비용 정보 추가 (show_cost_info가 True일 때만)
+        if cost_estimate and show_cost_info:
             message_parts.append("\n\n**예상 비용:**")
 
             if "current" in cost_estimate and "target" in cost_estimate:

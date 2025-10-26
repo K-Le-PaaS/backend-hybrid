@@ -481,12 +481,16 @@ async def _execute_deploy_github_repository(args: Dict[str, Any]) -> Dict[str, A
 async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
     """
     명령 실행 계획을 실제 Kubernetes API 호출로 변환하여 실행
-    ResponseFormatter를 사용하여 사용자 친화적인 형식으로 응답을 포맷팅합니다.
+    스케일링 명령의 경우 포맷팅하지 않고 원시 결과를 반환 (nlp.py에서 별도 처리)
     """
     # 원본 실행 결과를 가져옵니다
     raw_result = await _execute_raw_command(plan)
     
-    # ResponseFormatter를 사용하여 포맷팅
+    # 스케일링 명령의 경우 포맷팅하지 않고 원시 결과 반환
+    if plan.tool == "scale":
+        return raw_result
+    
+    # 다른 명령어들은 ResponseFormatter를 사용하여 포맷팅
     formatter = ResponseFormatter()
     formatted_result = formatter.format_by_command(plan.tool, raw_result)
     
