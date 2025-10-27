@@ -171,7 +171,7 @@ def plan_command(req: CommandRequest) -> CommandPlan:
     elif command == "endpoint":
         # 리소스 이름이 명시되지 않았을 때 유효성 검사
         if not req.service_name or req.service_name.strip() == "":
-            raise ValueError("엔드포인트 조회 명령어에는 서비스 이름을 명시해야 합니다. 예: 'nginx-service 엔드포인트 보여줘'")
+            raise ValueError("엔드포인트 조회 명령어에는 서비스 이름이 필요합니다. 'list_services' 명령어로 서비스 목록을 조회해주세요.")
         return CommandPlan(
             tool="k8s_get_endpoints",
             args={"name": resource_name, "namespace": req.namespace or ns},
@@ -239,6 +239,12 @@ def plan_command(req: CommandRequest) -> CommandPlan:
     elif command == "list_apps":
         return CommandPlan(
             tool="k8s_list_deployments",
+            args={"namespace": ns},
+        )
+    
+    elif command == "list_endpoints":
+        return CommandPlan(
+            tool="k8s_list_namespaced_endpoints",
             args={"namespace": ns},
         )
 
@@ -550,6 +556,9 @@ async def _execute_raw_command(plan: CommandPlan) -> Dict[str, Any]:
     if plan.tool == "k8s_list_deployments":
         return await _execute_list_deployments(plan.args)
 
+    if plan.tool == "k8s_list_namespaced_endpoints":
+        return await _execute_list_namespaced_endpoints(plan.args)
+
     if plan.tool == "k8s_get_service":
         return await _execute_get_service(plan.args)
 
@@ -776,18 +785,51 @@ async def _execute_get_logs(args: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _execute_get_endpoints(args: Dict[str, Any]) -> Dict[str, Any]:
     """
-    서비스 엔드포인트 조회 - Ingress 도메인만 반환 (endpoint 명령어)
+    서비스 엔드포인트 조회 - 상세 정보 반환 (endpoint 명령어)
     예: "내 앱 접속 주소 알려줘", "서비스 URL 뭐야?"
     """
     name = args["name"]
     namespace = args["namespace"]
     
     try:
+        core_v1 = get_core_v1_api()
         networking_v1 = get_networking_v1_api()
         
-        # Ingress 조회 - 해당 서비스와 연결된 Ingress 찾기
+        # 1. 서비스 정보 조회
         try:
-            # 네임스페이스의 모든 Ingress 조회
+            service = core_v1.read_namespaced_service(name=name, namespace=namespace)
+        except ApiException as e:
+            if e.status == 404:
+                return {
+                    "status": "error",
+                    "service_name": name,
+                    "namespace": namespace,
+                    "message": f"'{name}' 서비스를 찾을 수 없습니다."
+                }
+            raise
+        
+        # 서비스 정보 추출
+        service_type = service.spec.type
+        cluster_ip = service.spec.cluster_ip or "None"
+        ports = []
+        for port in service.spec.ports or []:
+            ports.append({
+                "port": port.port,
+                "target_port": port.target_port if hasattr(port.target_port, '__str__') else str(port.target_port),
+                "protocol": port.protocol or "TCP"
+            })
+        
+        # 서비스 엔드포인트 생성 (첫 번째 포트 사용)
+        service_endpoint = f"http://{name}:{ports[0]['port']}" if ports else None
+        
+        # 2. Ingress 정보 조회
+        ingress_name = None
+        ingress_domain = None
+        ingress_path = None
+        found_ingress = None
+        ingress_port = None
+        
+        try:
             ingresses = networking_v1.list_namespaced_ingress(namespace=namespace)
             
             for ingress in ingresses.items:
@@ -795,36 +837,64 @@ async def _execute_get_endpoints(args: Dict[str, Any]) -> Dict[str, Any]:
                 for rule in ingress.spec.rules or []:
                     for path in rule.http.paths or []:
                         if hasattr(path.backend.service, 'name') and path.backend.service.name == name:
-                            # 도메인 추출
-                            host = rule.host
-                            if host:
-                                # HTTPS 도메인 반환
-                                domain = f"https://{host}"
-                                return {
-                                    "status": "success",
-                                    "service_name": name,
-                                    "namespace": namespace,
-                                    "endpoints": [domain],
-                                    "message": "Ingress 도메인으로 접속 가능합니다."
-                                }
-            
-            # Ingress를 찾지 못한 경우
-            return {
-                "status": "error",
-                "service_name": name,
-                "namespace": namespace,
-                "message": f"'{name}' 서비스에 대한 Ingress 도메인이 설정되지 않았습니다. 도메인 설정이 필요합니다."
-            }
-            
-        except ApiException as e:
-            if e.status == 404:
-                return {
-                    "status": "error", 
-                    "service_name": name,
-                    "namespace": namespace,
-                    "message": f"'{name}' 서비스에 대한 Ingress를 찾을 수 없습니다. 도메인 설정이 필요합니다."
-                }
-            raise
+                            found_ingress = ingress
+                            ingress_name = ingress.metadata.name
+                            ingress_domain = rule.host
+                            ingress_path = path.path
+                            # 대상 서비스 포트 가져오기
+                            if hasattr(path.backend.service, 'port'):
+                                if hasattr(path.backend.service.port, 'number'):
+                                    ingress_port = path.backend.service.port.number
+                            break
+                    if ingress_name:
+                        break
+                if ingress_name:
+                    break
+        except ApiException:
+            pass  # Ingress가 없을 수 있음
+        
+        # 인그리스 이름 생성 (서비스이름-svc -> 서비스이름-ingress)
+        if not ingress_name:
+            # 서비스 이름에서 -svc를 -ingress로 변경
+            if name.endswith("-svc"):
+                ingress_name = name.replace("-svc", "-ingress")
+            else:
+                ingress_name = f"{name}-ingress"
+        
+        # TLS/HTTPS 설정 확인
+        has_tls = False
+        if found_ingress and found_ingress.spec.tls:
+            for tls in found_ingress.spec.tls:
+                if ingress_domain in (tls.hosts or []):
+                    has_tls = True
+                    break
+        
+        # 접속 가능한 URL 생성
+        accessible_url = None
+        if ingress_domain and found_ingress:
+            # TLS 설정 확인
+            protocol = "https" if has_tls else "http"
+            accessible_url = f"{protocol}://{ingress_domain}{ingress_path or ''}"
+        elif service.spec.type == "LoadBalancer" and service.status.load_balancer.ingress:
+            lb_ip = service.status.load_balancer.ingress[0].ip
+            accessible_url = f"http://{lb_ip}:{ports[0]['port']}" if ports else None
+        
+        return {
+            "status": "success",
+            "service_name": name,
+            "service_type": service_type,
+            "cluster_ip": cluster_ip,
+            "ports": ports,
+            "namespace": namespace,
+            "service_endpoint": service_endpoint,
+            "ingress_name": ingress_name,
+            "ingress_domain": ingress_domain,
+            "ingress_path": ingress_path,
+            "ingress_port": ingress_port,
+            "ingress_has_tls": has_tls,
+            "accessible_url": accessible_url,
+            "message": "엔드포인트 정보를 조회했습니다."
+        }
         
     except Exception as e:
         return {
@@ -1348,18 +1418,65 @@ async def _execute_list_all_ingresses(args: Dict[str, Any]) -> Dict[str, Any]:
         
         ingress_list = []
         for ingress in ingresses.items:
+            # Age 계산
+            age = "알 수 없음"
+            if ingress.metadata.creation_timestamp:
+                now = datetime.now(timezone.utc)
+                age_delta = now - ingress.metadata.creation_timestamp
+                age = str(age_delta).split('.')[0]  # 초 단위 제거
+            
             ingress_info = {
                 "name": ingress.metadata.name,
                 "namespace": ingress.metadata.namespace,
+                "class": ingress.spec.ingress_class_name if hasattr(ingress.spec, 'ingress_class_name') else "",
+                "age": age,
                 "hosts": [],
-                "addresses": []
+                "addresses": [],
+                "urls": [],
+                "services": [],
+                "paths": []
             }
+            
+            # TLS 설정 확인
+            tls_hosts = set()
+            if ingress.spec.tls:
+                for tls in ingress.spec.tls:
+                    if tls.hosts:
+                        tls_hosts.update(tls.hosts)
             
             # Ingress 호스트 정보
             if ingress.spec.rules:
                 for rule in ingress.spec.rules:
                     if rule.host:
                         ingress_info["hosts"].append(rule.host)
+                        # URL 생성 (HTTPS 또는 HTTP)
+                        protocol = "https" if rule.host in tls_hosts else "http"
+                        url = f"{protocol}://{rule.host}"
+                        ingress_info["urls"].append(url)
+                        
+                        # Path와 Backend 정보 수집
+                        if rule.http and rule.http.paths:
+                            for path in rule.http.paths:
+                                # 경로 정보
+                                path_info = {
+                                    "path": path.path if hasattr(path, 'path') else "/",
+                                    "service_name": None,
+                                    "port": None
+                                }
+                                
+                                # 서비스 정보
+                                if hasattr(path.backend, 'service') and path.backend.service:
+                                    if hasattr(path.backend.service, 'name'):
+                                        path_info["service_name"] = path.backend.service.name
+                                    if hasattr(path.backend.service, 'port'):
+                                        if hasattr(path.backend.service.port, 'number'):
+                                            path_info["port"] = path.backend.service.port.number
+                                        elif hasattr(path.backend.service.port, 'name'):
+                                            path_info["port"] = path.backend.service.port.name
+                                
+                                ingress_info["paths"].append(path_info)
+                                if path_info["service_name"]:
+                                    ingress_info["services"].append(path_info["service_name"])
             
             # Ingress 주소 정보
             if ingress.status.load_balancer.ingress:
@@ -1467,6 +1584,129 @@ async def _execute_list_deployments(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
     except Exception as e:
         return {"status": "error", "message": f"Deployment 목록 조회 실패: {str(e)}"}
+
+
+async def _execute_list_namespaced_endpoints(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    네임스페이스의 모든 서비스 엔드포인트 목록 조회 (list_endpoints 명령어)
+    예: "엔드포인트 목록 보여줘", "default 네임스페이스 모든 접속 주소 확인"
+    
+    Service와 연결된 Ingress 도메인을 포함하여 모든 접속 주소를 제공합니다.
+    """
+    namespace = args.get("namespace", "default")
+    
+    try:
+        core_v1 = get_core_v1_api()
+        networking_v1 = get_networking_v1_api()
+        
+        # 1. 네임스페이스의 모든 Service 조회
+        services = core_v1.list_namespaced_service(namespace=namespace)
+        
+        # 2. 네임스페이스의 모든 Ingress 조회
+        ingresses = networking_v1.list_namespaced_ingress(namespace=namespace)
+        
+        # 3. Service별 Ingress 매핑 생성
+        service_to_ingress = {}
+        for ingress in ingresses.items:
+            if ingress.spec.rules:
+                for rule in ingress.spec.rules:
+                    if rule.http and rule.http.paths:
+                        for path in rule.http.paths:
+                            if hasattr(path.backend.service, 'name'):
+                                service_name = path.backend.service.name
+                                if service_name not in service_to_ingress:
+                                    service_to_ingress[service_name] = []
+                                
+                                domain = f"https://{rule.host}" if rule.host else None
+                                if domain:
+                                    service_to_ingress[service_name].append({
+                                        "domain": domain,
+                                        "path": path.path,
+                                        "ingress_name": ingress.metadata.name
+                                    })
+        
+        # 4. Endpoint 정보 구성
+        endpoint_list = []
+        for service in services.items:
+            service_name = service.metadata.name
+            
+            # 기본 Service 정보
+            endpoint_info = {
+                "service_name": service_name,
+                "service_type": service.spec.type,
+                "cluster_ip": service.spec.cluster_ip,
+                "ports": [],
+                "ingress_domains": [],
+                "external_access": None,
+                "service_endpoint": None
+            }
+            
+            # Service 포트 정보
+            if service.spec.ports:
+                for port in service.spec.ports:
+                    port_info = {
+                        "port": port.port,
+                        "target_port": port.target_port,
+                        "protocol": port.protocol or "TCP"
+                    }
+                    if service.spec.type == "NodePort" and port.node_port:
+                        port_info["node_port"] = port.node_port
+                    endpoint_info["ports"].append(port_info)
+                
+                # 서비스 엔드포인트 생성 (첫 번째 포트 사용)
+                endpoint_info["service_endpoint"] = f"http://{service_name}:{service.spec.ports[0].port}"
+            
+            # Ingress 도메인 정보
+            if service_name in service_to_ingress:
+                endpoint_info["ingress_domains"] = service_to_ingress[service_name]
+            
+            # LoadBalancer 외부 IP 정보
+            if service.spec.type == "LoadBalancer" and service.status.load_balancer.ingress:
+                for lb_ingress in service.status.load_balancer.ingress:
+                    external_ip = lb_ingress.ip or lb_ingress.hostname
+                    if external_ip:
+                        endpoint_info["external_access"] = {
+                            "type": "LoadBalancer",
+                            "address": external_ip,
+                            "ports": [{"port": p.port, "protocol": p.protocol or "TCP"} 
+                                     for p in service.spec.ports] if service.spec.ports else []
+                        }
+            
+            endpoint_list.append(endpoint_info)
+        
+        # 요약 통계
+        summary = {
+            "total_services": len(endpoint_list),
+            "services_with_ingress": len([e for e in endpoint_list if e["ingress_domains"]]),
+            "services_with_external": len([e for e in endpoint_list if e["external_access"]])
+        }
+        
+        return {
+            "status": "success",
+            "message": f"'{namespace}' 네임스페이스 엔드포인트 목록 조회 완료",
+            "namespace": namespace,
+            "summary": summary,
+            "endpoints": endpoint_list
+        }
+        
+    except ApiException as e:
+        if e.status == 404:
+            return {
+                "status": "error",
+                "namespace": namespace,
+                "message": f"네임스페이스 '{namespace}'가 존재하지 않습니다. 네임스페이스 이름을 확인해주세요."
+            }
+        return {
+            "status": "error",
+            "namespace": namespace,
+            "message": f"Kubernetes API 오류: {e.reason}"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "namespace": namespace,
+            "message": f"엔드포인트 목록 조회 실패: {str(e)}"
+        }
 
 
 async def _execute_get_rollback_list(args: Dict[str, Any]) -> Dict[str, Any]:

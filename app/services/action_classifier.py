@@ -33,6 +33,7 @@ class ActionClassifier:
         "list_services": ActionRiskLevel.LOW,
         "list_ingresses": ActionRiskLevel.LOW,
         "list_namespaces": ActionRiskLevel.LOW,
+        "list_endpoints": ActionRiskLevel.LOW,
         "list_rollback": ActionRiskLevel.LOW,
         "get_service": ActionRiskLevel.LOW,
         "get_deployment": ActionRiskLevel.LOW,
