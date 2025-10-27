@@ -476,10 +476,17 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 - "test01 배포" → { "command": "deploy", "parameters": { "owner": "", "repo": "test01", "branch": "main" } }
 - "myorg/backend-hybrid 최신 코드로 배포" → { "command": "deploy", "parameters": { "owner": "myorg", "repo": "backend-hybrid", "branch": "main" } }
 
-8. 통합 대시보드 조회 (command: "overview")
-설명: 특정 네임스페이스의 모든 리소스를 한번에 조회하는 명령입니다 (Deployment, Pod, Service, Ingress).
-사용자 입력 예시: "전체 상황 보여줘", "대시보드 확인", "모든 리소스 상태", "네임스페이스 전체 현황", "클러스터 상태 확인"
-필수 JSON 형식: { "command": "overview", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
+8. 클러스터 전체 현황 보고서 (command: "overview")
+설명: 클러스터 전체의 리소스 상태를 보고서 형식으로 조회하는 명령입니다.
+조회 범위: 모든 네임스페이스, 노드, Deployment, Pod, Service
+기능: 긴급 이슈(Deployment 경고, Pending/Failed Pod), 경고(높은 재시작 횟수), 네임스페이스별 워크로드, 외부 서비스 목록을 포함한 종합 보고서 제공
+사용자 입력 예시:
+- "클러스터 전체 현황 보여줘"
+- "클러스터 상태 보고서"
+- "전체 리소스 상태 확인"
+- "시스템 현황 보고"
+- "클러스터 상태 확인"
+필수 JSON 형식: { "command": "overview", "parameters": {} }
 
 9. 파드 목록 조회 (command: "list_pods")
 설명: 현재 실행 중인 모든 파드의 목록을 조회하는 명령입니다.
