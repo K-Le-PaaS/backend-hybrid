@@ -45,7 +45,7 @@ class GeminiClient(LLMClient):
                     entities["service_name"] = parameters.get("serviceName")
 
             # namespace 기본값 포함이 필요한 명령어들
-            if command in ("status", "endpoint", "restart", "overview", "list_pods", "list_apps", "logs", "get_service", "get_deployment", "cost_analysis"):
+            if command in ("status", "endpoint", "restart", "overview", "list_pods", "list_apps", "logs", "get_service", "get_deployment", "cost_analysis", "list_endpoints"):
                 entities["namespace"] = parameters.get("namespace", "default")
 
             # 비용 분석 파라미터
@@ -184,6 +184,7 @@ class GeminiClient(LLMClient):
                 "list_services": "전체 Service 조회 명령을 해석했습니다.",
                 "list_ingresses": "전체 Ingress/도메인 조회 명령을 해석했습니다.",
                 "list_namespaces": "네임스페이스 목록 조회 명령을 해석했습니다.",
+                "list_endpoints": "네임스페이스 엔드포인트 목록 조회 명령을 해석했습니다.",
                 "overview": "통합 대시보드 조회 명령을 해석했습니다.",
                 "get_service": "Service 상세 정보 조회 명령을 해석했습니다.",
                 "get_deployment": "Deployment 상세 정보 조회 명령을 해석했습니다.",
@@ -261,13 +262,20 @@ class GeminiClient(LLMClient):
 필수 JSON 형식: { "command": "logs", "parameters": { "podName": "<추출된_파드이름_없으면_null>", "lines": <추출된_줄_수_없으면_30_최대_100>, "previous": <이전_파드_로그_요청시_true>, "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
 3. 엔드포인트/URL 확인 (command: "endpoint")
-설명: 배포된 서비스의 접속 주소를 확인하는 명령입니다.
-기능: Service 확인 → LoadBalancer/NodePort/ClusterIP 엔드포인트 제공
+설명: 배포된 서비스의 전체 접속 정보를 확인하는 명령입니다.
+기능: 
+  - 서비스 정보: 서비스 이름, 타입(ClusterIP/LoadBalancer/NodePort), 클러스터 IP, 포트 정보
+  - 인그리스 정보: 도메인(Host), 상태(HTTPS/HTTP), 대상 서비스, 포트, 경로(Path), 보안 리디렉션 여부
+  - 서비스 엔드포인트: 쿠버네티스 내부에서 서비스 간 통신 가능한 주소 (http://서비스이름:포트)
+  - 접속 가능 URL: 외부에서 접속 가능한 실제 URL (Ingress 도메인 또는 LoadBalancer IP)
+중요: 이 명령어는 반드시 서비스 이름이 필요합니다. 서비스 이름이 추출되지 않으면 null을 반환하세요.
 사용자 입력 예시:
-- 기본 표현: "내 앱 접속 주소 알려줘", "서비스 URL 뭐야?", "내 앱 주소 알려줘", "앱 URL 확인"
-- 자연스러운 표현: "접속 주소 보여줘", "서비스 주소 알려줘", "엔드포인트 확인", "외부 접속 주소", "로드밸런서 주소"
-- 다양한 뉘앙스: "앱 주소가 뭐야?", "어떻게 접속해?", "URL 좀 알려줘", "도메인 주소 확인", "외부에서 접근할 수 있는 주소", "웹사이트 주소", "앱에 어떻게 들어가?", "접속 방법 알려줘", "서비스 주소 체크", "외부 IP 확인"
-필수 JSON 형식: { "command": "endpoint", "parameters": { "serviceName": "<추출된_서비스이름_없으면_null>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
+- 기본 표현: "nginx-service 접속 주소 알려줘", "frontend-service URL 뭐야?", "api-service 주소 알려줘", "web-service URL 확인"
+- 자연스러운 표현: "접속 주소 보여줘", "서비스 주소 알려줘", "엔드포인트 확인", "외부 접속 주소", "로드밸런서 주소", "내 앱 접속 주소 보여줘"
+- 다양한 뉘앙스: "앱 주소가 뭐야?", "어떻게 접속해?", "URL 좀 알려줘", "도메인 주소 확인", "외부에서 접근할 수 있는 주소", "웹사이트 주소", "앱에 어떻게 들어가?", "접속 방법 알려줘", "서비스 주소 체크", "외부 IP 확인", "내 앱 URL", "접속 주소 확인", "접속할 수 있는 주소"
+핵심 키워드: "접속 주소", "접속 방법", "URL", "도메인 주소", "외부 주소" 등의 표현이 있으면 반드시 endpoint 명령어로 해석하세요.
+참고: "앱 주소"만 있고 "접속"이라는 키워드가 없으면 status로 해석할 수 있지만, "접속 주소", "접속 방법" 등 "접속" 관련 표현이 있으면 무조건 endpoint로 해석하세요.
+필수 JSON 형식: { "command": "endpoint", "parameters": { "serviceName": "<추출된_서비스이름_필수_없으면_null>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
 4. 재시작 (command: "restart")
 설명: 애플리케이션을 재시작하는 명령입니다.
@@ -456,12 +464,20 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 사용자 입력 예시: "모든 네임스페이스 조회해줘", "네임스페이스 목록 보여줘", "전체 네임스페이스 확인"
 필수 JSON 형식: { "command": "list_namespaces", "parameters": {} }
 
-14. 네임스페이스 앱 목록 조회 (command: "list_apps")
+14. 네임스페이스 엔드포인트 목록 조회 (command: "list_endpoints")
+설명: 특정 네임스페이스의 모든 서비스 엔드포인트를 조회하는 명령입니다. Service와 연결된 Ingress 도메인을 포함하여 모든 접속 주소를 제공합니다.
+사용자 입력 예시:
+- 기본 표현: "엔드포인트 목록 보여줘", "모든 접속 주소 확인", "서비스 주소 목록"
+- 자연스러운 표현: "default 네임스페이스 엔드포인트 보여줘", "test 네임스페이스 모든 서비스 URL"
+- 다양한 뉘앙스: "접속 가능한 주소들", "서비스 연결 주소 확인", "모든 앱 URL 조회", "외부 접속 주소 목록", "도메인 주소 확인"
+필수 JSON 형식: { "command": "list_endpoints", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
+
+15. 네임스페이스 앱 목록 조회 (command: "list_apps")
 설명: 특정 네임스페이스의 모든 애플리케이션(Deployment) 목록을 조회하는 명령입니다.
 사용자 입력 예시: "test 네임스페이스 앱 목록 보여줘", "default 네임스페이스 모든 앱 확인", "특정 네임스페이스 앱 목록 조회"
 필수 JSON 형식: { "command": "list_apps", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-15. Service 상세 정보 조회 (command: "get_service")
+16. Service 상세 정보 조회 (command: "get_service")
 설명: 특정 Service의 상세 정보를 조회하는 명령입니다.
 사용자 입력 예시:
 - 기본 표현: "nginx-service 정보 보여줘", "frontend 서비스 상세 확인", "my-app 서비스 자세히 보여줘"
@@ -469,7 +485,7 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 - 다양한 뉘앙스: "서비스 어떻게 설정되어 있어?", "서비스 설정 확인해줘", "서비스 정보 자세히", "서비스 구성 체크", "서비스 상세 분석", "서비스 설정 파악", "서비스 정보 분석"
 필수 JSON 형식: { "command": "get_service", "parameters": { "serviceName": "<추출된_서비스_이름>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-16. Deployment 상세 정보 조회 (command: "get_deployment")
+17. Deployment 상세 정보 조회 (command: "get_deployment")
 설명: 특정 Deployment의 상세 정보를 조회하는 명령입니다.
 중요: "app", "앱"이라는 호칭은 Pod를 의미하므로, Deployment 조회는 "deployment", "배포" 등의 명시적 표현을 사용합니다.
 사용자 입력 예시:
@@ -478,7 +494,7 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 - 다양한 뉘앙스: "deployment 어떻게 설정되어 있어?", "배포 설정 확인해줘", "deployment 정보 자세히", "배포 구성 체크", "deployment 상세 분석", "배포 설정 파악", "deployment 정보 분석", "배포 상태 상세히"
 필수 JSON 형식: { "command": "get_deployment", "parameters": { "deploymentName": "<추출된_배포_이름>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-17. 비용 분석 및 최적화 (command: "cost_analysis")
+18. 비용 분석 및 최적화 (command: "cost_analysis")
 설명: 클러스터의 비용 현황을 분석하고 최적화 제안을 제공하는 명령입니다.
 사용자 입력 예시:
 - 기본 표현: "비용 분석해줘", "현재 클러스터 비용 확인", "비용 현황 보여줘", "얼마나 나와?"

@@ -47,6 +47,7 @@ class ResponseFormatter:
                 "k8s_list_all_deployments": self.format_list_deployments,  # 전체 deployment 목록
                 "k8s_list_all_services": self.format_list_services,  # 전체 service 목록
                 "k8s_list_all_ingresses": self.format_list_ingresses,  # 전체 ingress 목록
+                "k8s_list_namespaced_endpoints": self.format_list_namespaced_endpoints,  # 네임스페이스 엔드포인트 목록
                 "rollback_deployment": self.format_rollback_list,
                 "get_rollback_list": self.format_rollback_list,  # 롤백 목록 조회 명령어 추가
                 "scale": self.format_scale,
@@ -259,33 +260,75 @@ class ResponseFormatter:
     def format_endpoint(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """Service 엔드포인트 정보를 포맷"""
         try:
-            service_name = raw_data.get("name", "")
+            service_name = raw_data.get("service_name") or raw_data.get("name", "")
             namespace = raw_data.get("namespace", "default")
-            endpoints = raw_data.get("endpoints", [])
+            status = raw_data.get("status", "success")
             
-            formatted_endpoints = []
-            for endpoint in endpoints:
-                formatted_endpoints.append({
-                    "type": endpoint.get("type", ""),
-                    "address": endpoint.get("address", ""),
-                    "port": endpoint.get("port", ""),
-                    "protocol": endpoint.get("protocol", "TCP")
-                })
+            # 에러 상태인 경우
+            if status == "error":
+                return {
+                    "type": "endpoint",
+                    "summary": raw_data.get("message", "엔드포인트 조회 실패"),
+                    "data": {
+                        "formatted": {
+                            "service_name": service_name,
+                            "namespace": namespace,
+                            "status": "error",
+                            "message": raw_data.get("message", "")
+                        },
+                        "raw": raw_data
+                    },
+                    "metadata": {
+                        "namespace": namespace,
+                        "status": "error"
+                    }
+                }
+            
+            # 서비스 정보
+            service_type = raw_data.get("service_type", "ClusterIP")
+            cluster_ip = raw_data.get("cluster_ip", "None")
+            ports = raw_data.get("ports", [])
+            
+            # 포트 문자열로 변환
+            port_str = ", ".join([f"{p['port']}/{p['protocol']}" for p in ports]) if ports else "None"
+            
+            # 인그리스 정보
+            ingress_name = raw_data.get("ingress_name", "")
+            ingress_domain = raw_data.get("ingress_domain")
+            ingress_path = raw_data.get("ingress_path", "")
+            ingress_port = raw_data.get("ingress_port")
+            has_tls = raw_data.get("ingress_has_tls", False)
+            
+            # 서비스 엔드포인트
+            service_endpoint = raw_data.get("service_endpoint")
+            
+            # 접속 가능한 URL
+            accessible_url = raw_data.get("accessible_url")
             
             return {
                 "type": "endpoint",
-                "summary": f"{service_name} Service의 엔드포인트 {len(endpoints)}개를 찾았습니다.",
+                "summary": f"{service_name} 서비스의 엔드포인트 정보를 조회했습니다.",
                 "data": {
                     "formatted": {
                         "service_name": service_name,
+                        "service_type": service_type,
+                        "cluster_ip": cluster_ip,
+                        "ports": port_str,
                         "namespace": namespace,
-                        "endpoints": formatted_endpoints
+                        "ingress_name": ingress_name,
+                        "ingress_domain": ingress_domain,
+                        "ingress_path": ingress_path or "/",
+                        "ingress_port": ingress_port,
+                        "ingress_has_tls": has_tls,
+                        "service_endpoint": service_endpoint,
+                        "accessible_url": accessible_url,
+                        "message": raw_data.get("message", "")
                     },
                     "raw": raw_data
                 },
                 "metadata": {
                     "namespace": namespace,
-                    "total_endpoints": len(endpoints)
+                    "status": "success"
                 }
             }
         except Exception as e:
@@ -357,6 +400,78 @@ class ResponseFormatter:
             self.logger.error(f"Error formatting list_services: {str(e)}")
             return self.format_error("list_services", str(e))
     
+    def format_list_namespaced_endpoints(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """네임스페이스별 엔드포인트 목록을 포맷"""
+        try:
+            namespace = raw_data.get("namespace", "default")
+            endpoints = raw_data.get("endpoints", [])
+            summary_data = raw_data.get("summary", {})
+            
+            formatted_endpoints = []
+            for endpoint in endpoints:
+                # Ingress 도메인 정보 포맷팅
+                ingress_domains = []
+                for domain_info in endpoint.get("ingress_domains", []):
+                    ingress_domains.append({
+                        "domain": domain_info.get("domain", ""),
+                        "path": domain_info.get("path", "/"),
+                        "ingress_name": domain_info.get("ingress_name", "")
+                    })
+                
+                # Port 정보 포맷팅
+                ports = []
+                for port in endpoint.get("ports", []):
+                    port_info = {
+                        "port": port.get("port", ""),
+                        "target_port": port.get("target_port", ""),
+                        "protocol": port.get("protocol", "TCP")
+                    }
+                    if port.get("node_port"):
+                        port_info["node_port"] = port.get("node_port")
+                    ports.append(port_info)
+                
+                # External access 정보
+                external_access = None
+                if endpoint.get("external_access"):
+                    ext = endpoint.get("external_access")
+                    external_access = {
+                        "type": ext.get("type", "LoadBalancer"),
+                        "address": ext.get("address", ""),
+                        "ports": ext.get("ports", [])
+                    }
+                
+                formatted_endpoints.append({
+                    "service_name": endpoint.get("service_name", ""),
+                    "service_type": endpoint.get("service_type", ""),
+                    "cluster_ip": endpoint.get("cluster_ip", ""),
+                    "ports": ports,
+                    "service_endpoint": endpoint.get("service_endpoint", ""),
+                    "ingress_domains": ingress_domains,
+                    "external_access": external_access
+                })
+            
+            total_services = summary_data.get("total_services", len(formatted_endpoints))
+            services_with_ingress = summary_data.get("services_with_ingress", 0)
+            services_with_external = summary_data.get("services_with_external", 0)
+            
+            return {
+                "type": "list_endpoints",
+                "summary": f"'{namespace}' 네임스페이스에 {total_services}개의 Service가 있습니다. Ingress 설정: {services_with_ingress}개, 외부 접근: {services_with_external}개",
+                "data": {
+                    "formatted": formatted_endpoints,
+                    "raw": raw_data
+                },
+                "metadata": {
+                    "namespace": namespace,
+                    "total_services": total_services,
+                    "services_with_ingress": services_with_ingress,
+                    "services_with_external": services_with_external
+                }
+            }
+        except Exception as e:
+            self.logger.error(f"Error formatting list_namespaced_endpoints: {str(e)}")
+            return self.format_error("list_endpoints", str(e))
+    
     def format_list_ingresses(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """Ingress 목록을 포맷"""
         try:
@@ -365,13 +480,34 @@ class ResponseFormatter:
             
             formatted_ingresses = []
             for ingress in ingresses:
+                # TLS 여부 확인 (urls가 https로 시작하는지)
+                has_tls = False
+                urls = ingress.get("urls", [])
+                if urls and any(url.startswith("https://") for url in urls):
+                    has_tls = True
+                
+                # 첫 번째 path 정보 가져오기
+                paths = ingress.get("paths", [])
+                first_path = paths[0] if paths else {}
+                services = ingress.get("services", [])
+                
+                # addresses는 배열이므로 첫 번째 값 사용
+                addresses = ingress.get("addresses", [])
+                address = addresses[0] if addresses else ""
+                
                 formatted_ingresses.append({
                     "name": ingress.get("name", ""),
                     "namespace": ingress.get("namespace", ""),
                     "class": ingress.get("class", ""),
                     "hosts": ingress.get("hosts", []),
-                    "address": ingress.get("address", ""),
-                    "age": self._format_age(ingress.get("age", ""))
+                    "urls": urls,
+                    "has_tls": has_tls,
+                    "service_name": first_path.get("service_name") or (services[0] if services else ""),
+                    "port": first_path.get("port"),
+                    "path": first_path.get("path", "/"),
+                    "address": address,
+                    "ports": ingress.get("ports", ""),
+                    "age": ingress.get("age", "알 수 없음")
                 })
             
             return {
