@@ -930,7 +930,10 @@ async def confirm_action(
             f"session_id={request.session_id}"
         )
 
-        if not github_owner or not github_repo:
+        # 저장소 정보가 필요한 명령어만 체크 (deploy, scale, rollback 등)
+        requires_github = command in ("deploy", "scale", "rollback")
+        
+        if requires_github and (not github_owner or not github_repo):
             error_msg = (
                 f"저장소 정보가 없습니다. 먼저 '저장소이름 롤백 목록' 명령으로 "
                 f"롤백할 저장소를 지정해주세요. (owner={github_owner}, repo={github_repo})"
@@ -938,21 +941,39 @@ async def confirm_action(
             logger.error(error_msg)
             raise HTTPException(400, error_msg)
 
-        req = CommandRequest(
-            command=pending_action["type"],
-            pod_name=params.get("pod_name") or "",
-            deployment_name=params.get("deployment_name") or "",
-            service_name=params.get("service_name") or "",
-            replicas=params.get("replicas", 1),
-            lines=params.get("lines", 30),
-            version=params.get("version") or "",
-            namespace=params.get("namespace") or "default",
-            previous=bool(params.get("previous", False)),
-            github_owner=github_owner,
-            github_repo=github_repo,
-            target_commit_sha=params.get("target_commit_sha") or "",
-            steps_back=params.get("steps_back") or 0
-        )
+        # 저장소 정보가 필요한 명령어일 때만 github_owner, github_repo 설정
+        if requires_github:
+            req = CommandRequest(
+                command=pending_action["type"],
+                pod_name=params.get("pod_name") or "",
+                deployment_name=params.get("deployment_name") or "",
+                service_name=params.get("service_name") or "",
+                replicas=params.get("replicas", 1),
+                lines=params.get("lines", 30),
+                version=params.get("version") or "",
+                namespace=params.get("namespace") or "default",
+                previous=bool(params.get("previous", False)),
+                github_owner=github_owner,
+                github_repo=github_repo,
+                target_commit_sha=params.get("target_commit_sha") or "",
+                steps_back=params.get("steps_back") or 0
+            )
+        else:
+            req = CommandRequest(
+                command=pending_action["type"],
+                pod_name=params.get("pod_name") or "",
+                deployment_name=params.get("deployment_name") or "",
+                service_name=params.get("service_name") or "",
+                replicas=params.get("replicas", 1),
+                lines=params.get("lines", 30),
+                version=params.get("version") or "",
+                namespace=params.get("namespace") or "default",
+                previous=bool(params.get("previous", False)),
+                github_owner="",
+                github_repo="",
+                target_commit_sha=params.get("target_commit_sha") or "",
+                steps_back=params.get("steps_back") or 0
+            )
 
         # 명령 실행
         plan = plan_command(req)
