@@ -576,30 +576,143 @@ class ResponseFormatter:
             return self.format_error("get_deployment", str(e))
     
     def format_overview(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """통합 대시보드 데이터를 포맷"""
+        """클러스터 전체 현황 보고서 데이터를 포맷"""
         try:
-            namespace = raw_data.get("namespace", "default")
-            deployments = raw_data.get("deployments", [])
-            pods = raw_data.get("pods", [])
-            services = raw_data.get("services", [])
+            cluster_info = raw_data.get("cluster_info", {})
+            critical_issues = raw_data.get("critical_issues", {})
+            warnings = raw_data.get("warnings", {})
+            workloads_by_namespace = raw_data.get("workloads_by_namespace", {})
+            external_services = raw_data.get("external_services", {})
+            summary = raw_data.get("summary", {})
+            
+            # 보고서 섹션 구성
+            report_sections = []
+            
+            # 1. 클러스터 정보
+            cluster_name = cluster_info.get("name", "Unknown Cluster")
+            total_nodes = cluster_info.get("total_nodes", 0)
+            nodes = cluster_info.get("nodes", [])
+            
+            report_sections.append({
+                "title": "클러스터 정보",
+                "type": "cluster_info",
+                "data": {
+                    "cluster_name": cluster_name,
+                    "total_nodes": total_nodes,
+                    "nodes": nodes
+                }
+            })
+            
+            # 2. Critical Issues
+            deployment_warnings = critical_issues.get("deployment_warnings", [])
+            pending_pods = critical_issues.get("pending_pods", [])
+            failed_pods = critical_issues.get("failed_pods", [])
+            
+            critical_items = []
+            if deployment_warnings:
+                critical_items.extend([{
+                    "type": "deployment_warning",
+                    "namespace": item["namespace"],
+                    "name": item["name"],
+                    "ready": item["ready"]
+                } for item in deployment_warnings])
+            
+            if pending_pods:
+                critical_items.extend([{
+                    "type": "pending_pod",
+                    "namespace": item["namespace"],
+                    "name": item["name"]
+                } for item in pending_pods])
+            
+            if failed_pods:
+                critical_items.extend([{
+                    "type": "failed_pod",
+                    "namespace": item["namespace"],
+                    "name": item["name"],
+                    "status": item["status"]
+                } for item in failed_pods])
+            
+            if critical_items:
+                report_sections.append({
+                    "title": "긴급 조치 필요 (Critical Issues)",
+                    "type": "critical",
+                    "items": critical_items
+                })
+            
+            # 3. Warnings (높은 재시작 횟수)
+            high_restart_pods = warnings.get("high_restart_pods", [])
+            if high_restart_pods:
+                report_sections.append({
+                    "title": "모니터링 필요 (Warnings)",
+                    "type": "warning",
+                    "items": [{
+                        "namespace": item["namespace"],
+                        "name": item["name"],
+                        "restarts": item["restarts"]
+                    } for item in high_restart_pods]
+                })
+            
+            # 4. 네임스페이스별 워크로드
+            workloads_data = []
+            for ns, workload in workloads_by_namespace.items():
+                if workload.get("deployments", 0) > 0 or workload.get("pods", 0) > 0:
+                    workloads_data.append({
+                        "namespace": ns,
+                        "deployments": workload.get("deployments", 0),
+                        "pods": workload.get("pods", 0)
+                    })
+            
+            if workloads_data:
+                report_sections.append({
+                    "title": "네임스페이스별 워크로드 (Workloads by Namespace)",
+                    "type": "workloads",
+                    "data": workloads_data
+                })
+            
+            # 5. 외부 서비스
+            load_balancer_services = external_services.get("load_balancer", [])
+            node_port_services = external_services.get("node_port", [])
+            
+            if load_balancer_services or node_port_services:
+                external_data = {}
+                if load_balancer_services:
+                    external_data["load_balancer"] = load_balancer_services
+                if node_port_services:
+                    external_data["node_port"] = node_port_services
+                
+                report_sections.append({
+                    "title": "외부 서비스 (External Services)",
+                    "type": "external_services",
+                    "data": external_data
+                })
+            
+            # 요약 메시지
+            summary_message = f"클러스터 '{cluster_name}': 노드 {total_nodes}개, 네임스페이스 {summary.get('total_namespaces', 0)}개, Deployment {summary.get('total_deployments', 0)}개, Pod {summary.get('total_pods', 0)}개"
+            
+            if critical_items:
+                summary_message += f" | ⚠️ 긴급 이슈 {len(critical_items)}개"
+            if high_restart_pods:
+                summary_message += f" | 경고 {len(high_restart_pods)}개"
             
             return {
                 "type": "overview",
-                "summary": f"{namespace} 네임스페이스 현황: Deployment {len(deployments)}개, Pod {len(pods)}개, Service {len(services)}개",
+                "summary": summary_message,
                 "data": {
                     "formatted": {
-                        "namespace": namespace,
-                        "deployments": deployments,
-                        "pods": pods,
-                        "services": services
+                        "report_sections": report_sections,
+                        "summary": summary
                     },
                     "raw": raw_data
                 },
                 "metadata": {
-                    "namespace": namespace,
-                    "deployment_count": len(deployments),
-                    "pod_count": len(pods),
-                    "service_count": len(services)
+                    "cluster_name": cluster_name,
+                    "total_nodes": total_nodes,
+                    "total_namespaces": summary.get("total_namespaces", 0),
+                    "total_deployments": summary.get("total_deployments", 0),
+                    "total_pods": summary.get("total_pods", 0),
+                    "total_services": summary.get("total_services", 0),
+                    "critical_issues_count": len(critical_items),
+                    "warnings_count": len(high_restart_pods)
                 }
             }
         except Exception as e:
