@@ -131,24 +131,33 @@ async def process_command(
             logger.info(f"Gemini intent: {intent}")
             logger.info(f"Gemini entities: {entities}")
             
-            req = CommandRequest(
-                command=intent,
-                # 리소스 타입별 필드 설정
-                pod_name=entities.get("pod_name") or "",
-                deployment_name=entities.get("deployment_name") or "",
-                service_name=entities.get("service_name") or "",
-                # 기타 파라미터들
-                replicas=entities.get("replicas", 1),
-                lines=entities.get("lines", 30),
-                version=entities.get("version") or "",
-                namespace=entities.get("namespace") or "default",
-                previous=bool(entities.get("previous", False)),
-                # NCP 롤백 관련 필드
-                github_owner=entities.get("github_owner") or "",
-                github_repo=entities.get("github_repo") or "",
-                target_commit_sha=entities.get("target_commit_sha") or "",
-                steps_back=entities.get("steps_back", 0)
-            )
+            # restart 명령은 github_owner와 github_repo만 필요
+            if intent == "restart":
+                req = CommandRequest(
+                    command=intent,
+                    namespace=entities.get("namespace") or "default",
+                    github_owner=entities.get("github_owner") or "",
+                    github_repo=entities.get("github_repo") or ""
+                )
+            else:
+                req = CommandRequest(
+                    command=intent,
+                    # 리소스 타입별 필드 설정
+                    pod_name=entities.get("pod_name") or "",
+                    deployment_name=entities.get("deployment_name") or "",
+                    service_name=entities.get("service_name") or "",
+                    # 기타 파라미터들
+                    replicas=entities.get("replicas", 1),
+                    lines=entities.get("lines", 30),
+                    version=entities.get("version") or "",
+                    namespace=entities.get("namespace") or "default",
+                    previous=bool(entities.get("previous", False)),
+                    # NCP 롤백 관련 필드
+                    github_owner=entities.get("github_owner") or "",
+                    github_repo=entities.get("github_repo") or "",
+                    target_commit_sha=entities.get("target_commit_sha") or "",
+                    steps_back=entities.get("steps_back", 0)
+                )
             
             logger.info(f"CommandRequest 생성: {req}")
             
@@ -984,8 +993,8 @@ async def confirm_action(
             f"session_id={request.session_id}"
         )
 
-        # 저장소 정보가 필요한 명령어만 체크 (deploy, scale, rollback 등)
-        requires_github = command in ("deploy", "scale", "rollback")
+        # 저장소 정보가 필요한 명령어만 체크 (deploy, scale, rollback, restart 등)
+        requires_github = command in ("deploy", "scale", "rollback", "restart")
         
         if requires_github and (not github_owner or not github_repo):
             error_msg = (
@@ -1069,6 +1078,17 @@ async def confirm_action(
             })
             logger.info(f"포맷된 결과: {formatted_result}")
             result_message = formatted_result.get("summary", "스케일링이 완료되었습니다.")
+        # 재시작 명령의 경우 특별 처리
+        elif pending_action["type"] == "restart":
+            logger.info(f"재시작 결과 포맷팅 - result: {result}")
+            logger.info(f"재시작 결과 포맷팅 - params: {params}")
+            
+            formatted_result = formatter.format_restart({
+                "k8s_result": result,
+                "entities": params
+            })
+            logger.info(f"포맷된 결과: {formatted_result}")
+            result_message = formatted_result.get("summary", "재시작이 완료되었습니다.")
         else:
             result_message = f"작업이 완료되었습니다: {result.get('message', '')}"
         
@@ -1076,18 +1096,18 @@ async def confirm_action(
             user_id, request.session_id,
             "assistant", result_message,
             action="execution_completed",
-            metadata={"result": formatted_result if pending_action["type"] == "scale" else result}
+            metadata={"result": formatted_result if pending_action["type"] in ("scale", "restart") else result}
         )
 
         # 어시스턴트 응답을 command_history에 저장 (DB)
-        # 스케일링의 경우 formatted_result를 저장, 그렇지 않으면 result 저장
+        # 스케일링/재시작의 경우 formatted_result를 저장, 그렇지 않으면 result 저장
         from ...services.command_history import save_command_history
         await save_command_history(
             db=db,
             command_text=result_message,
             tool="assistant_response",
             args={"session_id": request.session_id, "action": "execution_completed", "type": pending_action["type"], "parameters": params},
-            result=formatted_result if pending_action["type"] == "scale" else result,
+            result=formatted_result if pending_action["type"] in ("scale", "restart") else result,
             status="completed",
             user_id=user_id
         )
@@ -1095,7 +1115,7 @@ async def confirm_action(
         return {
             "status": "completed",
             "message": result_message,
-            "result": formatted_result if pending_action["type"] == "scale" else result,
+            "result": formatted_result if pending_action["type"] in ("scale", "restart") else result,
             "session_id": request.session_id
         }
 

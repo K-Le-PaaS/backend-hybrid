@@ -790,19 +790,64 @@ class ResponseFormatter:
     def format_restart(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """재시작 결과를 포맷"""
         try:
-            name = raw_data.get("name", "")
-            namespace = raw_data.get("namespace", "default")
+            # k8s_result에서 재시작 결과 추출
+            k8s_result = raw_data.get("k8s_result", raw_data)
+            
+            owner = k8s_result.get("owner", "")
+            repo = k8s_result.get("repo", "")
+            deployment = k8s_result.get("deployment", "")
+            namespace = k8s_result.get("namespace", "default")
+            message = k8s_result.get("message", "")
+            status = k8s_result.get("status", "unknown")
+            
+            # owner/repo가 있으면 그 형식 사용, 없으면 deployment 이름 사용
+            if owner and repo:
+                display_name = f"{owner}/{repo}"
+                summary = f"{display_name}을(를) 재시작했습니다."
+                action_icon = "🔄"
+                if status == "success":
+                    summary = f"✅ {summary}"
+                elif status == "error":
+                    summary = f"❌ 재시작 실패: {message}"
+            elif deployment:
+                display_name = deployment
+                summary = f"{display_name}을(를) 재시작했습니다."
+                action_icon = "🔄"
+                if status == "success":
+                    summary = f"✅ {summary}"
+                elif status == "error":
+                    summary = f"❌ 재시작 실패: {message}"
+            else:
+                display_name = "앱"
+                summary = "재시작했습니다." if status == "success" else f"재시작 실패: {message}"
+                action_icon = "🔄"
+            
+            # 상세 정보 구성
+            formatted_data = {
+                "repository": display_name,
+                "deployment": deployment,
+                "owner": owner,
+                "repo": repo,
+                "namespace": namespace,
+                "status": status,
+                "message": message,
+                "action": action_icon,
+                "timestamp": k8s_result.get("timestamp", "")
+            }
             
             return {
                 "type": "restart",
-                "summary": f"{name}을(를) 재시작했습니다.",
+                "summary": summary,
                 "data": {
-                    "formatted": raw_data,
+                    "formatted": formatted_data,
                     "raw": raw_data
                 },
                 "metadata": {
-                    "name": name,
-                    "namespace": namespace
+                    "owner": owner,
+                    "repo": repo,
+                    "deployment": deployment,
+                    "namespace": namespace,
+                    "status": status
                 }
             }
         except Exception as e:

@@ -178,12 +178,16 @@ def plan_command(req: CommandRequest) -> CommandPlan:
         )
     
     elif command == "restart":
-        # 리소스 이름이 명시되지 않았을 때 유효성 검사
-        if not req.pod_name or req.pod_name.strip() == "":
-            raise ValueError("재시작 명령어에는 리소스 이름을 명시해야 합니다. 예: 'chat-app 재시작해줘'")
+        # GitHub 저장소 정보 기반 재시작
+        if not req.github_owner or not req.github_repo:
+            raise ValueError("재시작 명령어에는 GitHub 저장소 정보가 필요합니다. 예: 'K-Le-PaaS/test01 재시작해줘'")
         return CommandPlan(
             tool="k8s_restart_deployment",
-            args={"name": resource_name, "namespace": req.namespace or ns},
+            args={
+                "github_owner": req.github_owner,
+                "github_repo": req.github_repo,
+                "namespace": req.namespace or ns
+            },
         )
     
     elif command == "rollback":
@@ -492,8 +496,8 @@ async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
     # 원본 실행 결과를 가져옵니다
     raw_result = await _execute_raw_command(plan)
     
-    # 스케일링 명령의 경우 포맷팅하지 않고 원시 결과 반환
-    if plan.tool == "scale":
+    # 스케일링/재시작 명령의 경우 포맷팅하지 않고 원시 결과 반환 (nlp.py에서 별도 처리)
+    if plan.tool in ("scale", "k8s_restart_deployment"):
         return raw_result
     
     # 다른 명령어들은 ResponseFormatter를 사용하여 포맷팅
@@ -908,56 +912,42 @@ async def _execute_get_endpoints(args: Dict[str, Any]) -> Dict[str, Any]:
 async def _execute_restart(args: Dict[str, Any]) -> Dict[str, Any]:
     """
     Deployment 재시작 (restart 명령어)
-    예: "앱 재시작해줘", "chat-app 껐다 켜줘"
-    
-    "app" 호칭이 들어오면 라벨 셀렉터로 Pod를 찾아 해당 Deployment 재시작
+    예: "K-Le-PaaS/test01 재시작해줘"
+
+    owner/repo를 받아서 deployment 이름으로 변환
+    실제 deployment 이름: {owner}-{repo}-deploy (소문자)
     구현 방법: kubectl rollout restart deployment 방식으로 Pod 재시작
     """
-    name = args["name"]
-    namespace = args["namespace"]
-    
+    owner = args.get("github_owner", "")
+    repo = args.get("github_repo", "")
+    namespace = args.get("namespace", "default")
+
+    # owner/repo → deployment 이름 변환
+    # K-Le-PaaS/test01 → k-le-paas-test01-deploy
+    if not owner or not repo:
+        return {
+            "status": "error",
+            "message": "GitHub 저장소 정보(owner/repo)가 필요합니다. 예: 'K-Le-PaaS/test01 재시작해줘'"
+        }
+
+    deployment_name = f"{owner}-{repo}-deploy".lower()
+
     try:
         apps_v1 = get_apps_v1_api()
-        core_v1 = get_core_v1_api()
-        
-        # Deployment 존재 확인 - 먼저 직접 이름으로 시도
-        deployment_name = name
+
+        # Deployment 존재 확인
         try:
-            deployment = apps_v1.read_namespaced_deployment(name=name, namespace=namespace)
+            deployment = apps_v1.read_namespaced_deployment(name=deployment_name, namespace=namespace)
         except ApiException as e:
             if e.status == 404:
-                # "app" 호칭인 경우 라벨로 Pod를 찾아 Deployment 이름 추출
-                try:
-                    label_selector = f"app={name}"
-                    pods = core_v1.list_namespaced_pod(namespace=namespace, label_selector=label_selector)
-                    
-                    if not pods.items:
-                        return {
-                            "status": "error",
-                            "deployment": name,
-                            "namespace": namespace,
-                            "message": f"라벨 'app={name}'로 Pod를 찾을 수 없습니다. 앱 이름을 확인해주세요."
-                        }
-                    
-                    # Pod에서 Deployment 이름 추출 (일반적으로 app 라벨과 동일)
-                    pod = pods.items[0]
-                    if pod.metadata.labels and "app" in pod.metadata.labels:
-                        deployment_name = pod.metadata.labels["app"]
-                        deployment = apps_v1.read_namespaced_deployment(name=deployment_name, namespace=namespace)
-                    else:
-                        return {
-                            "status": "error",
-                            "deployment": name,
-                            "namespace": namespace,
-                            "message": f"Pod에서 Deployment 정보를 찾을 수 없습니다."
-                        }
-                except ApiException:
-                    return {
-                        "status": "error",
-                        "deployment": name,
-                        "namespace": namespace,
-                        "message": f"Deployment '{name}'을 찾을 수 없습니다. 앱 이름을 확인해주세요."
-                    }
+                return {
+                    "status": "error",
+                    "owner": owner,
+                    "repo": repo,
+                    "deployment": deployment_name,
+                    "namespace": namespace,
+                    "message": f"Deployment '{deployment_name}'을 찾을 수 없습니다. 저장소 정보를 확인해주세요."
+                }
             else:
                 raise
         
@@ -980,29 +970,36 @@ async def _execute_restart(args: Dict[str, Any]) -> Dict[str, Any]:
             "status": "success",
             "message": f"Deployment '{deployment_name}'이 재시작되었습니다. Pod들이 새로 생성됩니다.",
             "deployment": deployment_name,
+            "owner": owner,
+            "repo": repo,
             "namespace": namespace,
-            "restart_method": "kubectl rollout restart",
-            "label_selector": f"app={name}" if deployment_name != name else None
+            "restart_method": "kubectl rollout restart"
         }
-        
+
     except ApiException as e:
         if e.status == 404:
             return {
                 "status": "error",
-                "deployment": name,
+                "owner": owner,
+                "repo": repo,
+                "deployment": deployment_name,
                 "namespace": namespace,
-                "message": f"라벨 'app={name}'로 Pod 또는 Deployment를 찾을 수 없습니다. 앱 이름을 확인해주세요."
+                "message": f"Deployment '{deployment_name}'을 찾을 수 없습니다. 저장소 정보를 확인해주세요."
             }
         return {
             "status": "error",
-            "deployment": name,
+            "owner": owner,
+            "repo": repo,
+            "deployment": deployment_name,
             "namespace": namespace,
             "message": f"Kubernetes API 오류: {e.reason}"
         }
     except Exception as e:
         return {
             "status": "error",
-            "deployment": name,
+            "owner": owner,
+            "repo": repo,
+            "deployment": deployment_name,
             "namespace": namespace,
             "message": f"재시작 실패: {str(e)}"
         }
