@@ -31,7 +31,7 @@ class GeminiClient(LLMClient):
             entities: Dict[str, Any] = {}
 
             # 리소스 타입별 파라미터 처리
-            if command in ("status", "logs", "restart"):
+            if command in ("status", "logs"):
                 # Pod 관련 명령어
                 if parameters.get("podName") is not None:
                     entities["pod_name"] = parameters.get("podName")
@@ -43,6 +43,24 @@ class GeminiClient(LLMClient):
                 # Service 관련 명령어
                 if parameters.get("serviceName") is not None:
                     entities["service_name"] = parameters.get("serviceName")
+
+            # restart 명령어 처리
+            if command == "restart":
+                # GitHub 저장소 정보 (필수)
+                owner = parameters.get("owner", "")
+                repo = parameters.get("repo", "")
+
+                # owner/repo가 비어있는 경우 에러 처리
+                if not owner or not repo:
+                    entities["error"] = "GitHub 저장소 정보가 필요합니다. 'K-Le-PaaS/test01 재시작해줘' 형식으로 입력해주세요."
+                    return {
+                        "intent": "error",
+                        "entities": entities,
+                        "message": entities["error"]
+                    }
+
+                entities["github_owner"] = owner
+                entities["github_repo"] = repo
 
             # namespace 기본값 포함이 필요한 명령어들
             if command in ("status", "endpoint", "restart", "overview", "list_pods", "list_apps", "logs", "get_service", "get_deployment", "cost_analysis", "list_endpoints"):
@@ -280,13 +298,37 @@ class GeminiClient(LLMClient):
 4. 재시작 (command: "restart")
 설명: 애플리케이션을 재시작하는 명령입니다.
 기능: kubectl rollout restart deployment로 Pod 재시작
-중요: "app", "앱"이라는 호칭은 Pod를 의미합니다.
+중요: GitHub 저장소(owner/repo) 정보가 반드시 필요합니다.
+
 사용자 입력 예시:
-- 기본 표현: "앱 재시작해줘", "chat-app 껐다 켜줘", "nginx-test 재시작", "서비스 재시작해줘"
-- 자연스러운 표현: "앱 다시 켜줘", "서버 재부팅", "앱 껐다 켜줘"
-- 다양한 뉘앙스: "앱 다시 시작해줘", "서비스 재시작", "앱 리셋해줘", "서버 껐다 켜줘", "앱 새로고침", "서비스 재가동", "앱 재시작 필요", "서버 재시작해줘", "앱 다시 로드", "서비스 리부트"
-- App 호칭 예시: "k-le-paas-test01 app 재시작", "my-app 재시작해줘", "앱 재시작"
-필수 JSON 형식: { "command": "restart", "parameters": { "podName": "<추출된_파드이름_없으면_null>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
+- **저장소 지정 패턴** (권장):
+  * "K-Le-PaaS/test01 재시작해줘"
+  * "K-Le-PaaS/test01을 재시작"
+  * "owner/repo 재시작"
+  * "myorg/myapp 재부팅해줘"
+  * "저장소 K-Le-PaaS/backend-hybrid 재시작"
+  * "test01 저장소 재시작"
+
+- **간단한 패턴** (저장소 정보 필수):
+  * "test01 재시작해줘" → owner는 컨텍스트에서 추론
+  * "backend 재시작" → owner는 컨텍스트에서 추론
+
+- **자연스러운 표현**:
+  * "앱 다시 켜줘", "서버 재부팅", "앱 껐다 켜줘"
+  * "K-Le-PaaS/test01 다시 시작", "myorg/myapp 리셋"
+  * "저장소 재시작", "앱 새로고침", "서비스 재가동"
+
+추출 규칙:
+1. **owner/repo 패턴 추출**: "K-Le-PaaS/test01", "owner/repo", "저장소명" 등에서 GitHub 저장소 정보 추출
+2. **간단한 repo 이름**: "test01 재시작" → repo="test01", owner는 컨텍스트 또는 빈 문자열
+3. **재시작 키워드**: "재시작", "restart", "재부팅", "리셋", "껐다 켜줘", "다시 시작", "리부트" 등
+
+필수 JSON 형식: { "command": "restart", "parameters": { "owner": "<추출된_GitHub_owner_없으면_빈_문자열>", "repo": "<추출된_GitHub_repo_없으면_빈_문자열>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
+
+예시 변환:
+- "K-Le-PaaS/test01 재시작해줘" → { "command": "restart", "parameters": { "owner": "K-Le-PaaS", "repo": "test01", "namespace": "default" } }
+- "test01 재시작" → { "command": "restart", "parameters": { "owner": "", "repo": "test01", "namespace": "default" } }
+- "myorg/backend 재부팅" → { "command": "restart", "parameters": { "owner": "myorg", "repo": "backend", "namespace": "default" } }
 
 5. 스케일링 (command: "scale")
 설명: NCP SourceCommit 매니페스트 기반으로 배포의 replicas를 조절하는 명령입니다.
