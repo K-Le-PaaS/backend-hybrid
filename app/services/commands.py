@@ -171,7 +171,7 @@ def plan_command(req: CommandRequest) -> CommandPlan:
     elif command == "endpoint":
         # 리소스 이름이 명시되지 않았을 때 유효성 검사
         if not req.service_name or req.service_name.strip() == "":
-            raise ValueError("엔드포인트 조회 명령어에는 서비스 이름이 필요합니다. 'list_services' 명령어로 서비스 목록을 조회해주세요.")
+            raise ValueError("접속 주소를 확인하려면 서비스 이름이 필요합니다. 먼저 '서비스 목록' 명령어로 사용 가능한 서비스를 확인하시거나, 구체적인 서비스 이름을 명시해주세요. 예: 'nginx-service 접속 주소' 또는 'frontend-svc URL'")
         return CommandPlan(
             tool="k8s_get_endpoints",
             args={"name": resource_name, "namespace": req.namespace or ns},
