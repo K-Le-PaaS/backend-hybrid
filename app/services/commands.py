@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import os
+import subprocess
 import asyncio
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -1179,145 +1181,282 @@ async def _execute_list_pods(args: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _execute_get_overview(args: Dict[str, Any]) -> Dict[str, Any]:
     """
-    통합 대시보드 조회 (overview 명령어)
-    예: "전체 상황 보여줘", "대시보드 확인", "모든 리소스 상태"
+    클러스터 전체 현황 보고서 조회 (overview 명령어)
+    예: "클러스터 전체 현황 보여줘", "클러스터 상태 보고서", "전체 리소스 상태 확인"
     
-    Deployment, Pod, Service, Ingress 모든 리소스를 한번에 조회
+    모든 네임스페이스의 Deployment, Pod, Service를 조회하여 보고서 형식으로 제공
     """
-    namespace = args.get("namespace", "default")
-    
     try:
         apps_v1 = get_apps_v1_api()
         core_v1 = get_core_v1_api()
-        networking_v1 = get_networking_v1_api()
         
-        overview_data = {
-            "namespace": namespace,
-            "deployments": [],
-            "pods": [],
-            "services": [],
-            "ingresses": []
-        }
-        
-        # 1. Deployments 조회
+        # 클러스터 정보 (노드 조회)
         try:
-            deployments = apps_v1.list_namespaced_deployment(namespace=namespace)
-            for deployment in deployments.items:
-                deployment_info = {
-                    "name": deployment.metadata.name,
-                    "replicas": {
-                        "desired": deployment.spec.replicas,
-                        "current": deployment.status.replicas or 0,
-                        "ready": deployment.status.ready_replicas or 0,
-                        "available": deployment.status.available_replicas or 0,
-                    },
-                    "image": deployment.spec.template.spec.containers[0].image if deployment.spec.template.spec.containers else None,
-                    "status": "Running" if deployment.status.ready_replicas == deployment.spec.replicas else "Pending"
-                }
-                overview_data["deployments"].append(deployment_info)
-        except ApiException as e:
-            if e.status != 404:  # 404는 네임스페이스가 없는 경우
-                raise
+            nodes = core_v1.list_node()
+            cluster_nodes = []
+            for node in nodes.items:
+                # Node Ready 상태 확인
+                ready_status = "NotReady"
+                if node.status.conditions:
+                    for condition in node.status.conditions:
+                        if condition.type == "Ready" and condition.status == "True":
+                            ready_status = "Ready"
+                            break
+                
+                cluster_nodes.append({
+                    "name": node.metadata.name,
+                    "status": ready_status
+                })
+        except Exception as e:
+            logger.error(f"Failed to get nodes: {e}")
+            cluster_nodes = []
         
-        # 2. Pods 조회
+        # 클러스터 이름 추출 (kubectl config current-context)
+        cluster_name = "Unknown Cluster"
         try:
-            pods = core_v1.list_namespaced_pod(namespace=namespace)
-            # Pod 상태 정보 추출 (헬퍼 함수 사용)
-            overview_data["pods"] = _format_pod_statuses(pods.items, include_labels=False, include_creation_time=False, include_namespace=False, include_age=False)
-        except ApiException as e:
-            if e.status != 404:
-                raise
+            # kubeconfig 파일 경로 가져오기
+            kubeconfig_path = os.getenv('NKS')  # 환경 변수에서 kubeconfig 경로 가져오기
+            if kubeconfig_path:
+                # kubectl config current-context --kubeconfig $NKS 실행
+                result = subprocess.run(
+                    ['kubectl', 'config', 'current-context', '--kubeconfig', kubeconfig_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    context_name = result.stdout.strip()
+                    # UUID 형식 제거 (예: "nks_kr_contest-cluster-27_69b2edb8-2975-4cb4-9dcb-68e3902a68ec" -> "nks_kr_contest-cluster")
+                    
+                    # 1. 표준 UUID 패턴: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+                    # 2. 마지막 underscore 뒤의 UUID 부분 제거
+                    # 3. 하이픈과 숫자로 구성된 끝 부분 제거
+                    
+                    # 표준 UUID 형식 제거 (예: 69b2edb8-2975-4cb4-9dcb-68e3902a68ec)
+                    uuid_pattern = r'_[a-fA-F0-9]{8}(-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$'
+                    cluster_name = re.sub(uuid_pattern, '', context_name)
+                    
+                    # 혹시 남아있을 수 있는 숫자로 끝나는 패턴 제거 (예: -27)
+                    cluster_name = re.sub(r'-\d+$', '', cluster_name)
+                    
+                    # 하이픈으로 끝나면 제거
+                    cluster_name = cluster_name.rstrip('-')
+                    cluster_name = cluster_name.rstrip('_')
+            else:
+                # 환경 변수가 없으면 일반 kubectl 사용
+                result = subprocess.run(
+                    ['kubectl', 'config', 'current-context'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    context_name = result.stdout.strip()
+                    # UUID 형식 제거
+                    # 표준 UUID 형식 제거 (예: 69b2edb8-2975-4cb4-9dcb-68e3902a68ec)
+                    uuid_pattern = r'_[a-fA-F0-9]{8}(-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$'
+                    cluster_name = re.sub(uuid_pattern, '', context_name)
+                    
+                    # 혹시 남아있을 수 있는 숫자로 끝나는 패턴 제거 (예: -27)
+                    cluster_name = re.sub(r'-\d+$', '', cluster_name)
+                    
+                    # 하이픈 또는 underscore로 끝나면 제거
+                    cluster_name = cluster_name.rstrip('-')
+                    cluster_name = cluster_name.rstrip('_')
+        except Exception as e:
+            logger.warning(f"Failed to get cluster name: {e}")
+            cluster_name = "K-Le-PaaS Cluster"  # 기본값
         
-        # 3. Services 조회
-        try:
-            services = core_v1.list_namespaced_service(namespace=namespace)
-            for service in services.items:
-                service_info = {
-                    "name": service.metadata.name,
-                    "type": service.spec.type,
-                    "cluster_ip": service.spec.cluster_ip,
-                    "ports": []
-                }
-                
-                # Service 포트 정보
-                if service.spec.ports:
-                    for port in service.spec.ports:
-                        port_info = {
-                            "port": port.port,
-                            "target_port": port.target_port,
-                            "protocol": port.protocol or "TCP"
-                        }
-                        if service.spec.type == "NodePort" and port.node_port:
-                            port_info["node_port"] = port.node_port
-                        service_info["ports"].append(port_info)
-                
-                overview_data["services"].append(service_info)
-        except ApiException as e:
-            if e.status != 404:
-                raise
+        # 모든 네임스페이스 조회
+        namespaces = core_v1.list_namespace()
+        namespace_list = [ns.metadata.name for ns in namespaces.items]
         
-        # 4. Ingresses 조회
-        try:
-            ingresses = networking_v1.list_namespaced_ingress(namespace=namespace)
-            for ingress in ingresses.items:
-                ingress_info = {
-                    "name": ingress.metadata.name,
-                    "hosts": [],
-                    "addresses": []
-                }
-                
-                # Ingress 호스트 정보
-                if ingress.spec.rules:
-                    for rule in ingress.spec.rules:
-                        if rule.host:
-                            ingress_info["hosts"].append(rule.host)
-                
-                # Ingress 주소 정보
-                if ingress.status.load_balancer.ingress:
-                    for lb_ingress in ingress.status.load_balancer.ingress:
-                        address = lb_ingress.ip or lb_ingress.hostname
-                        if address:
-                            ingress_info["addresses"].append(address)
-                
-                overview_data["ingresses"].append(ingress_info)
-        except ApiException as e:
-            if e.status != 404:
-                raise
+        # 모든 네임스페이스의 리소스 수집
+        all_deployments = []
+        all_pods = []
+        all_services = []
+        
+        # Critical Issues 수집
+        deployment_warnings = []  # Ready 비율이 100% 미만
+        pending_pods = []  # Pending 상태
+        failed_pods = []  # Failed/CrashLoopBackOff 상태
+        high_restart_pods = []  # 재시작 10회 이상
+        
+        # 네임스페이스별 워크로드 집계
+        workloads_by_namespace = {}
+        
+        # 외부 서비스 목록
+        load_balancer_services = []
+        node_port_services = []
+        
+        for namespace_name in namespace_list:
+            workloads_by_namespace[namespace_name] = {
+                "deployments": 0,
+                "pods": 0
+            }
+            
+            # Deployments 조회
+            try:
+                deployments = apps_v1.list_namespaced_deployment(namespace=namespace_name)
+                for deployment in deployments.items:
+                    ready_count = deployment.status.ready_replicas or 0
+                    desired_count = deployment.spec.replicas
+                    
+                    deployment_data = {
+                        "name": deployment.metadata.name,
+                        "namespace": namespace_name,
+                        "ready": f"{ready_count}/{desired_count}",
+                        "status": "Running" if ready_count == desired_count else "Pending"
+                    }
+                    
+                    all_deployments.append(deployment_data)
+                    workloads_by_namespace[namespace_name]["deployments"] += 1
+                    
+                    # Critical: Ready 비율이 100% 미만
+                    if ready_count < desired_count:
+                        deployment_warnings.append({
+                            "namespace": namespace_name,
+                            "name": deployment.metadata.name,
+                            "ready": f"{ready_count}/{desired_count}"
+                        })
+            except ApiException:
+                pass  # 네임스페이스에 접근 권한이 없을 수 있음
+            
+            # Pods 조회
+            try:
+                pods = core_v1.list_namespaced_pod(namespace=namespace_name)
+                for pod in pods.items:
+                    # Pod 상태 정보 추출
+                    phase = pod.status.phase
+                    restart_count = 0
+                    if pod.status.container_statuses:
+                        for container_status in pod.status.container_statuses:
+                            restart_count += container_status.restart_count
+                    
+                    pod_data = {
+                        "name": pod.metadata.name,
+                        "namespace": namespace_name,
+                        "phase": phase,
+                        "restarts": restart_count,
+                        "ready": "0/1",
+                        "age": None
+                    }
+                    
+                    # Ready 상태 계산
+                    if pod.status.container_statuses:
+                        ready_count = sum(1 for cs in pod.status.container_statuses if cs.ready)
+                        total_count = len(pod.status.container_statuses)
+                        pod_data["ready"] = f"{ready_count}/{total_count}"
+                    
+                    # Age 계산
+                    if pod.metadata.creation_timestamp:
+                        now = datetime.now(timezone.utc)
+                        age = now - pod.metadata.creation_timestamp
+                        pod_data["age"] = str(age).split('.')[0]
+                    
+                    all_pods.append(pod_data)
+                    workloads_by_namespace[namespace_name]["pods"] += 1
+                    
+                    # Critical: Pending/Failed Pod
+                    if phase == "Pending":
+                        pending_pods.append({
+                            "namespace": namespace_name,
+                            "name": pod.metadata.name,
+                            "status": phase
+                        })
+                    elif phase in ["Failed", "CrashLoopBackOff"] or any(
+                        cs.state.waiting and cs.state.waiting.reason == "CrashLoopBackOff"
+                        for cs in (pod.status.container_statuses or [])
+                    ):
+                        failed_pods.append({
+                            "namespace": namespace_name,
+                            "name": pod.metadata.name,
+                            "status": phase
+                        })
+                    
+                    # Warning: 높은 재시작 횟수 (10회 이상)
+                    if restart_count >= 10:
+                        high_restart_pods.append({
+                            "namespace": namespace_name,
+                            "name": pod.metadata.name,
+                            "restarts": restart_count
+                        })
+            except ApiException:
+                pass  # 네임스페이스에 접근 권한이 없을 수 있음
+            
+            # Services 조회
+            try:
+                services = core_v1.list_namespaced_service(namespace=namespace_name)
+                for service in services.items:
+                    service_type = service.spec.type
+                    
+                    service_data = {
+                        "name": service.metadata.name,
+                        "namespace": namespace_name,
+                        "type": service_type,
+                        "cluster_ip": service.spec.cluster_ip
+                    }
+                    
+                    all_services.append(service_data)
+                    
+                    # 외부 서비스 분류
+                    if service_type == "LoadBalancer":
+                        load_balancer_services.append({
+                            "name": service.metadata.name,
+                            "namespace": namespace_name
+                        })
+                    elif service_type == "NodePort":
+                        node_port_services.append({
+                            "name": service.metadata.name,
+                            "namespace": namespace_name
+                        })
+            except ApiException:
+                pass  # 네임스페이스에 접근 권한이 없을 수 있음
         
         # 요약 통계
         summary = {
-            "total_deployments": len(overview_data["deployments"]),
-            "total_pods": len(overview_data["pods"]),
-            "total_services": len(overview_data["services"]),
-            "total_ingresses": len(overview_data["ingresses"]),
-            "running_pods": len([p for p in overview_data["pods"] if p["phase"] == "Running"]),
-            "ready_deployments": len([d for d in overview_data["deployments"] if d["status"] == "Running"])
+            "cluster_name": cluster_name,
+            "total_nodes": len(cluster_nodes),
+            "total_namespaces": len(namespace_list),
+            "total_deployments": len(all_deployments),
+            "total_pods": len(all_pods),
+            "total_services": len(all_services),
+            "running_pods": len([p for p in all_pods if p["phase"] == "Running"]),
+            "critical_deployment_issues": len(deployment_warnings),
+            "pending_pod_issues": len(pending_pods),
+            "failed_pod_issues": len(failed_pods),
+            "high_restart_issues": len(high_restart_pods)
         }
         
         return {
             "status": "success",
-            "message": f"'{namespace}' 네임스페이스 통합 대시보드 조회 완료",
-            "summary": summary,
-            "resources": overview_data
+            "cluster_info": {
+                "name": cluster_name,
+                "total_nodes": len(cluster_nodes),
+                "nodes": cluster_nodes
+            },
+            "namespaces": namespace_list,
+            "critical_issues": {
+                "deployment_warnings": deployment_warnings,
+                "pending_pods": pending_pods,
+                "failed_pods": failed_pods
+            },
+            "warnings": {
+                "high_restart_pods": high_restart_pods
+            },
+            "workloads_by_namespace": workloads_by_namespace,
+            "external_services": {
+                "load_balancer": load_balancer_services,
+                "node_port": node_port_services
+            },
+            "summary": summary
         }
         
-    except ApiException as e:
-        if e.status == 404:
-            return {
-                "status": "error",
-                "namespace": namespace,
-                "message": f"네임스페이스 '{namespace}'가 존재하지 않습니다. 네임스페이스 이름을 확인해주세요."
-            }
-        return {
-            "status": "error",
-            "namespace": namespace,
-            "message": f"통합 대시보드 조회 실패: {e.reason}"
-        }
     except Exception as e:
+        logger.error(f"Failed to get overview: {e}")
         return {
             "status": "error",
-            "namespace": namespace,
-            "message": f"통합 대시보드 조회 실패: {str(e)}"
+            "message": f"클러스터 현황 조회 실패: {str(e)}"
         }
 
 
