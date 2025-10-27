@@ -644,9 +644,35 @@ async def process_conversation(
                 steps_back=entities.get("steps_back", 0)
             )
 
-            plan = plan_command(req)
-            result = await execute_command(plan)
-
+            try:
+                plan = plan_command(req)
+                result = await execute_command(plan)
+            except ValueError as e:
+                # 사용자 친화적인 에러 메시지
+                error_message = str(e)
+                await conv_manager.update_state(
+                    user_id, session_id, ConversationState.COMPLETED
+                )
+                
+                # 에러 메시지 저장
+                await conv_manager.add_message(
+                    user_id, session_id,
+                    "assistant", error_message,
+                    action="execution_failed",
+                    metadata={"error": error_message}
+                )
+                
+                # ConversationResponse에 에러 포함하여 반환
+                return ConversationResponse(
+                    session_id=session_id,
+                    state=ConversationState.COMPLETED.value,
+                    message=error_message,
+                    requires_confirmation=False,
+                    cost_estimate=None,
+                    pending_action=None,
+                    result={"error": error_message, "type": "command_error"}
+                )
+            
             await conv_manager.update_state(
                 user_id, session_id, ConversationState.COMPLETED
             )
