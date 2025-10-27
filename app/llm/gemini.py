@@ -262,8 +262,12 @@ class GeminiClient(LLMClient):
 필수 JSON 형식: { "command": "logs", "parameters": { "podName": "<추출된_파드이름_없으면_null>", "lines": <추출된_줄_수_없으면_30_최대_100>, "previous": <이전_파드_로그_요청시_true>, "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
 3. 엔드포인트/URL 확인 (command: "endpoint")
-설명: 배포된 서비스의 접속 주소를 확인하는 명령입니다.
-기능: Service 확인 → LoadBalancer/NodePort/ClusterIP 엔드포인트 제공
+설명: 배포된 서비스의 전체 접속 정보를 확인하는 명령입니다.
+기능: 
+  - 서비스 정보: 서비스 이름, 타입(ClusterIP/LoadBalancer/NodePort), 클러스터 IP, 포트 정보
+  - 인그리스 정보: 도메인(Host), 상태(HTTPS/HTTP), 대상 서비스, 포트, 경로(Path), 보안 리디렉션 여부
+  - 서비스 엔드포인트: 쿠버네티스 내부에서 서비스 간 통신 가능한 주소 (http://서비스이름:포트)
+  - 접속 가능 URL: 외부에서 접속 가능한 실제 URL (Ingress 도메인 또는 LoadBalancer IP)
 중요: 이 명령어는 반드시 서비스 이름이 필요합니다. 서비스 이름이 추출되지 않으면 null을 반환하세요.
 사용자 입력 예시:
 - 기본 표현: "nginx-service 접속 주소 알려줘", "frontend-service URL 뭐야?", "api-service 주소 알려줘", "web-service URL 확인"
