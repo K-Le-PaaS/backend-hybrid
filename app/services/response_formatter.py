@@ -712,6 +712,38 @@ class ResponseFormatter:
             }
         }
     
+    def format_unknown_command(self, command: str, suggestions: List[str] = None) -> Dict[str, Any]:
+        """알 수 없는 명령어에 대한 사용자 친화적 응답 포맷"""
+        if suggestions is None:
+            suggestions = [
+                "Pod 상태 확인: 'nginx pod 상태 확인해줘'",
+                "배포 목록 조회: 'deployment 목록 보여줘'", 
+                "서비스 목록 조회: 'service 목록 보여줘'",
+                "로그 확인: 'frontend-app pod 로그 50줄 보여줘'",
+                "스케일링: 'nginx deployment 스케일 3개로 늘려줘'",
+                "롤백: 'frontend-app deployment 롤백해줘'"
+            ]
+        
+        return {
+            "type": "unknown",
+            "summary": f"죄송합니다. '{command}' 명령을 이해할 수 없습니다. 아래 예시를 참고해주세요.",
+            "data": {
+                "formatted": {
+                    "command": command,
+                    "suggestions": suggestions,
+                    "message": "사용 가능한 명령어 예시를 확인해보세요."
+                },
+                "raw": {
+                    "command": command,
+                    "error_type": "unknown_command"
+                }
+            },
+            "metadata": {
+                "command": command,
+                "suggestion_count": len(suggestions)
+            }
+        }
+    
     def format_error(self, command: str, error_message: str) -> Dict[str, Any]:
         """에러 응답 포맷"""
         return {

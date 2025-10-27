@@ -644,8 +644,63 @@ async def process_conversation(
                 steps_back=entities.get("steps_back", 0)
             )
 
-            plan = plan_command(req)
-            result = await execute_command(plan)
+            try:
+                plan = plan_command(req)
+                result = await execute_command(plan)
+            except ValueError as e:
+                if "해석할 수 없는 명령입니다" in str(e):
+                    # 알 수 없는 명령어에 대한 깔끔한 응답 반환
+                    await conv_manager.update_state(
+                        user_id, session_id, ConversationState.ERROR
+                    )
+                    
+                    # ResponseFormatter를 사용하여 unknown 응답 생성
+                    from ...services.response_formatter import ResponseFormatter
+                    formatter = ResponseFormatter()
+                    
+                    unknown_response = formatter.format_unknown_command(
+                        command=request.command,
+                        suggestions=[
+                            "Pod 상태 확인: 'nginx pod 상태 확인해줘'",
+                            "배포 목록 조회: 'deployment 목록 보여줘'", 
+                            "서비스 목록 조회: 'service 목록 보여줘'",
+                            "로그 확인: 'frontend-app pod 로그 50줄 보여줘'",
+                            "스케일링: 'nginx deployment 스케일 3개로 늘려줘'",
+                            "롤백: 'frontend-app deployment 롤백해줘'"
+                        ]
+                    )
+                    
+                    error_message = unknown_response.get("summary", "명령을 이해할 수 없습니다.")
+                    await conv_manager.add_message(
+                        user_id, session_id,
+                        "assistant", error_message,
+                        action="unknown_command",
+                        metadata={"response": unknown_response}
+                    )
+                    
+                    # 어시스턴트 응답을 command_history에 저장 (DB)
+                    await save_command_history(
+                        db=db,
+                        command_text=error_message,
+                        tool="assistant_response",
+                        args={"session_id": session_id, "action": "unknown_command", "intent": intent, "entities": entities},
+                        result=unknown_response,
+                        status="completed",
+                        user_id=user_id
+                    )
+                    
+                    return ConversationResponse(
+                        session_id=session_id,
+                        state=ConversationState.ERROR.value,
+                        message=error_message,
+                        requires_confirmation=False,
+                        cost_estimate=None,
+                        pending_action=None,
+                        result=unknown_response
+                    )
+                else:
+                    # 다른 ValueError는 그대로 재발생
+                    raise
 
             await conv_manager.update_state(
                 user_id, session_id, ConversationState.COMPLETED
