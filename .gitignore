@@ -105,3 +105,14 @@ serena_logs/
 fenki_logs/
 *.serena
 *.fenki
+
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+*.out
+```
