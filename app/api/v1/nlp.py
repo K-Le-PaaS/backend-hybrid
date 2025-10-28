@@ -111,7 +111,11 @@ async def process_command(
             )
             
             logger.info(f"Gemini 해석 결과: {gemini_result}")
-            
+
+            # Gemini 결과를 CommandRequest로 변환 (먼저 변수 정의)
+            entities = gemini_result.get("entities", {})
+            intent = gemini_result.get("intent", "status")
+
             # 데이터베이스에 명령 히스토리 저장
             from ...services.command_history import save_command_history
             command_history_response = await save_command_history(
@@ -123,10 +127,6 @@ async def process_command(
                 user_id=effective_user_id
             )
             command_id = str(command_history_response.id)
-            
-            # Gemini 결과를 CommandRequest로 변환
-            entities = gemini_result.get("entities", {})
-            intent = gemini_result.get("intent", "status")
             
             logger.info(f"Gemini intent: {intent}")
             logger.info(f"Gemini entities: {entities}")
