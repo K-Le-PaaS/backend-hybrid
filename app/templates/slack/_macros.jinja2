@@ -1,0 +1,37 @@
+{# Common macros for terminal-style Slack templates #}
+
+{%- macro pad(value, width) -%}
+{{ (value[:width] + ' ' * (width - (value[:width] | length)))[:width] }}
+{%- endmacro -%}
+
+{%- macro row_auto(label_with_spaces, value, inside_width=59) -%}
+{# Build a row with dynamic padding so the right border aligns exactly. #}
+{%- set content = ' ' ~ label_with_spaces ~ (value | string) -%}
+{%- set used = (content | display_width) -%}
+{%- set pad_len = inside_width - used -%}
+{%- if pad_len < 0 -%}{% set pad_len = 0 %}{%- endif -%}
+│ {{ label_with_spaces }}{{ value }}{{ ' ' * pad_len }}│
+{%- endmacro -%}
+
+
+{%- macro row_fixed(label_with_spaces, value, content_width) -%}
+{# Build a row with fixed content width to guarantee right-edge alignment. #}
+{%- set val = (value | string) -%}
+{%- set clipped = val[:content_width] -%}
+{%- set pad_len = content_width - (clipped | length) -%}
+║ {{ label_with_spaces }}{{ clipped }}{{ ' ' * pad_len }} ║
+{%- endmacro -%}
+
+{%- macro box_header(title, inside_width=59) -%}
+{# Build a header line whose interior width equals inside_width #}
+{%- set title_segment = ' ' ~ title ~ ' ' -%}
+{%- set fill_len = inside_width - (title_segment | length) -%}
+{%- if fill_len < 0 -%}{% set fill_len = 0 %}{%- endif -%}
+┌{{ title_segment }}{{ '─' * fill_len }}┐
+{%- endmacro -%}
+
+{%- macro box_footer(inside_width=59) -%}
+└{{ '─' * inside_width }}┘
+{%- endmacro -%}
+
+

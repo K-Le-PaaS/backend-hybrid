@@ -56,8 +56,16 @@ class SlackNotificationService:
     ) -> None:
         """배포 시작 알림 전송 (터미널 스타일)"""
         try:
-            payload = self._build_deployment_started(
-                repo, commit_sha, commit_message, author, deployment_id, branch
+            # Use Jinja template for consistent fixed-width rendering
+            payload = self.template_builder.build_deployment_notification(
+                notification_type="started",
+                repo=repo,
+                commit_sha=commit_sha,
+                commit_message=commit_message,
+                author=author,
+                deployment_id=deployment_id,
+                branch=branch,
+                timestamp=int(time.time())
             )
             self._send_to_slack(payload, channel)
             self.logger.info(
@@ -87,9 +95,19 @@ class SlackNotificationService:
     ) -> None:
         """배포 성공 알림 전송 (터미널 스타일)"""
         try:
-            payload = self._build_deployment_success(
-                repo, commit_sha, commit_message, author, deployment_id,
-                duration_seconds, branch, app_url, logs
+            # Prefer Jinja template for consistent alignment across fonts
+            payload = self.template_builder.build_deployment_notification(
+                notification_type="success",
+                repo=repo,
+                commit_sha=commit_sha,
+                commit_message=commit_message,
+                author=author,
+                deployment_id=deployment_id,
+                duration_seconds=duration_seconds,
+                branch=branch,
+                app_url=app_url,
+                logs=logs,
+                timestamp=int(time.time())
             )
             self._send_to_slack(payload, channel)
             self.logger.info(
@@ -120,9 +138,19 @@ class SlackNotificationService:
     ) -> None:
         """배포 실패 알림 전송 (터미널 스타일)"""
         try:
-            payload = self._build_deployment_failed(
-                repo, commit_sha, commit_message, author, deployment_id,
-                duration_seconds, error_message, branch, logs
+            # Use centralized template to avoid width drift
+            payload = self.template_builder.build_deployment_notification(
+                notification_type="failed",
+                repo=repo,
+                commit_sha=commit_sha,
+                commit_message=commit_message,
+                author=author,
+                deployment_id=deployment_id,
+                duration_seconds=duration_seconds,
+                error_message=error_message,
+                branch=branch,
+                logs=logs,
+                timestamp=int(time.time())
             )
             self._send_to_slack(payload, channel)
             self.logger.info(
@@ -393,6 +421,28 @@ class SlackNotificationService:
     # 터미널 스타일 페이로드 빌더
     # ============================================================
 
+    @staticmethod
+    def _display_width(text: str) -> int:
+        """Return display width using wcwidth if available, else fallback.
+        This handles emoji and East Asian widths more accurately.
+        """
+        try:
+            from wcwidth import wcwidth  # type: ignore
+        except Exception:
+            wcwidth = None
+        width = 0
+        for ch in text or "":
+            if ch in ('\u200d', '\ufe0f'):
+                continue
+            if wcwidth:
+                w = wcwidth(ch)
+                width += max(w, 0)
+            else:
+                import unicodedata
+                eaw = unicodedata.east_asian_width(ch)
+                width += 2 if eaw in ('W', 'F') else 1
+        return width
+
     def _build_deployment_started(
         self,
         repo: str,
@@ -417,17 +467,25 @@ class SlackNotificationService:
 
         # 각 줄의 내용 구성 (박스 내부 너비: 60자)
         box_width = 60
+        # 동적 헤더/푸터: 본문 폭과 정확히 일치하도록 생성
+        title = "DEPLOYMENT INITIATED"
+        title_segment = f" {title} "
+        left = "┌"  # 헤더 좌측 선은 추가 ─ 없이 시작
+        fill = "─" * (box_width - len(title_segment))
+        header_line = f"{left}{title_segment}{fill}┐"
+        # 헤더가 좌측 추가 ─ 없이 생성되므로, 푸터도 동일 길이가 되도록 box_width 만큼 + 오른쪽 경계만 추가
+        footer_line = "└" + ("─" * (box_width)) + "┘"
 
         # Repository 줄
         repo_label = "Repository:    "
         repo_content = repo
-        repo_padding = box_width - len(repo_label) - len(repo_content)
+        repo_padding = max(0, box_width - len(repo_label) - self._display_width(repo_content))
         repo_line = f"│ {repo_label}{repo_content}{' ' * repo_padding}│"
 
         # Branch 줄
         branch_label = "Branch:        "
         branch_content = branch
-        branch_padding = box_width - len(branch_label) - len(branch_content)
+        branch_padding = max(0, box_width - len(branch_label) - self._display_width(branch_content))
         branch_line = f"│ {branch_label}{branch_content}{' ' * branch_padding}│"
 
         # Commit 줄 (특수 처리 - 괄호 안 메시지)
@@ -435,25 +493,25 @@ class SlackNotificationService:
         commit_content = f"{commit_short} ({commit_first_line[:30]})"
         if len(commit_content) > 44:
             commit_content = commit_content[:41] + "..."
-        commit_padding = box_width - len(commit_label) - len(commit_content)
+        commit_padding = max(0, box_width - len(commit_label) - self._display_width(commit_content))
         commit_line = f"│ {commit_label}{commit_content}{' ' * commit_padding}│"
 
         # Author 줄
         author_label = "Author:        "
         author_content = author
-        author_padding = box_width - len(author_label) - len(author_content)
+        author_padding = max(0, box_width - len(author_label) - self._display_width(author_content))
         author_line = f"│ {author_label}{author_content}{' ' * author_padding}│"
 
         # Deploy ID 줄
         deploy_label = "Deploy ID:     "
         deploy_content = f"#{deployment_id}"
-        deploy_padding = box_width - len(deploy_label) - len(deploy_content)
+        deploy_padding = max(0, box_width - len(deploy_label) - self._display_width(deploy_content))
         deploy_line = f"│ {deploy_label}{deploy_content}{' ' * deploy_padding}│"
 
-        # Status 줄
+        # Status 줄 (emoji 포함 유지)
         status_label = "Status:        "
         status_content = "🔄 IN PROGRESS"
-        status_padding = box_width - len(status_label) - len(status_content)
+        status_padding = max(0, box_width - len(status_label) - self._display_width(status_content))
         status_line = f"│ {status_label}{status_content}{' ' * status_padding}│"
 
         return {
@@ -469,7 +527,7 @@ class SlackNotificationService:
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f"```\n$ k-le-paas deploy start --repo {repo} --branch {branch}\n\n┌─ DEPLOYMENT INITIATED ─────────────────────────────────────┐\n{repo_line}\n{branch_line}\n{commit_line}\n{author_line}\n{deploy_line}\n{status_line}\n└────────────────────────────────────────────────────────────┘\n\n[INFO] Initializing deployment pipeline...\n[INFO] ⠿ Validating configuration\n[INFO] ⠿ Building container image\n[INFO] ⠿ Running pre-deployment tests\n[INFO] ⠿ Preparing deployment manifest\n\n⏳ Deployment in progress... Please wait.\n```"
+                        "text": f"```\n$ k-le-paas deploy start --repo {repo} --branch {branch}\n\n{header_line}\n{repo_line}\n{branch_line}\n{commit_line}\n{author_line}\n{deploy_line}\n{status_line}\n{footer_line}\n\n[INFO] Initializing deployment pipeline...\n[INFO] ⠿ Validating configuration\n[INFO] ⠿ Building container image\n[INFO] ⠿ Running pre-deployment tests\n[INFO] ⠿ Preparing deployment manifest\n\n⏳ Deployment in progress... Please wait.\n```"
                     }
                 },
                 {
@@ -551,7 +609,7 @@ class SlackNotificationService:
         # Duration 줄
         duration_label = "Duration:      "
         duration_content = f"{duration_str} ({duration_seconds}s)"
-        duration_padding = box_width - len(duration_label) - len(duration_content)
+        duration_padding = box_width - len(duration_label) - self._display_width(duration_content)
         duration_line = f"│ {duration_label}{duration_content}{' ' * duration_padding}│"
 
         # 로그 포맷팅 (최근 10줄만)

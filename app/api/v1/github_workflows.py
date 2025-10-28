@@ -99,7 +99,7 @@ async def _send_user_slack_message(
                 # OAuth 사용자의 경우 blocks 생성하여 OAuth API로 전송
                 elif cfg.integration_type == "oauth" and cfg.access_token:
                     from ...services.notification import SlackNotificationService
-                    # 임시 notifier 생성하여 blocks만 가져오기
+                    # 임시 notifier 생성하여 blocks만 가져오기 (이전 동작으로 복귀)
                     temp_notifier = SlackNotificationService(webhook_url="https://hooks.slack.com/dummy")
 
                     if event_type == "started":
@@ -142,6 +142,7 @@ async def _send_user_slack_message(
                     # OAuth로 blocks 전송
                     if blocks:
                         svc = SlackOAuthService()
+                        # 이전 동작대로 텍스트와 블록을 함께 전송
                         if cfg.dm_enabled and cfg.dm_user_id:
                             result = await svc.send_notification(
                                 access_token=cfg.access_token,
