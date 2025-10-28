@@ -28,7 +28,6 @@ class ActionClassifier:
         "status": ActionRiskLevel.LOW,
         "logs": ActionRiskLevel.LOW,
         "list_pods": ActionRiskLevel.LOW,
-        "list_apps": ActionRiskLevel.LOW,
         "list_deployments": ActionRiskLevel.LOW,
         "list_services": ActionRiskLevel.LOW,
         "list_ingresses": ActionRiskLevel.LOW,
