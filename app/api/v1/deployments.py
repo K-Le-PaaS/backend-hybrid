@@ -1,6 +1,6 @@
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,8 @@ from ...services.deployment_history import get_deployment_history_service
 from ...services.rollback import get_rollback_list as get_rollback_list_service
 from ...services.deployment_config import DeploymentConfigService
 from ...database import get_db
+from ...services.k8s_client import get_core_v1_api
+from ...services.k8s_logs import list_pods_by_app, select_representative_pod, get_pod_logs
 
 
 router = APIRouter()
@@ -646,4 +648,50 @@ async def get_scaling_history(
             status_code=500,
             detail=f"Failed to fetch scaling history: {str(e)}"
         )
+# ----------------------
+# Deployment Logs APIs
+# ----------------------
+
+
+@router.get("/deployments/{namespace}/{app}/pods", response_model=dict)
+async def list_deployment_pods(namespace: str, app: str) -> Dict[str, Any]:
+    """배포(Deployment)와 연관된 Pod 목록을 반환합니다."""
+    try:
+        core = get_core_v1_api()
+        pods = list_pods_by_app(core, namespace, app)
+        return {"status": "success", "pods": pods, "count": len(pods)}
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Pod 목록 조회 실패: {str(e)}")
+
+
+@router.get("/deployments/{namespace}/{app}/logs", response_model=dict)
+async def get_deployment_logs(
+    namespace: str,
+    app: str,
+    pod: Optional[str] = Query(None, description="특정 Pod 이름 (없으면 대표 Pod 선택)"),
+    lines: int = Query(200, ge=1, le=1000, description="Tail 줄 수(1~1000)"),
+    previous: bool = Query(False, description="이전 컨테이너 로그 조회 여부"),
+) -> Dict[str, Any]:
+    """대표 Pod 또는 지정한 Pod의 로그를 반환합니다."""
+    try:
+        core = get_core_v1_api()
+        pod_name = pod or select_representative_pod(core, namespace, app)
+        if not pod_name:
+            raise HTTPException(status_code=404, detail="관련 Pod를 찾을 수 없습니다.")
+
+        data = get_pod_logs(core, namespace, pod_name, lines=lines, previous=previous)
+        # enrich with simple pod status
+        try:
+            p = core.read_namespaced_pod(name=pod_name, namespace=namespace)
+            data["podStatus"] = getattr(p.status, "phase", "Unknown")
+        except Exception:
+            pass
+        data["status"] = "success"
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"로그 조회 실패: {str(e)}")
 
