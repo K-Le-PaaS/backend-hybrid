@@ -18,6 +18,18 @@ def get_kst_now():
 logger = logging.getLogger(__name__)
 
 
+def _serialize_datetime(obj):
+    """datetime 객체를 문자열로 변환하는 재귀 함수"""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {key: _serialize_datetime(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [_serialize_datetime(item) for item in obj]
+    else:
+        return obj
+
+
 async def save_command_history(
     db: Session,
     command_text: str,
@@ -30,11 +42,15 @@ async def save_command_history(
 ) -> CommandHistoryResponse:
     """명령어 히스토리를 저장합니다."""
     try:
+        # datetime 객체를 JSON 직렬화 가능한 형태로 변환
+        serialized_args = _serialize_datetime(args) if args else None
+        serialized_result = _serialize_datetime(result) if result else None
+        
         command_history = CommandHistory(
             command_text=command_text,
             tool=tool,
-            args=args,
-            result=result,
+            args=serialized_args,
+            result=serialized_result,
             status=status,
             error_message=error_message,
             user_id=user_id
@@ -143,7 +159,7 @@ async def update_command_status(
         
         command_history.status = status
         if result is not None:
-            command_history.result = result
+            command_history.result = _serialize_datetime(result)
         if error_message is not None:
             command_history.error_message = error_message
         command_history.updated_at = get_kst_now()

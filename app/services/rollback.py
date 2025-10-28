@@ -199,6 +199,19 @@ async def rollback_to_commit(
 
     logger.info(f"Found deployment history: deployed_at={history.deployed_at}, image={history.image_name}")
 
+    # 2.5. Find the PREVIOUS deployment (the one being rolled back FROM)
+    # This is the most recent successful deployment BEFORE the rollback target
+    previous_deployment = db.query(DeploymentHistory).filter(
+        DeploymentHistory.github_owner == owner,
+        DeploymentHistory.github_repo == repo,
+        DeploymentHistory.status == "success",
+        DeploymentHistory.created_at < history.created_at  # Older than the rollback target
+    ).order_by(
+        DeploymentHistory.created_at.desc()  # Most recent before the target
+    ).first()
+    
+    logger.info(f"Previous deployment before rollback: {previous_deployment.github_commit_sha[:7] if previous_deployment else 'None'}")
+
     # 3. For rollback, skip NCR image verification and rebuild
     # Rationale: If deployment history exists, the image was already built and exists in NCR
     # NCR verification may fail due to permission issues (403), causing unnecessary rebuilds
@@ -264,9 +277,10 @@ async def rollback_to_commit(
         "deploy_result": deploy_result,
         "rebuilt": build_result is not None,
         "previous_deployment": {
-            "deployed_at": history.deployed_at,
-            "deployed_by": getattr(history, 'deployed_by', None),
-            "image": history.image_name
+            "deployed_at": previous_deployment.deployed_at if previous_deployment else None,
+            "deployed_by": getattr(previous_deployment, 'deployed_by', None) if previous_deployment else None,
+            "image": previous_deployment.image_name if previous_deployment else None,
+            "github_commit_sha": previous_deployment.github_commit_sha if previous_deployment else None
         }
     }
 
@@ -537,20 +551,37 @@ async def get_rollback_list(
     else:
         logger.warning(f"get_rollback_list - No current_deployment found for {owner}/{repo}")
     
-    # 2. 롤백 가능한 버전 목록 (원본 배포만, is_rollback=False)
+    # 2. 롤백 가능한 버전 목록 (원본 배포만, is_rollback=False, operation_type="deploy")
     original_deployments = db.query(DeploymentHistory).filter(
         DeploymentHistory.github_owner == owner,
         DeploymentHistory.github_repo == repo,
         DeploymentHistory.status == "success",
-        DeploymentHistory.is_rollback == False
+        DeploymentHistory.is_rollback == False,
+        DeploymentHistory.operation_type == "deploy"  # 배포만 포함 (스케일링, 롤백 제외)
     ).order_by(
         DeploymentHistory.created_at.desc()
     ).limit(limit).all()
     
+    # 중복 제거: 같은 커밋은 하나만 표시 (가장 최근 배포만)
+    seen_commits = {}  # commit_sha -> deployment
+    for dep in original_deployments:
+        commit_sha = dep.github_commit_sha or ""
+        if commit_sha and commit_sha not in seen_commits:
+            seen_commits[commit_sha] = dep
+        elif commit_sha in seen_commits:
+            # 같은 커밋이 이미 있으면 더 최근 배포로 갱신
+            existing_dep = seen_commits[commit_sha]
+            if dep.created_at > existing_dep.created_at:
+                seen_commits[commit_sha] = dep
+    
+    # 중복 제거된 배포 리스트 정렬 (최신순)
+    unique_deployments = list(seen_commits.values())
+    unique_deployments.sort(key=lambda x: x.created_at, reverse=True)
+    
     available_versions = []
     current_commit_short = current_deployment.github_commit_sha[:7] if current_deployment and current_deployment.github_commit_sha else ""
     
-    for idx, dep in enumerate(original_deployments):
+    for idx, dep in enumerate(unique_deployments):
         try:
             dep_commit_short = dep.github_commit_sha[:7] if dep.github_commit_sha else ""
             is_current = (dep_commit_short == current_commit_short)

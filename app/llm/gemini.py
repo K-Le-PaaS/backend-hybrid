@@ -385,6 +385,9 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
   * "myorg/myapp을 abc1234 커밋으로 되돌려"
   * "K-Le-PaaS/backend-hybrid 커밋 a1b2c3d로 복구"
   * "저장소 owner/repo 커밋 해시 abc1234로 롤백"
+  * **"abc1234로 롤백해줘" (owner/repo 없음, 컨텍스트에서 추론)**
+  * **"dd62455로 롤백" (owner/repo 없음, 컨텍스트에서 추론)**
+  * **"커밋 해시 abc1234로 되돌려" (owner/repo 없음, 컨텍스트에서 추론)**
 
 - **N번째 전 패턴**:
   * "owner/repo를 3번 전으로 롤백해줘"
@@ -427,6 +430,8 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 - "K-Le-PaaS/backend 이전 배포로" → { "command": "rollback", "parameters": { "owner": "K-Le-PaaS", "repo": "backend", "commitSha": null, "stepsBack": 1 } }
 - **"5번 전으로 롤백해줘" → { "command": "rollback", "parameters": { "owner": "", "repo": "", "commitSha": null, "stepsBack": 5 } }**
 - **"이전 버전으로 되돌려" → { "command": "rollback", "parameters": { "owner": "", "repo": "", "commitSha": null, "stepsBack": 1 } }**
+- **"dd62455로 롤백해줘" → { "command": "rollback", "parameters": { "owner": "", "repo": "", "commitSha": "dd62455", "stepsBack": null } }**
+- **"abc1234로 롤백" → { "command": "rollback", "parameters": { "owner": "", "repo": "", "commitSha": "abc1234", "stepsBack": null } }**
 
 6-1. 롤백 목록 조회 (command: "list_rollback")
 설명: 프로젝트의 현재 배포 상태, 롤백 가능한 버전 목록, 최근 롤백 히스토리를 조회하는 명령입니다.
