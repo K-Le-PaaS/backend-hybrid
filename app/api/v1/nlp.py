@@ -476,16 +476,30 @@ async def process_conversation(
             user_id, session_id, ConversationState.INTERPRETING
         )
 
-        # 4. Gemini로 명령 해석
+        # 4. 세션 조회 (컨텍스트 복원용) - Gemini 호출 전에 먼저 조회
+        session = await conv_manager.get_session(user_id, session_id)
+        session_context = session.get("context", {}) if session else {}
+
+        # 5. Gemini로 명령 해석 (컨텍스트 정보 포함)
         from ...llm.gemini import GeminiClient
         gemini_client = GeminiClient()
 
+        # 컨텍스트 정보를 프롬프트에 포함
+        context_info = ""
+        if session_context.get("github_owner") and session_context.get("github_repo"):
+            context_info = f"\n\n현재 대화 컨텍스트: 저장소 {session_context['github_owner']}/{session_context['github_repo']}에 대해 작업 중입니다."
+            context_info += f"\n이전 명령에서 언급된 저장소 정보를 활용하여 명령을 해석해주세요."
+            logger.info(f"컨텍스트 정보 추가됨: {session_context['github_owner']}/{session_context['github_repo']}")
+
+        logger.info(f"Gemini API 호출 시작 - 명령: '{request.command}', 컨텍스트 포함: {bool(context_info)}")
+        
         try:
             interpretation = await gemini_client.interpret(
-                prompt=request.command,
+                prompt=f"{request.command}{context_info}",
                 user_id=user_id,
                 project_name="default"
             )
+            logger.info(f"Gemini API 응답 수신: {interpretation}")
         except Exception as e:
             logger.error(f"Gemini API 호출 실패: {str(e)}")
             # Gemini 실패 시 에러 응답 반환
@@ -511,10 +525,6 @@ async def process_conversation(
         intent = interpretation.get("intent")
         entities = interpretation.get("entities", {})
 
-        # 세션 조회 (컨텍스트 복원용)
-        session = await conv_manager.get_session(user_id, session_id)
-        session_context = session.get("context", {}) if session else {}
-
         # owner/repo 정보 처리: entities에 있으면 저장, 없으면 컨텍스트에서 복원
         owner = entities.get("github_owner")
         repo = entities.get("github_repo")
@@ -538,27 +548,68 @@ async def process_conversation(
             else:
                 logger.warning(f"저장소 정보 없음: intent={intent}, entities={entities}")
 
-        # intent가 error인 경우 처리
+        # intent가 error인 경우 폴백 로직 시도
         if intent == "error":
-            logger.warning(f"명령 해석 실패: {request.command}")
-            await conv_manager.update_state(
-                user_id, session_id, ConversationState.ERROR
-            )
-            error_message = "죄송합니다. 명령을 이해하지 못했습니다. 다시 말씀해주시겠어요?"
-            await conv_manager.add_message(
-                user_id, session_id,
-                "assistant", error_message,
-                action="error"
-            )
-            return ConversationResponse(
-                session_id=session_id,
-                state=ConversationState.ERROR.value,
-                message=error_message,
-                requires_confirmation=False,
-                cost_estimate=None,
-                pending_action=None,
-                result=None
-            )
+            logger.warning(f"Gemini 명령 해석 실패: {request.command}")
+            
+            # 폴백: 로컬 롤백 파서로 재시도
+            from ...services.nlp_rollback import RollbackCommandParser
+            
+            if RollbackCommandParser.is_rollback_command(request.command):
+                logger.info(f"롤백 명령 감지됨, 로컬 파서로 재시도: {request.command}")
+                
+                # 컨텍스트에서 owner/repo 복원
+                owner = session_context.get("github_owner", "")
+                repo = session_context.get("github_repo", "")
+                
+                if owner and repo:
+                    logger.info(f"컨텍스트에서 저장소 정보 복원: {owner}/{repo}")
+                    
+                    # 로컬 파서로 명령 해석
+                    parsed = RollbackCommandParser.parse_rollback_command(request.command)
+                    
+                    # 롤백 명령으로 재해석
+                    intent = "rollback"
+                    entities = {
+                        "github_owner": owner,
+                        "github_repo": repo
+                    }
+                    
+                    # 파싱 결과에 따라 entities 업데이트
+                    if parsed["type"] == "commit_sha":
+                        entities["target_commit_sha"] = parsed["value"]
+                        logger.info(f"커밋 해시 기반 롤백으로 재해석: {parsed['value']}")
+                    elif parsed["type"] == "steps_back":
+                        entities["steps_back"] = parsed["value"]
+                        logger.info(f"N번 전 롤백으로 재해석: {parsed['value']}번 전")
+                    elif parsed["type"] == "previous":
+                        entities["steps_back"] = 1
+                        logger.info("이전 버전 롤백으로 재해석")
+                    
+                    logger.info(f"폴백 성공: intent={intent}, entities={entities}")
+                else:
+                    logger.warning("컨텍스트에 저장소 정보가 없어 폴백 실패")
+            
+            # 폴백 실패 시 기존 에러 처리
+            if intent == "error":
+                await conv_manager.update_state(
+                    user_id, session_id, ConversationState.ERROR
+                )
+                error_message = "죄송합니다. 명령을 이해하지 못했습니다. 다시 말씀해주시겠어요?"
+                await conv_manager.add_message(
+                    user_id, session_id,
+                    "assistant", error_message,
+                    action="error"
+                )
+                return ConversationResponse(
+                    session_id=session_id,
+                    state=ConversationState.ERROR.value,
+                    message=error_message,
+                    requires_confirmation=False,
+                    cost_estimate=None,
+                    pending_action=None,
+                    result=None
+                )
 
         logger.info(f"명령 해석 완료: intent={intent}, entities={entities}")
 
@@ -1089,6 +1140,31 @@ async def confirm_action(
             })
             logger.info(f"포맷된 결과: {formatted_result}")
             result_message = formatted_result.get("summary", "재시작이 완료되었습니다.")
+        # 롤백 명령의 경우 특별 처리
+        elif pending_action["type"] == "rollback":
+            logger.info(f"롤백 결과 포맷팅 - result: {result}")
+            logger.info(f"롤백 결과 포맷팅 - params: {params}")
+            
+            # result 구조 확인 및 실제 롤백 데이터 추출
+            rollback_data = result
+            # execute_command가 포맷된 결과를 반환하는 경우 처리
+            if isinstance(result, dict) and "data" in result and "raw" in result.get("data", {}):
+                # 포맷된 응답 구조: result.data.raw.result
+                raw_data = result["data"]["raw"]
+                if "result" in raw_data:
+                    rollback_data = raw_data["result"]
+                    logger.info(f"포맷된 응답에서 실제 롤백 데이터 추출: {rollback_data}")
+            elif isinstance(result, dict) and "result" in result:
+                # 직접 result 구조
+                rollback_data = result["result"]
+                logger.info(f"중첩된 result에서 실제 롤백 데이터 추출: {rollback_data}")
+            
+            formatted_result = formatter.format_rollback({
+                "k8s_result": rollback_data,
+                "entities": params
+            })
+            logger.info(f"포맷된 결과: {formatted_result}")
+            result_message = formatted_result.get("summary", "롤백이 완료되었습니다.")
         else:
             result_message = f"작업이 완료되었습니다: {result.get('message', '')}"
         
@@ -1096,18 +1172,18 @@ async def confirm_action(
             user_id, request.session_id,
             "assistant", result_message,
             action="execution_completed",
-            metadata={"result": formatted_result if pending_action["type"] in ("scale", "restart") else result}
+            metadata={"result": formatted_result if pending_action["type"] in ("scale", "restart", "rollback") else result}
         )
 
         # 어시스턴트 응답을 command_history에 저장 (DB)
-        # 스케일링/재시작의 경우 formatted_result를 저장, 그렇지 않으면 result 저장
+        # 스케일링/재시작/롤백의 경우 formatted_result를 저장, 그렇지 않으면 result 저장
         from ...services.command_history import save_command_history
         await save_command_history(
             db=db,
             command_text=result_message,
             tool="assistant_response",
             args={"session_id": request.session_id, "action": "execution_completed", "type": pending_action["type"], "parameters": params},
-            result=formatted_result if pending_action["type"] in ("scale", "restart") else result,
+            result=formatted_result if pending_action["type"] in ("scale", "restart", "rollback") else result,
             status="completed",
             user_id=user_id
         )
@@ -1115,7 +1191,7 @@ async def confirm_action(
         return {
             "status": "completed",
             "message": result_message,
-            "result": formatted_result if pending_action["type"] in ("scale", "restart") else result,
+            "result": formatted_result if pending_action["type"] in ("scale", "restart", "rollback") else result,
             "session_id": request.session_id
         }
 
