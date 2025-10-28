@@ -242,11 +242,7 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             args={},
         )
     
-    elif command == "list_apps":
-        return CommandPlan(
-            tool="k8s_list_deployments",
-            args={"namespace": ns},
-        )
+    
     
     elif command == "list_endpoints":
         return CommandPlan(
@@ -1674,8 +1670,8 @@ async def _execute_list_namespaces(args: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _execute_list_deployments(args: Dict[str, Any]) -> Dict[str, Any]:
     """
-    네임스페이스의 모든 Deployment 목록 조회 (list_apps 명령어)
-    예: "test 네임스페이스 앱 목록 보여줘", "default 네임스페이스 모든 앱 확인"
+    네임스페이스의 모든 Deployment 목록 조회 (list_deployments 명령어)
+    예: "default 네임스페이스 deployment 목록", "test 네임스페이스 deployment 목록"
     """
     namespace = args.get("namespace", "default")
     
