@@ -231,11 +231,11 @@ class SlackOAuthService:
     ) -> SlackMessageResponse:
         """알림 메시지 전송"""
         try:
+            # 이전 동작으로 복귀: 항상 text 포함, blocks는 옵션
             payload = {
                 "channel": channel,
                 "text": f"*{title}*\n\n{message}"
             }
-            
             if blocks:
                 payload["blocks"] = blocks
             

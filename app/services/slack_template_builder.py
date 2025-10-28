@@ -74,6 +74,29 @@ class SlackTemplateBuilder:
             label_len = len(label)
             content_len = len(content)
             return box_width - label_len - content_len
+
+        def display_width(value: str) -> int:
+            """화면 표시 폭 계산 (emoji/CJK 포함)"""
+            try:
+                from wcwidth import wcwidth  # type: ignore
+            except Exception:
+                wcwidth = None
+            width = 0
+            for ch in str(value or ""):
+                if ch in ('\u200d', '\ufe0f'):
+                    continue
+                if wcwidth:
+                    w = wcwidth(ch)
+                    width += max(w, 0)
+                else:
+                    import unicodedata
+                    eaw = unicodedata.east_asian_width(ch)
+                    width += 2 if eaw in ('W', 'F') else 1
+            return width
+
+        def calculate_padding_display(label: str, content: str, box_width: int = 60) -> int:
+            """표시 폭 기준 패딩 계산 (emoji 안전)"""
+            return box_width - len(label) - display_width(content)
         
         def get_commit_short(commit_sha: str, length: int = 7) -> str:
             """커밋 SHA를 짧게 자르기"""
@@ -121,6 +144,8 @@ class SlackTemplateBuilder:
         self.env.filters['format_duration'] = format_duration
         self.env.filters['format_timestamp'] = format_timestamp
         self.env.filters['calculate_padding'] = calculate_padding
+        self.env.filters['display_width'] = display_width
+        self.env.filters['calculate_padding_display'] = calculate_padding_display
         self.env.filters['get_commit_short'] = get_commit_short
         self.env.filters['get_commit_message_short'] = get_commit_message_short
         self.env.filters['calculate_step_times'] = calculate_step_times
