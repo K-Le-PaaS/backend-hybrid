@@ -690,6 +690,7 @@ async def process_conversation(
             # CommandRequest 생성 및 실행
             req = CommandRequest(
                 command=intent,
+                resource_type=entities.get("resource_type", "pod"),
                 pod_name=entities.get("pod_name") or "",
                 deployment_name=entities.get("deployment_name") or "",
                 service_name=entities.get("service_name") or "",
@@ -1059,6 +1060,7 @@ async def confirm_action(
         if requires_github:
             req = CommandRequest(
                 command=pending_action["type"],
+                resource_type=params.get("resource_type", "pod"),
                 pod_name=params.get("pod_name") or "",
                 deployment_name=params.get("deployment_name") or "",
                 service_name=params.get("service_name") or "",
@@ -1075,6 +1077,7 @@ async def confirm_action(
         else:
             req = CommandRequest(
                 command=pending_action["type"],
+                resource_type=params.get("resource_type", "pod"),
                 pod_name=params.get("pod_name") or "",
                 deployment_name=params.get("deployment_name") or "",
                 service_name=params.get("service_name") or "",

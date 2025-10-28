@@ -30,19 +30,78 @@ class GeminiClient(LLMClient):
             # 명령어에 따른 entities 구성 (해당 명령에 필요한 필드만 포함)
             entities: Dict[str, Any] = {}
 
-            # 리소스 타입별 파라미터 처리
-            if command in ("status", "logs"):
-                # Pod 관련 명령어
+            # status 명령어 처리 (Pod/Service/Deployment 구분)
+            if command == "status":
+                resource_type = parameters.get("resource_type", "pod")
+                owner = parameters.get("owner", "")
+                repo = parameters.get("repo", "")
+                
+                # owner/repo가 있으면 네이밍 규칙 적용
+                if owner and repo:
+                    # k-le-paas-test01 형식으로 변환
+                    base_name = f"{owner.lower()}-{repo.lower()}"
+                    
+                    if resource_type == "service":
+                        entities["service_name"] = f"{base_name}-svc"
+                        entities["resource_type"] = "service"
+                    elif resource_type == "deployment":
+                        entities["deployment_name"] = f"{base_name}-deploy"
+                        entities["resource_type"] = "deployment"
+                    else:  # pod (기본값)
+                        entities["pod_name"] = base_name
+                        entities["resource_type"] = "pod"
+                else:
+                    # 기존 로직: 명시된 이름 사용
+                    if resource_type == "service" and parameters.get("serviceName"):
+                        entities["service_name"] = parameters.get("serviceName")
+                        entities["resource_type"] = "service"
+                    elif resource_type == "deployment" and parameters.get("deploymentName"):
+                        entities["deployment_name"] = parameters.get("deploymentName")
+                        entities["resource_type"] = "deployment"
+                    elif parameters.get("podName"):
+                        entities["pod_name"] = parameters.get("podName")
+                        entities["resource_type"] = "pod"
+                    else:
+                        # resource_type만 있고 이름이 없으면 설정
+                        entities["resource_type"] = resource_type
+                
+                # namespace 설정
+                entities["namespace"] = parameters.get("namespace", "default")
+            
+            # 기타 Pod 관련 명령어 (logs, restart)
+            elif command in ("logs", "restart"):
                 if parameters.get("podName") is not None:
                     entities["pod_name"] = parameters.get("podName")
+                entities["namespace"] = parameters.get("namespace", "default")
+            
+            # Deployment 관련 명령어
             elif command in ("scale", "deploy", "get_deployment"):
-                # Deployment 관련 명령어
                 if parameters.get("deploymentName") is not None:
                     entities["deployment_name"] = parameters.get("deploymentName")
+            
+            # Service 관련 명령어
             elif command in ("endpoint", "get_service"):
-                # Service 관련 명령어
                 if parameters.get("serviceName") is not None:
                     entities["service_name"] = parameters.get("serviceName")
+                entities["namespace"] = parameters.get("namespace", "default")
+
+            # restart 명령어 처리
+            if command == "restart":
+                # GitHub 저장소 정보 (필수)
+                owner = parameters.get("owner", "")
+                repo = parameters.get("repo", "")
+
+                # owner/repo가 비어있는 경우 에러 처리
+                if not owner or not repo:
+                    entities["error"] = "GitHub 저장소 정보가 필요합니다. 'K-Le-PaaS/test01 재시작해줘' 형식으로 입력해주세요."
+                    return {
+                        "intent": "error",
+                        "entities": entities,
+                        "message": entities["error"]
+                    }
+
+                entities["github_owner"] = owner
+                entities["github_repo"] = repo
 
             # restart 명령어 처리
             if command == "restart":
@@ -63,8 +122,9 @@ class GeminiClient(LLMClient):
                 entities["github_repo"] = repo
 
             # namespace 기본값 포함이 필요한 명령어들
-            if command in ("status", "endpoint", "restart", "overview", "list_pods", "list_apps", "logs", "get_service", "get_deployment", "cost_analysis", "list_endpoints"):
-                entities["namespace"] = parameters.get("namespace", "default")
+            if command in ("endpoint", "restart", "overview", "list_pods", "list_apps", "logs", "get_service", "get_deployment", "cost_analysis", "list_endpoints", "list_deployments", "list_services"):
+                if "namespace" not in entities:
+                    entities["namespace"] = parameters.get("namespace", "default")
 
             # 비용 분석 파라미터
             if command == "cost_analysis":
@@ -184,7 +244,13 @@ class GeminiClient(LLMClient):
                 else:
                     entities["previous"] = False
 
-            # list_deployments / list_services / list_ingresses / list_namespaces 는 파라미터 없음
+            # list_ingresses / list_namespaces 는 파라미터 없음
+            # list_deployments는 namespace를 사용할 수 있음 (기본값: default)
+            if command == "list_deployments":
+                entities["namespace"] = parameters.get("namespace", "default")
+            # list_services는 namespace를 사용할 수 있음 (기본값: default)
+            if command == "list_services":
+                entities["namespace"] = parameters.get("namespace", "default")
             
             # 명령어에 따른 기본 메시지 생성
             messages = {
@@ -198,7 +264,7 @@ class GeminiClient(LLMClient):
                 "restart": "재시작 명령을 해석했습니다.",
                 "list_pods": "파드 목록 조회 명령을 해석했습니다.",
                 "list_apps": "네임스페이스 앱 목록 조회 명령을 해석했습니다.",
-                "list_deployments": "전체 Deployment 조회 명령을 해석했습니다.",
+            "list_deployments": "Deployment 목록 조회 명령을 해석했습니다.",
                 "list_services": "전체 Service 조회 명령을 해석했습니다.",
                 "list_ingresses": "전체 Ingress/도메인 조회 명령을 해석했습니다.",
                 "list_namespaces": "네임스페이스 목록 조회 명령을 해석했습니다.",
@@ -258,14 +324,24 @@ class GeminiClient(LLMClient):
 명령어 및 반환 형식:
 
 1. 상태 확인 (command: "status")
-설명: 배포된 애플리케이션의 현재 상태를 확인하는 명령입니다.
-중요: "app", "앱"이라는 호칭은 Pod를 의미합니다.
+설명: 배포된 리소스(Pod/Service/Deployment)의 현재 상태를 확인하는 명령입니다.
+
+리소스 타입 감지:
+- 기본값: Pod (키워드 없으면)
+- "서비스", "service" → Service
+- "디플로이먼트", "deployment", "배포" → Deployment
+
+owner/repo 형식 감지:
+- "K-Le-PaaS/test01 상태" → owner: "K-Le-PaaS", repo: "test01", resource_type: "pod" (기본값)
+- "K-Le-PaaS/test01 서비스 상태" → owner: "K-Le-PaaS", repo: "test01", resource_type: "service"
+- "K-Le-PaaS/test01 디플로이먼트 상태" → owner: "K-Le-PaaS", repo: "test01", resource_type: "deployment"
+
 사용자 입력 예시: 
-- 기본 표현: "내 앱 상태 보여줘", "chat-app 상태 어때?", "서버 목록 확인"
-- 자연스러운 표현: "nginx-pod 상태 확인", "frontend 앱 상태는?", "백엔드 서버 상태 보여줘"
-- 다양한 뉘앙스: "nginx 잘 돌아가고 있어?", "frontend 앱 어떻게 되고 있어?", "서버들 다 정상인가?", "앱 현황 알려줘", "상황 파악해줘", "서버 상태 체크", "모든 게 잘 돌아가고 있나?", "앱이 정상 작동하고 있나?"
-- App 호칭 예시: "k-le-paas-test01 app 상태", "my-app 상태 확인", "앱 상태 보여줘"
-필수 JSON 형식: { "command": "status", "parameters": { "podName": "<추출된_파드이름_없으면_null>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
+- 기본 표현 (Pod): "내 앱 상태 보여줘", "chat-app 상태 어때?", "K-Le-PaaS/test01 잘 돌아감?"
+- Service: "K-Le-PaaS/test01 서비스 상태", "test01 서비스 잘 돌아감?"
+- Deployment: "K-Le-PaaS/test01 디플로이먼트 상태", "test01 배포 상태"
+
+필수 JSON 형식: { "command": "status", "parameters": { "podName": "<파드이름_또는_null>", "serviceName": "<서비스이름_또는_null>", "deploymentName": "<디플로이먼트이름_또는_null>", "owner": "<GitHub_owner_또는_빈_문자열>", "repo": "<GitHub_repo_또는_빈_문자열>", "resource_type": "pod|service|deployment", "namespace": "<네임스페이스_없으면_'default'>" } }
 
 2. 로그 조회 (command: "logs")
 설명: 배포된 애플리케이션의 로그를 조회하는 명령입니다.
@@ -498,15 +574,15 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 사용자 입력 예시: "모든 파드 조회해줘", "파드 목록 보여줘", "실행 중인 파드들 확인"
 필수 JSON 형식: { "command": "list_pods", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-10. 전체 Deployment 조회 (command: "list_deployments")
-설명: 모든 네임스페이스의 Deployment 목록을 조회하는 명령입니다.
-사용자 입력 예시: "모든 Deployment 조회해줘", "전체 앱 목록 보여줘", "모든 배포 확인"
-필수 JSON 형식: { "command": "list_deployments", "parameters": {} }
+        10. 전체/네임스페이스 Deployment 조회 (command: "list_deployments")
+        설명: 특정 네임스페이스의 Deployment 목록을 조회합니다. 네임스페이스가 명시되지 않으면 기본값 'default'를 사용합니다. "모든" 등의 표현이 있으면 전체 조회로 해석할 수 있으나 기본은 네임스페이스 기준입니다.
+        사용자 입력 예시: "deployment 목록 보여줘" (default), "test 네임스페이스 deployment 목록", "모든 Deployment 조회해줘"(전체)
+        필수 JSON 형식: { "command": "list_deployments", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-11. 전체 Service 조회 (command: "list_services")
-설명: 모든 네임스페이스의 Service 목록을 조회하는 명령입니다.
-사용자 입력 예시: "모든 Service 조회해줘", "전체 서비스 목록 보여줘", "모든 서비스 확인"
-필수 JSON 형식: { "command": "list_services", "parameters": {} }
+        11. 네임스페이스 Service 조회 (command: "list_services")
+        설명: 특정 네임스페이스의 Service 목록을 조회합니다. 네임스페이스가 없으면 'default'를 사용합니다. ("모든" 등의 표현이 있으면 전체 조회로 해석 가능하지만 기본은 네임스페이스 기준)
+        사용자 입력 예시: "service 목록 보여줘"(default), "test 네임스페이스 service 목록", "모든 Service 조회해줘"(전체)
+        필수 JSON 형식: { "command": "list_services", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
 12. 전체 Ingress/도메인 조회 (command: "list_ingresses")
 설명: 모든 네임스페이스의 Ingress와 도메인 목록을 조회하는 명령입니다.
