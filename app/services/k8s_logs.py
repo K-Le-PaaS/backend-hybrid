@@ -35,12 +35,29 @@ def _get_start_time(pod: Any) -> Optional[datetime]:
         return None
 
 
-def list_pods_by_app(core_v1: CoreV1Api, namespace: str, app_name: str) -> List[Dict[str, Any]]:
-    """List pods labeled with app=<app_name> in a namespace with key metadata.
+def _list_pods_with_fallbacks(core_v1: CoreV1Api, namespace: str, app_name: str):
+    """Try multiple common label selectors to find pods for an app."""
+    selectors = [
+        f"app={app_name}",
+        f"app.kubernetes.io/name={app_name}",
+        f"app.kubernetes.io/instance={app_name}",
+    ]
+    for sel in selectors:
+        pods = core_v1.list_namespaced_pod(namespace=namespace, label_selector=sel)
+        if pods.items:
+            return pods
+    # final fallback: no selector → list all and filter by prefix match on name
+    try:
+        pods = core_v1.list_namespaced_pod(namespace=namespace)
+        pods.items = [p for p in pods.items or [] if app_name in getattr(p.metadata, "name", "")]
+        return pods
+    except Exception:
+        return core_v1.list_namespaced_pod(namespace=namespace, label_selector=f"app={app_name}")
 
-    Returns list sorted by name for stable output.
-    """
-    pods = core_v1.list_namespaced_pod(namespace=namespace, label_selector=f"app={app_name}")
+
+def list_pods_by_app(core_v1: CoreV1Api, namespace: str, app_name: str) -> List[Dict[str, Any]]:
+    """List pods for app using multiple label fallbacks; return stable metadata list."""
+    pods = _list_pods_with_fallbacks(core_v1, namespace, app_name)
     result: List[Dict[str, Any]] = []
     for p in pods.items or []:
         phase = getattr(p.status, "phase", "Unknown")
@@ -66,7 +83,7 @@ def select_representative_pod(core_v1: CoreV1Api, namespace: str, app_name: str)
     2) If none, any Running pod (first)
     3) Else the pod with highest restart count (likely problematic)
     """
-    pods = core_v1.list_namespaced_pod(namespace=namespace, label_selector=f"app={app_name}")
+    pods = _list_pods_with_fallbacks(core_v1, namespace, app_name)
     items = pods.items or []
     if not items:
         return None
