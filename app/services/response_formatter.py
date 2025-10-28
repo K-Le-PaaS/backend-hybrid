@@ -33,7 +33,10 @@ class ResponseFormatter:
             # 명령어 매핑
             command_mapping = {
                 "k8s_list_pods": self.format_list_pods,
-                "k8s_get_status": self.format_status,
+                "k8s_get_status": self.format_status,  # 레거시 (단일 Pod용)
+                "k8s_get_pod_status": self.format_pod_status,  # Pod 상태 조회 (app 레이블 기반)
+                "k8s_get_service_status": self.format_service_status,  # Service 상태 조회
+                "k8s_get_deployment_status": self.format_deployment_status,  # Deployment 상태 조회
                 "k8s_get_logs": self.format_logs,
                 "k8s_get_endpoints": self.format_endpoint,
                 "k8s_list_deployments": self.format_list_deployments,
@@ -189,7 +192,7 @@ class ResponseFormatter:
             return self.format_error("list_rollback", str(e))
     
     def format_status(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Pod 상태를 카드 형식으로 포맷"""
+        """Pod 상태를 카드 형식으로 포맷 (레거시 - 단일 Pod용)"""
         try:
             pod_name = raw_data.get("name", "")
             namespace = raw_data.get("namespace", "default")
@@ -222,6 +225,180 @@ class ResponseFormatter:
         except Exception as e:
             self.logger.error(f"Error formatting status: {str(e)}")
             return self.format_error("status", str(e))
+    
+    def format_pod_status(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Pod 상태를 포맷 (app 레이블 기반, 여러 Pod 지원)"""
+        try:
+            # 에러 상태 처리
+            if raw_data.get("status") == "error":
+                return {
+                    "type": "pod_status",
+                    "summary": raw_data.get("message", "Pod 상태 조회 실패"),
+                    "data": {
+                        "formatted": {
+                            "error": True,
+                            "message": raw_data.get("message", "")
+                        },
+                        "raw": raw_data
+                    },
+                    "metadata": {
+                        "status": "error"
+                    }
+                }
+            
+            namespace = raw_data.get("namespace", "default")
+            pods = raw_data.get("pods", [])
+            total_pods = raw_data.get("total_pods", len(pods))
+            label_selector = raw_data.get("label_selector", "")
+            
+            # 상태별 통계
+            running = sum(1 for pod in pods if pod.get("phase") == "Running")
+            pending = sum(1 for pod in pods if pod.get("phase") == "Pending")
+            failed = sum(1 for pod in pods if pod.get("phase") == "Failed")
+            
+            # Pod 목록 포맷
+            formatted_pods = []
+            for pod in pods:
+                formatted_pods.append({
+                    "name": pod.get("name", ""),
+                    "phase": pod.get("phase", "Unknown"),
+                    "ready": pod.get("ready", "0/0"),
+                    "restarts": pod.get("restarts", 0),
+                    "node": pod.get("node", ""),
+                    "labels": pod.get("labels", {}),
+                    "creation_timestamp": pod.get("creation_timestamp", ""),
+                    # 문제 사유 전달 (백엔드에서 세팅)
+                    "problem": pod.get("problem", False),
+                    "problem_reason": pod.get("problem_reason"),
+                    "problem_message": pod.get("problem_message"),
+                })
+            
+            return {
+                "type": "pod_status",
+                "summary": raw_data.get("message", f"라벨 '{label_selector}'로 {total_pods}개 Pod 조회 완료"),
+                "data": {
+                    "formatted": {
+                        "namespace": namespace,
+                        "label_selector": label_selector,
+                        "total_pods": total_pods,
+                        "running": running,
+                        "pending": pending,
+                        "failed": failed,
+                        "pods": formatted_pods,
+                        # 문제가 있는 파드 요약을 그대로 전달 (없으면 빈 배열)
+                        "problem_pods": raw_data.get("problem_pods", [p for p in formatted_pods if p.get("problem")])
+                    },
+                    "raw": raw_data
+                },
+                "metadata": {
+                    "namespace": namespace,
+                    "total_pods": total_pods,
+                    "running": running,
+                    "pending": pending,
+                    "failed": failed,
+                    "is_healthy": failed == 0 and pending == 0
+                }
+            }
+        except Exception as e:
+            self.logger.error(f"Error formatting pod_status: {str(e)}")
+            return self.format_error("pod_status", str(e))
+    
+    def format_service_status(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Service 상태를 포맷"""
+        try:
+            # 에러 상태 처리
+            if raw_data.get("status") == "error":
+                return {
+                    "type": "service_status",
+                    "summary": raw_data.get("message", "Service 상태 조회 실패"),
+                    "data": {
+                        "formatted": {
+                            "error": True,
+                            "message": raw_data.get("message", "")
+                        },
+                        "raw": raw_data
+                    },
+                    "metadata": {
+                        "status": "error"
+                    }
+                }
+            
+            service = raw_data.get("service", {})
+            namespace = raw_data.get("namespace", "default")
+            
+            return {
+                "type": "service_status",
+                "summary": raw_data.get("message", "Service 상태 조회 완료"),
+                "data": {
+                    "formatted": {
+                        "name": service.get("name", ""),
+                        "namespace": namespace,
+                        "type": service.get("type", ""),
+                        "cluster_ip": service.get("cluster_ip", ""),
+                        "ports": service.get("ports", []),
+                        "selector": service.get("selector", {}),
+                        "ready_endpoints": service.get("ready_endpoints", 0),
+                        "creation_timestamp": service.get("creation_timestamp", "")
+                    },
+                    "raw": raw_data
+                },
+                "metadata": {
+                    "namespace": namespace,
+                    "is_healthy": service.get("ready_endpoints", 0) > 0
+                }
+            }
+        except Exception as e:
+            self.logger.error(f"Error formatting service_status: {str(e)}")
+            return self.format_error("service_status", str(e))
+    
+    def format_deployment_status(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Deployment 상태를 포맷"""
+        try:
+            # 에러 상태 처리
+            if raw_data.get("status") == "error":
+                return {
+                    "type": "deployment_status",
+                    "summary": raw_data.get("message", "Deployment 상태 조회 실패"),
+                    "data": {
+                        "formatted": {
+                            "error": True,
+                            "message": raw_data.get("message", "")
+                        },
+                        "raw": raw_data
+                    },
+                    "metadata": {
+                        "status": "error"
+                    }
+                }
+            
+            deployment = raw_data.get("deployment", {})
+            namespace = raw_data.get("namespace", "default")
+            replicas = deployment.get("replicas", {})
+            
+            return {
+                "type": "deployment_status",
+                "summary": raw_data.get("message", "Deployment 상태 조회 완료"),
+                "data": {
+                    "formatted": {
+                        "name": deployment.get("name", ""),
+                        "namespace": namespace,
+                        "replicas": replicas,
+                        "conditions": deployment.get("conditions", []),
+                        "pods": deployment.get("pods", []),
+                        "creation_timestamp": deployment.get("creation_timestamp", "")
+                    },
+                    "raw": raw_data
+                },
+                "metadata": {
+                    "namespace": namespace,
+                    "desired": replicas.get("desired", 0),
+                    "ready": replicas.get("ready", 0),
+                    "is_healthy": replicas.get("ready", 0) == replicas.get("desired", 0)
+                }
+            }
+        except Exception as e:
+            self.logger.error(f"Error formatting deployment_status: {str(e)}")
+            return self.format_error("deployment_status", str(e))
     
     def format_logs(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """로그를 읽기 쉬운 형식으로 포맷"""
@@ -340,14 +517,35 @@ class ResponseFormatter:
         try:
             deployments = raw_data.get("deployments", [])
             total = len(deployments)
+            namespace = raw_data.get("namespace")
             
             formatted_deployments = []
             for deployment in deployments:
+                # replicas가 dict 형태( desired/current/ready/available )로 오는 경우를 처리
+                replicas_obj = deployment.get("replicas") or {}
+                if isinstance(replicas_obj, dict):
+                    desired = replicas_obj.get("desired") or 0
+                    ready = replicas_obj.get("ready") or 0
+                    current = replicas_obj.get("current") or 0
+                    available = replicas_obj.get("available") or 0
+                    ready_str = f"{ready}/{desired}" if desired is not None else f"{ready}/0"
+                    up_to_date_str = str(current)
+                    available_str = str(available)
+                    replicas_str = f"{current}/{desired}"
+                else:
+                    # 문자열이나 기타 타입인 경우 그대로 사용(하위호환)
+                    replicas_str = str(deployment.get("replicas", "0/0"))
+                    ready_str = str(deployment.get("ready", "0/0"))
+                    up_to_date_str = str(deployment.get("up_to_date", "-"))
+                    available_str = str(deployment.get("available", "-"))
+
                 formatted_deployments.append({
                     "name": deployment.get("name", ""),
                     "namespace": deployment.get("namespace", ""),
-                    "replicas": deployment.get("replicas", "0/0"),
-                    "ready": deployment.get("ready", "0/0"),
+                    "replicas": replicas_str,
+                    "ready": ready_str,
+                    "up_to_date": up_to_date_str,
+                    "available": available_str,
                     "age": self._format_age(deployment.get("age", "")),
                     "image": deployment.get("image", "")
                 })
@@ -360,7 +558,8 @@ class ResponseFormatter:
                     "raw": raw_data
                 },
                 "metadata": {
-                    "total": total
+                    "total": total,
+                    **({"namespace": namespace} if namespace else {})
                 }
             }
         except Exception as e:
@@ -597,30 +796,143 @@ class ResponseFormatter:
             return self.format_error("get_deployment", str(e))
     
     def format_overview(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """통합 대시보드 데이터를 포맷"""
+        """클러스터 전체 현황 보고서 데이터를 포맷"""
         try:
-            namespace = raw_data.get("namespace", "default")
-            deployments = raw_data.get("deployments", [])
-            pods = raw_data.get("pods", [])
-            services = raw_data.get("services", [])
+            cluster_info = raw_data.get("cluster_info", {})
+            critical_issues = raw_data.get("critical_issues", {})
+            warnings = raw_data.get("warnings", {})
+            workloads_by_namespace = raw_data.get("workloads_by_namespace", {})
+            external_services = raw_data.get("external_services", {})
+            summary = raw_data.get("summary", {})
+            
+            # 보고서 섹션 구성
+            report_sections = []
+            
+            # 1. 클러스터 정보
+            cluster_name = cluster_info.get("name", "Unknown Cluster")
+            total_nodes = cluster_info.get("total_nodes", 0)
+            nodes = cluster_info.get("nodes", [])
+            
+            report_sections.append({
+                "title": "클러스터 정보",
+                "type": "cluster_info",
+                "data": {
+                    "cluster_name": cluster_name,
+                    "total_nodes": total_nodes,
+                    "nodes": nodes
+                }
+            })
+            
+            # 2. Critical Issues
+            deployment_warnings = critical_issues.get("deployment_warnings", [])
+            pending_pods = critical_issues.get("pending_pods", [])
+            failed_pods = critical_issues.get("failed_pods", [])
+            
+            critical_items = []
+            if deployment_warnings:
+                critical_items.extend([{
+                    "type": "deployment_warning",
+                    "namespace": item["namespace"],
+                    "name": item["name"],
+                    "ready": item["ready"]
+                } for item in deployment_warnings])
+            
+            if pending_pods:
+                critical_items.extend([{
+                    "type": "pending_pod",
+                    "namespace": item["namespace"],
+                    "name": item["name"]
+                } for item in pending_pods])
+            
+            if failed_pods:
+                critical_items.extend([{
+                    "type": "failed_pod",
+                    "namespace": item["namespace"],
+                    "name": item["name"],
+                    "status": item["status"]
+                } for item in failed_pods])
+            
+            if critical_items:
+                report_sections.append({
+                    "title": "긴급 조치 필요 (Critical Issues)",
+                    "type": "critical",
+                    "items": critical_items
+                })
+            
+            # 3. Warnings (높은 재시작 횟수)
+            high_restart_pods = warnings.get("high_restart_pods", [])
+            if high_restart_pods:
+                report_sections.append({
+                    "title": "모니터링 필요 (Warnings)",
+                    "type": "warning",
+                    "items": [{
+                        "namespace": item["namespace"],
+                        "name": item["name"],
+                        "restarts": item["restarts"]
+                    } for item in high_restart_pods]
+                })
+            
+            # 4. 네임스페이스별 워크로드
+            workloads_data = []
+            for ns, workload in workloads_by_namespace.items():
+                if workload.get("deployments", 0) > 0 or workload.get("pods", 0) > 0:
+                    workloads_data.append({
+                        "namespace": ns,
+                        "deployments": workload.get("deployments", 0),
+                        "pods": workload.get("pods", 0)
+                    })
+            
+            if workloads_data:
+                report_sections.append({
+                    "title": "네임스페이스별 워크로드 (Workloads by Namespace)",
+                    "type": "workloads",
+                    "data": workloads_data
+                })
+            
+            # 5. 외부 서비스
+            load_balancer_services = external_services.get("load_balancer", [])
+            node_port_services = external_services.get("node_port", [])
+            
+            if load_balancer_services or node_port_services:
+                external_data = {}
+                if load_balancer_services:
+                    external_data["load_balancer"] = load_balancer_services
+                if node_port_services:
+                    external_data["node_port"] = node_port_services
+                
+                report_sections.append({
+                    "title": "외부 서비스 (External Services)",
+                    "type": "external_services",
+                    "data": external_data
+                })
+            
+            # 요약 메시지
+            summary_message = f"클러스터 '{cluster_name}': 노드 {total_nodes}개, 네임스페이스 {summary.get('total_namespaces', 0)}개, Deployment {summary.get('total_deployments', 0)}개, Pod {summary.get('total_pods', 0)}개"
+            
+            if critical_items:
+                summary_message += f" | ⚠️ 긴급 이슈 {len(critical_items)}개"
+            if high_restart_pods:
+                summary_message += f" | 경고 {len(high_restart_pods)}개"
             
             return {
                 "type": "overview",
-                "summary": f"{namespace} 네임스페이스 현황: Deployment {len(deployments)}개, Pod {len(pods)}개, Service {len(services)}개",
+                "summary": summary_message,
                 "data": {
                     "formatted": {
-                        "namespace": namespace,
-                        "deployments": deployments,
-                        "pods": pods,
-                        "services": services
+                        "report_sections": report_sections,
+                        "summary": summary
                     },
                     "raw": raw_data
                 },
                 "metadata": {
-                    "namespace": namespace,
-                    "deployment_count": len(deployments),
-                    "pod_count": len(pods),
-                    "service_count": len(services)
+                    "cluster_name": cluster_name,
+                    "total_nodes": total_nodes,
+                    "total_namespaces": summary.get("total_namespaces", 0),
+                    "total_deployments": summary.get("total_deployments", 0),
+                    "total_pods": summary.get("total_pods", 0),
+                    "total_services": summary.get("total_services", 0),
+                    "critical_issues_count": len(critical_items),
+                    "warnings_count": len(high_restart_pods)
                 }
             }
         except Exception as e:

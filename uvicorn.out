@@ -1,0 +1,20 @@
+[32m2025-10-28 16:24:47 - app.core.logging_config - INFO - 로깅 시스템이 초기화되었습니다[0m
+2025-10-28 16:24:47 [info     ] Initializing database: sqlite:///./data/klepaas.db
+2025-10-28 16:24:47 [info     ] Database tables created successfully
+2025-10-28 16:24:47 [info     ] Database initialized successfully
+2025-10-28 16:24:47 [info     ] kubeconfig_loaded_successfully config_file=/Users/yoon/.kube/nks-kubeconfig.yaml
+2025-10-28 16:24:47 [info     ] Deployment monitor manager initialized
+2025-10-28 16:24:47 [info     ] event_handler_added            handler_count=1 resource_type=deployment
+2025-10-28 16:24:47 [info     ] All services initialized successfully
+INFO:     Started server process [17088]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+2025-10-28 16:35:43 [info     ] Shutting down application...
+2025-10-28 16:35:43 [info     ] all_watches_stopped
+2025-10-28 16:35:43 [info     ] Kubernetes Watcher stopped successfully
+2025-10-28 16:35:43 [info     ] Application shutdown complete
+INFO:     Application shutdown complete.
+INFO:     Finished server process [17088]

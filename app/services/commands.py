@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import os
+import subprocess
 import asyncio
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -24,6 +26,8 @@ logger = structlog.get_logger(__name__)
 
 class CommandRequest(BaseModel):
     command: str = Field(min_length=1)
+    # 리소스 타입 구분 (status 명령어용)
+    resource_type: str = Field(default="pod")  # pod, service, deployment
     # 리소스 타입별 명확한 필드 분리
     pod_name: str = Field(default="")          # Pod 관련 명령어용
     deployment_name: str = Field(default="")   # Deployment 관련 명령어용
@@ -40,7 +44,7 @@ class CommandRequest(BaseModel):
     target_commit_sha: str = Field(default="") # 롤백할 커밋 SHA
     steps_back: int = Field(default=0, ge=0)   # 몇 번 전으로 롤백할지
     # 비용 분석 관련 필드
-    analysis_type: str = Field(default="usage")  # usage, optimization, forecast   # 몇 번 전으로 롤백할지
+    analysis_type: str = Field(default="usage")  # usage, optimization, forecast
 
 
 @dataclass
@@ -146,13 +150,54 @@ def plan_command(req: CommandRequest) -> CommandPlan:
         )
     
     elif command == "status":
-        # 리소스 이름이 명시되지 않았을 때 유효성 검사
-        if not req.pod_name or req.pod_name.strip() == "":
-            raise ValueError("상태 확인 명령어에는 리소스 이름을 명시해야 합니다. 예: 'chat-app 상태 보여줘'")
-        return CommandPlan(
-            tool="k8s_get_status",
-            args={"name": resource_name, "namespace": ns},
-        )
+        resource_type = req.resource_type or "pod"
+        # 입력 이름 접미사로 리소스 타입 자동 판별 (-deploy, -svc)
+        inferred_name = req.pod_name or req.deployment_name or req.service_name or ""
+        if resource_type == "pod" and inferred_name:
+            if inferred_name.endswith("-deploy"):
+                resource_type = "deployment"
+                # deployment_name 비어있으면 채워줌
+                if not req.deployment_name:
+                    req.deployment_name = inferred_name
+            elif inferred_name.endswith("-svc"):
+                resource_type = "service"
+                # service_name 비어있으면 채워줌
+                if not req.service_name:
+                    req.service_name = inferred_name
+        
+        if resource_type == "pod":
+            if not req.pod_name or req.pod_name.strip() == "":
+                raise ValueError(
+                    "파드 상태를 확인하려면 앱(파드) 이름이 필요합니다. "
+                    "예시: 'k-le-paas-test01 상태' 또는 'K-Le-PaaS/test01 상태'. "
+                    "이름이 기억나지 않으면 '파드 목록 보여줘'로 먼저 확인하세요."
+                )
+            return CommandPlan(
+                tool="k8s_get_pod_status",
+                args={"name": req.pod_name, "namespace": ns},
+            )
+        
+        elif resource_type == "service":
+            if not req.service_name or req.service_name.strip() == "":
+                raise ValueError(
+                    "Service 상태를 확인하려면 서비스 이름을 명시해야 합니다. "
+                    "예: 'K-Le-PaaS/test01 서비스 상태'"
+                )
+            return CommandPlan(
+                tool="k8s_get_service_status",
+                args={"name": req.service_name, "namespace": ns},
+            )
+        
+        elif resource_type == "deployment":
+            if not req.deployment_name or req.deployment_name.strip() == "":
+                raise ValueError(
+                    "Deployment 상태를 확인하려면 배포 이름을 명시해야 합니다. "
+                    "예: 'K-Le-PaaS/test01 디플로이먼트 상태'"
+                )
+            return CommandPlan(
+                tool="k8s_get_deployment_status",
+                args={"name": req.deployment_name, "namespace": ns},
+            )
     
     elif command == "logs":
         # 리소스 이름이 명시되지 않았을 때 유효성 검사
@@ -214,14 +259,14 @@ def plan_command(req: CommandRequest) -> CommandPlan:
     
     elif command == "list_deployments":
         return CommandPlan(
-            tool="k8s_list_all_deployments",
-            args={},
+            tool="k8s_list_deployments",
+            args={"namespace": ns},
         )
     
     elif command == "list_services":
         return CommandPlan(
-            tool="k8s_list_all_services",
-            args={},
+            tool="k8s_list_services",
+            args={"namespace": ns},
         )
     
     elif command == "list_ingresses":
@@ -517,8 +562,14 @@ async def _execute_raw_command(plan: CommandPlan) -> Dict[str, Any]:
     if plan.tool == "scale":
         return await _execute_scale(plan.args)
 
-    if plan.tool == "k8s_get_status":
-        return await _execute_get_status(plan.args)
+    if plan.tool == "k8s_get_pod_status":
+        return await _execute_get_pod_status(plan.args)
+
+    if plan.tool == "k8s_get_service_status":
+        return await _execute_get_service_status(plan.args)
+
+    if plan.tool == "k8s_get_deployment_status":
+        return await _execute_get_deployment_status(plan.args)
 
     if plan.tool == "k8s_get_logs":
         return await _execute_get_logs(plan.args)
@@ -546,6 +597,8 @@ async def _execute_raw_command(plan: CommandPlan) -> Dict[str, Any]:
 
     if plan.tool == "k8s_list_all_services":
         return await _execute_list_all_services(plan.args)
+    if plan.tool == "k8s_list_services":
+        return await _execute_list_services(plan.args)
 
     if plan.tool == "k8s_list_all_ingresses":
         return await _execute_list_all_ingresses(plan.args)
@@ -597,6 +650,9 @@ def _format_pod_statuses(pods: list, include_labels: bool = True, include_creati
             "ready": False,
             "restarts": 0,
             "node": pod.spec.node_name if pod.spec else None,
+            "problem": False,  # Ready 미달이나 비정상 상태 플래그
+            "problem_reason": None,
+            "problem_message": None,
         }
         
         # 조건부 필드 추가
@@ -613,69 +669,131 @@ def _format_pod_statuses(pods: list, include_labels: bool = True, include_creati
                 age = now - pod.metadata.creation_timestamp
                 pod_status["age"] = str(age).split('.')[0]  # 초 단위 제거
         
-        # Container 상태 체크
+        # Container 상태 체크 및 문제 원인(reason/message) 추출
         if pod.status.container_statuses:
             ready_count = 0
             total_count = len(pod.status.container_statuses)
             total_restarts = 0
+            first_reason = None
+            first_message = None
             
             for container_status in pod.status.container_statuses:
                 if container_status.ready:
                     ready_count += 1
                 total_restarts += container_status.restart_count
+                try:
+                    # waiting 상태 사유 우선, 없으면 terminated 사유 사용
+                    if container_status.state and container_status.state.waiting:
+                        if not first_reason:
+                            first_reason = getattr(container_status.state.waiting, 'reason', None)
+                            first_message = getattr(container_status.state.waiting, 'message', None)
+                    elif container_status.state and container_status.state.terminated:
+                        if not first_reason:
+                            first_reason = getattr(container_status.state.terminated, 'reason', None)
+                            first_message = getattr(container_status.state.terminated, 'message', None)
+                except Exception:
+                    pass
             
             pod_status["ready"] = f"{ready_count}/{total_count}"
             pod_status["restarts"] = total_restarts
+            # 문제 플래그 및 사유
+            if pod.status.phase != "Running" or ready_count < total_count:
+                pod_status["problem"] = True
+                pod_status["problem_reason"] = first_reason or pod.status.phase
+                pod_status["problem_message"] = first_message
         
         pod_statuses.append(pod_status)
     
     return pod_statuses
 
 
+# 파드 이름이 레플리카셋 해시 등이 포함된 "정확한 파드 이름"처럼 보이는지 간단히 판단
+def _looks_like_exact_pod_name(text: str) -> bool:
+    try:
+        # 소문자/숫자/하이픈 조합, 끝에 -<hash> 형태가 1회 이상 나타나는 일반적 파드 네이밍 패턴
+        return bool(re.match(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(?:-[a-z0-9]{4,})+$", text))
+    except Exception:
+        return False
+
 # ========================================
 # Kubernetes 명령어 실행 핸들러
 # ========================================
 
-async def _execute_get_status(args: Dict[str, Any]) -> Dict[str, Any]:
+async def _execute_get_pod_status(args: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Pod 상태 조회 (status 명령어)
-    예: "내 앱 상태 보여줘", "chat-app 상태 어때?"
-    "app" 호칭이 들어오면 라벨 셀렉터 app=<name>으로 Pod 조회
+    Pod 상태 조회 (status 명령어, 리소스 타입: pod)
+    예: "k-le-paas-test01 상태", "K-Le-PaaS/test01 상태"
     """
     name = args["name"]
     namespace = args["namespace"]
     
     try:
         core_v1 = get_core_v1_api()
-        
-        # Pod 목록 조회 (라벨 셀렉터 사용: app=<name>)
+
+        # 1) 정확한 파드 이름으로 먼저 조회 시도
+        try:
+            pod = core_v1.read_namespaced_pod(name=name, namespace=namespace)
+            pod_statuses = _format_pod_statuses([pod], include_labels=True, include_creation_time=True)
+            problem_pods = [p for p in pod_statuses if p.get("problem")]
+            return {
+                "status": "success",
+                "message": f"Pod '{name}' 상태 조회 완료",
+                "resource_type": "pod",
+                "namespace": namespace,
+                "total_pods": 1,
+                "pods": pod_statuses,
+                "problem_pods": problem_pods,
+                "exact_match": True,
+            }
+        except ApiException as e:
+            # 404일 때만 레이블 조회로 폴백, 다른 오류는 그대로 보고
+            if e.status and e.status != 404:
+                return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
+        except Exception:
+            # 기타 예외는 레이블 폴백 시도
+            pass
+
+        # 2) 폴백: app 라벨로 파드 목록 조회
         label_selector = f"app={name}"
         pods = core_v1.list_namespaced_pod(namespace=namespace, label_selector=label_selector)
-        
+
         if not pods.items:
+            # 네임스페이스별 안내 문구
+            if namespace == "default":
+                command = "파드 목록 보여줘"
+            else:
+                command = f"{namespace} 네임스페이스에 있는 모든 파드 목록 보여줘"
+
+            exact_hint = ""
+            if _looks_like_exact_pod_name(name):
+                exact_hint = f"입력한 '{name}' 이름의 단일 파드를 찾을 수 없습니다.\n"
+
             return {
-                "status": "error", 
-                "message": f"라벨 'app={name}'로 Pod를 찾을 수 없습니다. 앱 이름을 확인해주세요."
+                "status": "error",
+                "message": (
+                    f"{exact_hint}라벨 'app={name}'로 Pod를 찾을 수 없습니다.\n"
+                    f"다음 명령어로 사용 가능한 파드를 확인하세요\n"
+                    f"- '{command}'"
+                )
             }
-        
-        # Pod 상태 정보 추출 (헬퍼 함수 사용)
+
+        # Pod 상태 정보 추출 (레이블 기반)
         pod_statuses = _format_pod_statuses(pods.items, include_labels=True, include_creation_time=True)
-        
+        problem_pods = [p for p in pod_statuses if p.get("problem")]
+
         return {
             "status": "success",
             "message": f"라벨 'app={name}'로 {len(pod_statuses)}개 Pod 조회 완료",
+            "resource_type": "pod",
             "label_selector": label_selector,
             "namespace": namespace,
             "total_pods": len(pod_statuses),
-            "pods": pod_statuses
+            "pods": pod_statuses,
+            "problem_pods": problem_pods
         }
-        
-    except ApiException as e:
-        if e.status == 404:
-            return {"status": "error", "message": f"Deployment '{name}'을 찾을 수 없습니다."}
-        return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
+
     except Exception as e:
-        return {"status": "error", "message": f"상태 조회 실패: {str(e)}"}
+        return {"status": "error", "message": f"Pod 상태 조회 실패: {str(e)}"}
 
 
 async def _execute_get_logs(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1179,145 +1297,282 @@ async def _execute_list_pods(args: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _execute_get_overview(args: Dict[str, Any]) -> Dict[str, Any]:
     """
-    통합 대시보드 조회 (overview 명령어)
-    예: "전체 상황 보여줘", "대시보드 확인", "모든 리소스 상태"
+    클러스터 전체 현황 보고서 조회 (overview 명령어)
+    예: "클러스터 전체 현황 보여줘", "클러스터 상태 보고서", "전체 리소스 상태 확인"
     
-    Deployment, Pod, Service, Ingress 모든 리소스를 한번에 조회
+    모든 네임스페이스의 Deployment, Pod, Service를 조회하여 보고서 형식으로 제공
     """
-    namespace = args.get("namespace", "default")
-    
     try:
         apps_v1 = get_apps_v1_api()
         core_v1 = get_core_v1_api()
-        networking_v1 = get_networking_v1_api()
         
-        overview_data = {
-            "namespace": namespace,
-            "deployments": [],
-            "pods": [],
-            "services": [],
-            "ingresses": []
-        }
-        
-        # 1. Deployments 조회
+        # 클러스터 정보 (노드 조회)
         try:
-            deployments = apps_v1.list_namespaced_deployment(namespace=namespace)
-            for deployment in deployments.items:
-                deployment_info = {
-                    "name": deployment.metadata.name,
-                    "replicas": {
-                        "desired": deployment.spec.replicas,
-                        "current": deployment.status.replicas or 0,
-                        "ready": deployment.status.ready_replicas or 0,
-                        "available": deployment.status.available_replicas or 0,
-                    },
-                    "image": deployment.spec.template.spec.containers[0].image if deployment.spec.template.spec.containers else None,
-                    "status": "Running" if deployment.status.ready_replicas == deployment.spec.replicas else "Pending"
-                }
-                overview_data["deployments"].append(deployment_info)
-        except ApiException as e:
-            if e.status != 404:  # 404는 네임스페이스가 없는 경우
-                raise
+            nodes = core_v1.list_node()
+            cluster_nodes = []
+            for node in nodes.items:
+                # Node Ready 상태 확인
+                ready_status = "NotReady"
+                if node.status.conditions:
+                    for condition in node.status.conditions:
+                        if condition.type == "Ready" and condition.status == "True":
+                            ready_status = "Ready"
+                            break
+                
+                cluster_nodes.append({
+                    "name": node.metadata.name,
+                    "status": ready_status
+                })
+        except Exception as e:
+            logger.error(f"Failed to get nodes: {e}")
+            cluster_nodes = []
         
-        # 2. Pods 조회
+        # 클러스터 이름 추출 (kubectl config current-context)
+        cluster_name = "Unknown Cluster"
         try:
-            pods = core_v1.list_namespaced_pod(namespace=namespace)
-            # Pod 상태 정보 추출 (헬퍼 함수 사용)
-            overview_data["pods"] = _format_pod_statuses(pods.items, include_labels=False, include_creation_time=False, include_namespace=False, include_age=False)
-        except ApiException as e:
-            if e.status != 404:
-                raise
+            # kubeconfig 파일 경로 가져오기
+            kubeconfig_path = os.getenv('NKS')  # 환경 변수에서 kubeconfig 경로 가져오기
+            if kubeconfig_path:
+                # kubectl config current-context --kubeconfig $NKS 실행
+                result = subprocess.run(
+                    ['kubectl', 'config', 'current-context', '--kubeconfig', kubeconfig_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    context_name = result.stdout.strip()
+                    # UUID 형식 제거 (예: "nks_kr_contest-cluster-27_69b2edb8-2975-4cb4-9dcb-68e3902a68ec" -> "nks_kr_contest-cluster")
+                    
+                    # 1. 표준 UUID 패턴: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+                    # 2. 마지막 underscore 뒤의 UUID 부분 제거
+                    # 3. 하이픈과 숫자로 구성된 끝 부분 제거
+                    
+                    # 표준 UUID 형식 제거 (예: 69b2edb8-2975-4cb4-9dcb-68e3902a68ec)
+                    uuid_pattern = r'_[a-fA-F0-9]{8}(-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$'
+                    cluster_name = re.sub(uuid_pattern, '', context_name)
+                    
+                    # 혹시 남아있을 수 있는 숫자로 끝나는 패턴 제거 (예: -27)
+                    cluster_name = re.sub(r'-\d+$', '', cluster_name)
+                    
+                    # 하이픈으로 끝나면 제거
+                    cluster_name = cluster_name.rstrip('-')
+                    cluster_name = cluster_name.rstrip('_')
+            else:
+                # 환경 변수가 없으면 일반 kubectl 사용
+                result = subprocess.run(
+                    ['kubectl', 'config', 'current-context'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    context_name = result.stdout.strip()
+                    # UUID 형식 제거
+                    # 표준 UUID 형식 제거 (예: 69b2edb8-2975-4cb4-9dcb-68e3902a68ec)
+                    uuid_pattern = r'_[a-fA-F0-9]{8}(-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$'
+                    cluster_name = re.sub(uuid_pattern, '', context_name)
+                    
+                    # 혹시 남아있을 수 있는 숫자로 끝나는 패턴 제거 (예: -27)
+                    cluster_name = re.sub(r'-\d+$', '', cluster_name)
+                    
+                    # 하이픈 또는 underscore로 끝나면 제거
+                    cluster_name = cluster_name.rstrip('-')
+                    cluster_name = cluster_name.rstrip('_')
+        except Exception as e:
+            logger.warning(f"Failed to get cluster name: {e}")
+            cluster_name = "K-Le-PaaS Cluster"  # 기본값
         
-        # 3. Services 조회
-        try:
-            services = core_v1.list_namespaced_service(namespace=namespace)
-            for service in services.items:
-                service_info = {
-                    "name": service.metadata.name,
-                    "type": service.spec.type,
-                    "cluster_ip": service.spec.cluster_ip,
-                    "ports": []
-                }
-                
-                # Service 포트 정보
-                if service.spec.ports:
-                    for port in service.spec.ports:
-                        port_info = {
-                            "port": port.port,
-                            "target_port": port.target_port,
-                            "protocol": port.protocol or "TCP"
-                        }
-                        if service.spec.type == "NodePort" and port.node_port:
-                            port_info["node_port"] = port.node_port
-                        service_info["ports"].append(port_info)
-                
-                overview_data["services"].append(service_info)
-        except ApiException as e:
-            if e.status != 404:
-                raise
+        # 모든 네임스페이스 조회
+        namespaces = core_v1.list_namespace()
+        namespace_list = [ns.metadata.name for ns in namespaces.items]
         
-        # 4. Ingresses 조회
-        try:
-            ingresses = networking_v1.list_namespaced_ingress(namespace=namespace)
-            for ingress in ingresses.items:
-                ingress_info = {
-                    "name": ingress.metadata.name,
-                    "hosts": [],
-                    "addresses": []
-                }
-                
-                # Ingress 호스트 정보
-                if ingress.spec.rules:
-                    for rule in ingress.spec.rules:
-                        if rule.host:
-                            ingress_info["hosts"].append(rule.host)
-                
-                # Ingress 주소 정보
-                if ingress.status.load_balancer.ingress:
-                    for lb_ingress in ingress.status.load_balancer.ingress:
-                        address = lb_ingress.ip or lb_ingress.hostname
-                        if address:
-                            ingress_info["addresses"].append(address)
-                
-                overview_data["ingresses"].append(ingress_info)
-        except ApiException as e:
-            if e.status != 404:
-                raise
+        # 모든 네임스페이스의 리소스 수집
+        all_deployments = []
+        all_pods = []
+        all_services = []
+        
+        # Critical Issues 수집
+        deployment_warnings = []  # Ready 비율이 100% 미만
+        pending_pods = []  # Pending 상태
+        failed_pods = []  # Failed/CrashLoopBackOff 상태
+        high_restart_pods = []  # 재시작 10회 이상
+        
+        # 네임스페이스별 워크로드 집계
+        workloads_by_namespace = {}
+        
+        # 외부 서비스 목록
+        load_balancer_services = []
+        node_port_services = []
+        
+        for namespace_name in namespace_list:
+            workloads_by_namespace[namespace_name] = {
+                "deployments": 0,
+                "pods": 0
+            }
+            
+            # Deployments 조회
+            try:
+                deployments = apps_v1.list_namespaced_deployment(namespace=namespace_name)
+                for deployment in deployments.items:
+                    ready_count = deployment.status.ready_replicas or 0
+                    desired_count = deployment.spec.replicas
+                    
+                    deployment_data = {
+                        "name": deployment.metadata.name,
+                        "namespace": namespace_name,
+                        "ready": f"{ready_count}/{desired_count}",
+                        "status": "Running" if ready_count == desired_count else "Pending"
+                    }
+                    
+                    all_deployments.append(deployment_data)
+                    workloads_by_namespace[namespace_name]["deployments"] += 1
+                    
+                    # Critical: Ready 비율이 100% 미만
+                    if ready_count < desired_count:
+                        deployment_warnings.append({
+                            "namespace": namespace_name,
+                            "name": deployment.metadata.name,
+                            "ready": f"{ready_count}/{desired_count}"
+                        })
+            except ApiException:
+                pass  # 네임스페이스에 접근 권한이 없을 수 있음
+            
+            # Pods 조회
+            try:
+                pods = core_v1.list_namespaced_pod(namespace=namespace_name)
+                for pod in pods.items:
+                    # Pod 상태 정보 추출
+                    phase = pod.status.phase
+                    restart_count = 0
+                    if pod.status.container_statuses:
+                        for container_status in pod.status.container_statuses:
+                            restart_count += container_status.restart_count
+                    
+                    pod_data = {
+                        "name": pod.metadata.name,
+                        "namespace": namespace_name,
+                        "phase": phase,
+                        "restarts": restart_count,
+                        "ready": "0/1",
+                        "age": None
+                    }
+                    
+                    # Ready 상태 계산
+                    if pod.status.container_statuses:
+                        ready_count = sum(1 for cs in pod.status.container_statuses if cs.ready)
+                        total_count = len(pod.status.container_statuses)
+                        pod_data["ready"] = f"{ready_count}/{total_count}"
+                    
+                    # Age 계산
+                    if pod.metadata.creation_timestamp:
+                        now = datetime.now(timezone.utc)
+                        age = now - pod.metadata.creation_timestamp
+                        pod_data["age"] = str(age).split('.')[0]
+                    
+                    all_pods.append(pod_data)
+                    workloads_by_namespace[namespace_name]["pods"] += 1
+                    
+                    # Critical: Pending/Failed Pod
+                    if phase == "Pending":
+                        pending_pods.append({
+                            "namespace": namespace_name,
+                            "name": pod.metadata.name,
+                            "status": phase
+                        })
+                    elif phase in ["Failed", "CrashLoopBackOff"] or any(
+                        cs.state.waiting and cs.state.waiting.reason == "CrashLoopBackOff"
+                        for cs in (pod.status.container_statuses or [])
+                    ):
+                        failed_pods.append({
+                            "namespace": namespace_name,
+                            "name": pod.metadata.name,
+                            "status": phase
+                        })
+                    
+                    # Warning: 높은 재시작 횟수 (10회 이상)
+                    if restart_count >= 10:
+                        high_restart_pods.append({
+                            "namespace": namespace_name,
+                            "name": pod.metadata.name,
+                            "restarts": restart_count
+                        })
+            except ApiException:
+                pass  # 네임스페이스에 접근 권한이 없을 수 있음
+            
+            # Services 조회
+            try:
+                services = core_v1.list_namespaced_service(namespace=namespace_name)
+                for service in services.items:
+                    service_type = service.spec.type
+                    
+                    service_data = {
+                        "name": service.metadata.name,
+                        "namespace": namespace_name,
+                        "type": service_type,
+                        "cluster_ip": service.spec.cluster_ip
+                    }
+                    
+                    all_services.append(service_data)
+                    
+                    # 외부 서비스 분류
+                    if service_type == "LoadBalancer":
+                        load_balancer_services.append({
+                            "name": service.metadata.name,
+                            "namespace": namespace_name
+                        })
+                    elif service_type == "NodePort":
+                        node_port_services.append({
+                            "name": service.metadata.name,
+                            "namespace": namespace_name
+                        })
+            except ApiException:
+                pass  # 네임스페이스에 접근 권한이 없을 수 있음
         
         # 요약 통계
         summary = {
-            "total_deployments": len(overview_data["deployments"]),
-            "total_pods": len(overview_data["pods"]),
-            "total_services": len(overview_data["services"]),
-            "total_ingresses": len(overview_data["ingresses"]),
-            "running_pods": len([p for p in overview_data["pods"] if p["phase"] == "Running"]),
-            "ready_deployments": len([d for d in overview_data["deployments"] if d["status"] == "Running"])
+            "cluster_name": cluster_name,
+            "total_nodes": len(cluster_nodes),
+            "total_namespaces": len(namespace_list),
+            "total_deployments": len(all_deployments),
+            "total_pods": len(all_pods),
+            "total_services": len(all_services),
+            "running_pods": len([p for p in all_pods if p["phase"] == "Running"]),
+            "critical_deployment_issues": len(deployment_warnings),
+            "pending_pod_issues": len(pending_pods),
+            "failed_pod_issues": len(failed_pods),
+            "high_restart_issues": len(high_restart_pods)
         }
         
         return {
             "status": "success",
-            "message": f"'{namespace}' 네임스페이스 통합 대시보드 조회 완료",
-            "summary": summary,
-            "resources": overview_data
+            "cluster_info": {
+                "name": cluster_name,
+                "total_nodes": len(cluster_nodes),
+                "nodes": cluster_nodes
+            },
+            "namespaces": namespace_list,
+            "critical_issues": {
+                "deployment_warnings": deployment_warnings,
+                "pending_pods": pending_pods,
+                "failed_pods": failed_pods
+            },
+            "warnings": {
+                "high_restart_pods": high_restart_pods
+            },
+            "workloads_by_namespace": workloads_by_namespace,
+            "external_services": {
+                "load_balancer": load_balancer_services,
+                "node_port": node_port_services
+            },
+            "summary": summary
         }
         
-    except ApiException as e:
-        if e.status == 404:
-            return {
-                "status": "error",
-                "namespace": namespace,
-                "message": f"네임스페이스 '{namespace}'가 존재하지 않습니다. 네임스페이스 이름을 확인해주세요."
-            }
-        return {
-            "status": "error",
-            "namespace": namespace,
-            "message": f"통합 대시보드 조회 실패: {e.reason}"
-        }
     except Exception as e:
+        logger.error(f"Failed to get overview: {e}")
         return {
             "status": "error",
-            "namespace": namespace,
-            "message": f"통합 대시보드 조회 실패: {str(e)}"
+            "message": f"클러스터 현황 조회 실패: {str(e)}"
         }
 
 
@@ -1404,6 +1659,56 @@ async def _execute_list_all_services(args: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         return {"status": "error", "message": f"전체 Service 조회 실패: {str(e)}"}
 
+
+async def _execute_list_services(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    네임스페이스의 Service 목록 조회 (list_services - namespaced)
+    예: "default 네임스페이스 service 목록 보여줘"
+    """
+    namespace = args.get("namespace", "default")
+    try:
+        core_v1 = get_core_v1_api()
+        services = core_v1.list_namespaced_service(namespace=namespace)
+
+        service_list = []
+        for service in services.items:
+            service_info = {
+                "name": service.metadata.name,
+                "namespace": service.metadata.namespace,
+                "type": service.spec.type,
+                "cluster_ip": service.spec.cluster_ip,
+                "ports": []
+            }
+            if service.spec.ports:
+                for port in service.spec.ports:
+                    port_info = {
+                        "port": port.port,
+                        "target_port": port.target_port,
+                        "protocol": port.protocol or "TCP"
+                    }
+                    if service.spec.type == "NodePort" and port.node_port:
+                        port_info["node_port"] = port.node_port
+                    service_info["ports"].append(port_info)
+
+            service_list.append(service_info)
+
+        return {
+            "status": "success",
+            "message": f"'{namespace}' 네임스페이스의 Service 목록 조회 완료",
+            "namespace": namespace,
+            "total_services": len(service_list),
+            "services": service_list
+        }
+    except ApiException as e:
+        if e.status == 404:
+            return {
+                "status": "error",
+                "namespace": namespace,
+                "message": f"네임스페이스 '{namespace}'가 존재하지 않습니다. 네임스페이스 이름을 확인해주세요."
+            }
+        return {"status": "error", "message": f"Kubernetes API 오류: {e.reason}"}
+    except Exception as e:
+        return {"status": "error", "message": f"Service 목록 조회 실패: {str(e)}"}
 
 async def _execute_list_all_ingresses(args: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -2011,5 +2316,324 @@ async def _execute_get_deployment(args: Dict[str, Any]) -> Dict[str, Any]:
             "namespace": namespace,
             "message": f"Deployment 조회 실패: {str(e)}"
         }
+
+
+async def _execute_get_service_status(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Service 상태 조회 (status 명령어, 리소스 타입: service)
+    예: "K-Le-PaaS/test01 서비스 상태"
+    """
+    name = args["name"]
+    namespace = args["namespace"]
+    
+    try:
+        core_v1 = get_core_v1_api()
+
+        def build_service_info(svc):
+            info = {
+                "name": svc.metadata.name,
+                "namespace": svc.metadata.namespace,
+                "type": svc.spec.type,
+                "cluster_ip": svc.spec.cluster_ip,
+                "ports": [],
+                "selector": svc.spec.selector or {},
+                "creation_timestamp": svc.metadata.creation_timestamp.isoformat() if svc.metadata.creation_timestamp else None
+            }
+            if svc.spec.ports:
+                for port in svc.spec.ports:
+                    info["ports"].append({
+                        "port": port.port,
+                        "target_port": str(port.target_port),
+                        "protocol": port.protocol or "TCP"
+                    })
+            return info
+
+        # 1) 정확한 서비스 이름으로 먼저 조회
+        try:
+            service = core_v1.read_namespaced_service(name=name, namespace=namespace)
+            service_info = build_service_info(service)
+
+            # Endpoints 조회 (연결된 Pod 확인)
+            try:
+                endpoints = core_v1.read_namespaced_endpoints(name=service.metadata.name, namespace=namespace)
+                ready_addresses = 0
+                if endpoints.subsets:
+                    for subset in endpoints.subsets:
+                        ready_addresses += len(subset.addresses or [])
+                service_info["ready_endpoints"] = ready_addresses
+            except:
+                service_info["ready_endpoints"] = 0
+
+            return {
+                "status": "success",
+                "message": f"Service '{service.metadata.name}' 상태 조회 완료",
+                "resource_type": "service",
+                "namespace": namespace,
+                "service": service_info,
+                "exact_match": True,
+            }
+        except ApiException as ex:
+            if ex.status and ex.status != 404:
+                return {"status": "error", "message": f"Kubernetes API 오류: {ex.reason}"}
+        except Exception:
+            pass
+
+        # 2) 이름 변형 후보 재시도 (예: -svc 접미사 추가/제거)
+        candidates = []
+        if name.endswith("-svc"):
+            base = name[:-4]
+            if base:
+                candidates.append(base)
+        else:
+            candidates.append(f"{name}-svc")
+
+        for cand in candidates:
+            try:
+                svc = core_v1.read_namespaced_service(name=cand, namespace=namespace)
+                service_info = build_service_info(svc)
+                try:
+                    endpoints = core_v1.read_namespaced_endpoints(name=svc.metadata.name, namespace=namespace)
+                    ready_addresses = 0
+                    if endpoints.subsets:
+                        for subset in endpoints.subsets:
+                            ready_addresses += len(subset.addresses or [])
+                    service_info["ready_endpoints"] = ready_addresses
+                except:
+                    service_info["ready_endpoints"] = 0
+
+                return {
+                    "status": "success",
+                    "message": f"Service '{cand}' 상태 조회 완료 (입력명: '{name}')",
+                    "resource_type": "service",
+                    "namespace": namespace,
+                    "service": service_info,
+                    "exact_match": True,
+                    "resolved_from": name,
+                }
+            except ApiException as ex2:
+                if ex2.status and ex2.status != 404:
+                    return {"status": "error", "message": f"Kubernetes API 오류: {ex2.reason}"}
+            except Exception:
+                pass
+
+        # 3) 폴백: 라벨 셀렉터(app=이름 또는 base)로 서비스 탐색
+        label_names = [name]
+        if name.endswith("-svc"):
+            label_names.append(name[:-4])
+
+        matched_services = []
+        for ln in label_names:
+            try:
+                svc_list = core_v1.list_namespaced_service(namespace=namespace, label_selector=f"app={ln}")
+                for svc in svc_list.items or []:
+                    matched_services.append(svc)
+            except ApiException:
+                pass
+
+        if len(matched_services) == 1:
+            svc = matched_services[0]
+            service_info = build_service_info(svc)
+            try:
+                endpoints = core_v1.read_namespaced_endpoints(name=svc.metadata.name, namespace=namespace)
+                ready_addresses = 0
+                if endpoints.subsets:
+                    for subset in endpoints.subsets:
+                        ready_addresses += len(subset.addresses or [])
+                service_info["ready_endpoints"] = ready_addresses
+            except:
+                service_info["ready_endpoints"] = 0
+
+            return {
+                "status": "success",
+                "message": f"라벨 'app={name}'(또는 변형)로 매칭된 Service 상태 조회 완료",
+                "resource_type": "service",
+                "namespace": namespace,
+                "service": service_info,
+                "matched_by_label": True,
+            }
+        elif len(matched_services) > 1:
+            names = ", ".join(s.metadata.name for s in matched_services[:5])
+            more = "" if len(matched_services) <= 5 else f" 외 {len(matched_services)-5}개"
+            if namespace == "default":
+                command = "서비스 목록 보여줘"
+            else:
+                command = f"{namespace} 네임스페이스에 있는 모든 서비스 목록 보여줘"
+            return {
+                "status": "error",
+                "message": (
+                    f"여러 Service가 라벨로 매칭되었습니다: {names}{more}.\n"
+                    f"정확한 이름으로 다시 요청하거나, 다음 명령으로 확인하세요:\n"
+                    f"- '{command}'"
+                )
+            }
+
+        # 4) 최종 에러 메시지 (가이드 포함)
+        if namespace == "default":
+            command = "서비스 목록 보여줘"
+        else:
+            command = f"{namespace} 네임스페이스에 있는 모든 서비스 목록 보여줘"
+
+        return {
+            "status": "error",
+            "message": (
+                f"Service '{name}'을 찾을 수 없습니다.\n"
+                f"- 이름 변형(-svc) 및 라벨(app=name)로도 찾지 못했습니다.\n"
+                f"다음 명령어로 사용 가능한 서비스를 확인하세요\n"
+                f"- '{command}'"
+            )
+        }
+
+    except Exception as e:
+        return {"status": "error", "message": f"Service 상태 조회 실패: {str(e)}"}
+
+
+async def _execute_get_deployment_status(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Deployment 상태 조회 (status 명령어, 리소스 타입: deployment)
+    예: "K-Le-PaaS/test01 디플로이먼트 상태"
+    """
+    name = args["name"]
+    namespace = args["namespace"]
+    
+    try:
+        apps_v1 = get_apps_v1_api()
+        core_v1 = get_core_v1_api()
+
+        def build_deployment_info(dep):
+            info = {
+                "name": dep.metadata.name,
+                "namespace": dep.metadata.namespace,
+                "replicas": {
+                    "desired": dep.spec.replicas,
+                    "current": dep.status.replicas or 0,
+                    "ready": dep.status.ready_replicas or 0,
+                    "available": dep.status.available_replicas or 0,
+                },
+                "conditions": [],
+                "creation_timestamp": dep.metadata.creation_timestamp.isoformat() if dep.metadata.creation_timestamp else None
+            }
+            if dep.status.conditions:
+                for condition in dep.status.conditions:
+                    info["conditions"].append({
+                        "type": condition.type,
+                        "status": condition.status,
+                        "reason": condition.reason,
+                        "message": condition.message
+                    })
+            return info
+
+        def attach_pods(info_obj, dep_name):
+            base = dep_name.replace('-deploy', '')
+            lbl = f"app={base}"
+            pods = core_v1.list_namespaced_pod(namespace=namespace, label_selector=lbl)
+            info_obj["pods"] = _format_pod_statuses(pods.items, include_labels=False, include_creation_time=False)
+
+        # 1) 정확한 배포 이름으로 먼저 시도
+        try:
+            deployment = apps_v1.read_namespaced_deployment(name=name, namespace=namespace)
+            deployment_info = build_deployment_info(deployment)
+            attach_pods(deployment_info, deployment.metadata.name)
+            return {
+                "status": "success",
+                "message": f"Deployment '{deployment.metadata.name}' 상태 조회 완료",
+                "resource_type": "deployment",
+                "namespace": namespace,
+                "deployment": deployment_info,
+                "exact_match": True,
+            }
+        except ApiException as ex:
+            if ex.status and ex.status != 404:
+                return {"status": "error", "message": f"Kubernetes API 오류: {ex.reason}"}
+        except Exception:
+            pass
+
+        # 2) 이름 변형 후보(-deploy 추가/제거) 재시도
+        candidates = []
+        if name.endswith('-deploy'):
+            base = name[:-7]
+            if base:
+                candidates.append(base)
+        else:
+            candidates.append(f"{name}-deploy")
+
+        for cand in candidates:
+            try:
+                dep = apps_v1.read_namespaced_deployment(name=cand, namespace=namespace)
+                deployment_info = build_deployment_info(dep)
+                attach_pods(deployment_info, dep.metadata.name)
+                return {
+                    "status": "success",
+                    "message": f"Deployment '{cand}' 상태 조회 완료 (입력명: '{name}')",
+                    "resource_type": "deployment",
+                    "namespace": namespace,
+                    "deployment": deployment_info,
+                    "exact_match": True,
+                    "resolved_from": name,
+                }
+            except ApiException as ex2:
+                if ex2.status and ex2.status != 404:
+                    return {"status": "error", "message": f"Kubernetes API 오류: {ex2.reason}"}
+            except Exception:
+                pass
+
+        # 3) 폴백: 라벨(app=이름 또는 base)로 Deployment 탐색
+        label_names = [name]
+        if name.endswith('-deploy'):
+            label_names.append(name[:-7])
+
+        matched_deps = []
+        for ln in label_names:
+            try:
+                dep_list = apps_v1.list_namespaced_deployment(namespace=namespace, label_selector=f"app={ln}")
+                for dep in dep_list.items or []:
+                    matched_deps.append(dep)
+            except ApiException:
+                pass
+
+        if len(matched_deps) == 1:
+            dep = matched_deps[0]
+            deployment_info = build_deployment_info(dep)
+            attach_pods(deployment_info, dep.metadata.name)
+            return {
+                "status": "success",
+                "message": f"라벨 'app={name}'(또는 변형)로 매칭된 Deployment 상태 조회 완료",
+                "resource_type": "deployment",
+                "namespace": namespace,
+                "deployment": deployment_info,
+                "matched_by_label": True,
+            }
+        elif len(matched_deps) > 1:
+            names = ", ".join(d.metadata.name for d in matched_deps[:5])
+            more = "" if len(matched_deps) <= 5 else f" 외 {len(matched_deps)-5}개"
+            if namespace == "default":
+                command = "deployment 목록 보여줘"
+            else:
+                command = f"{namespace} 네임스페이스에 있는 모든 deployment 목록 보여줘"
+            return {
+                "status": "error",
+                "message": (
+                    f"여러 Deployment가 라벨로 매칭되었습니다: {names}{more}.\n"
+                    f"정확한 이름으로 다시 요청하거나, 다음 명령으로 확인하세요:\n"
+                    f"- '{command}'"
+                )
+            }
+
+        # 4) 최종 에러 가이드
+        if namespace == "default":
+            command = "deployment 목록 보여줘"
+        else:
+            command = f"{namespace} 네임스페이스에 있는 모든 deployment 목록 보여줘"
+        return {
+            "status": "error",
+            "message": (
+                f"Deployment '{name}'을 찾을 수 없습니다.\n"
+                f"- 이름 변형(-deploy) 및 라벨(app=name)로도 찾지 못했습니다.\n"
+                f"다음 명령어로 사용 가능한 deployment를 확인하세요\n"
+                f"- '{command}'"
+            )
+        }
+
+    except Exception as e:
+        return {"status": "error", "message": f"Deployment 상태 조회 실패: {str(e)}"}
 
 
