@@ -112,7 +112,11 @@ async def process_command(
             
             logger.info(f"Gemini 해석 결과: {gemini_result}")
             
-            # 데이터베이스에 명령 히스토리 저장
+            # Gemini 결과를 CommandRequest로 변환
+            entities = gemini_result.get("entities", {})
+            intent = gemini_result.get("intent", "status")
+
+            # 데이터베이스에 명령 히스토리 저장 (의도/엔티티 추출 후)
             from ...services.command_history import save_command_history
             command_history_response = await save_command_history(
                 db=db,
@@ -123,10 +127,6 @@ async def process_command(
                 user_id=effective_user_id
             )
             command_id = str(command_history_response.id)
-            
-            # Gemini 결과를 CommandRequest로 변환
-            entities = gemini_result.get("entities", {})
-            intent = gemini_result.get("intent", "status")
             
             logger.info(f"Gemini intent: {intent}")
             logger.info(f"Gemini entities: {entities}")
@@ -1117,8 +1117,7 @@ async def confirm_action(
         # 스케일링 명령의 경우 특별 처리
         if pending_action["type"] == "scale":
             # 디버깅을 위한 로그 추가
-            logger.info(f"스케일링 결과 포맷팅 - result: {result}")
-            logger.info(f"스케일링 결과 포맷팅 - params: {params}")
+            logger.info("스케일링 결과 포맷팅 시작", extra={"has_result": isinstance(result, dict), "has_params": isinstance(params, dict)})
             
             # scale_deployment에서 이미 올바른 old_replicas를 반환하므로 추가로 덮어쓰지 않음
             # result.data에서 old_replicas를 추출하여 result에 추가
@@ -1130,23 +1129,21 @@ async def confirm_action(
                 "k8s_result": result,
                 "entities": params
             })
-            logger.info(f"포맷된 결과: {formatted_result}")
+            logger.info("스케일링 포맷 완료", extra={"result_type": formatted_result.get("type", "unknown")})
             result_message = formatted_result.get("summary", "스케일링이 완료되었습니다.")
         # 재시작 명령의 경우 특별 처리
         elif pending_action["type"] == "restart":
-            logger.info(f"재시작 결과 포맷팅 - result: {result}")
-            logger.info(f"재시작 결과 포맷팅 - params: {params}")
+            logger.info("재시작 결과 포맷팅 시작", extra={"has_result": isinstance(result, dict), "has_params": isinstance(params, dict)})
             
             formatted_result = formatter.format_restart({
                 "k8s_result": result,
                 "entities": params
             })
-            logger.info(f"포맷된 결과: {formatted_result}")
+            logger.info("재시작 포맷 완료", extra={"result_type": formatted_result.get("type", "unknown")})
             result_message = formatted_result.get("summary", "재시작이 완료되었습니다.")
         # 롤백 명령의 경우 특별 처리
         elif pending_action["type"] == "rollback":
-            logger.info(f"롤백 결과 포맷팅 - result: {result}")
-            logger.info(f"롤백 결과 포맷팅 - params: {params}")
+            logger.info("롤백 결과 포맷팅 시작", extra={"has_result": isinstance(result, dict), "has_params": isinstance(params, dict)})
             
             # result 구조 확인 및 실제 롤백 데이터 추출
             rollback_data = result
@@ -1166,7 +1163,7 @@ async def confirm_action(
                 "k8s_result": rollback_data,
                 "entities": params
             })
-            logger.info(f"포맷된 결과: {formatted_result}")
+            logger.info("롤백 포맷 완료", extra={"result_type": formatted_result.get("type", "unknown")})
             result_message = formatted_result.get("summary", "롤백이 완료되었습니다.")
         else:
             result_message = f"작업이 완료되었습니다: {result.get('message', '')}"

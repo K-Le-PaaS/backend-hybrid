@@ -100,7 +100,6 @@ class GeminiClient(LLMClient):
 
             # namespace 기본값 포함이 필요한 명령어들
             if command in ("status", "endpoint", "restart", "overview", "list_pods", "logs", "get_service", "get_deployment", "cost_analysis", "list_endpoints", "list_deployments", "list_services"):
-            if command in ("endpoint", "restart", "overview", "list_pods", "logs", "get_service", "get_deployment", "cost_analysis", "list_endpoints", "list_deployments", "list_services"):
                 if "namespace" not in entities:
                     entities["namespace"] = parameters.get("namespace", "default")
 

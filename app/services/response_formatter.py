@@ -1155,18 +1155,89 @@ class ResponseFormatter:
     def format_restart(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """재시작 결과를 포맷"""
         try:
-            name = raw_data.get("name", "")
-            namespace = raw_data.get("namespace", "default")
+            # 이미 포맷된 재시작 결과가 들어온 경우 그대로 반환 (이중 포맷 방지)
+            if isinstance(raw_data, dict) and raw_data.get("type") == "restart":
+                data_block = raw_data.get("data", {})
+                if isinstance(data_block, dict) and isinstance(data_block.get("formatted"), dict):
+                    return raw_data
+
+            # k8s_result에서 재시작 결과 추출
+            k8s_result = raw_data.get("k8s_result", raw_data)
+
+            # k8s_result 자체가 이미 포맷된 재시작 응답인 경우 (대화 확인 흐름에서 발생)
+            if (
+                isinstance(k8s_result, dict)
+                and k8s_result.get("type") == "restart"
+                and isinstance(k8s_result.get("data", {}).get("formatted"), dict)
+            ):
+                existing_formatted = k8s_result["data"]["formatted"]
+                summary = k8s_result.get("summary", "재시작이 완료되었습니다.")
+                display_name = existing_formatted.get("repository", "앱")
+                namespace = existing_formatted.get("namespace", "default")
+                return {
+                    "type": "restart",
+                    "summary": summary,
+                    "data": {
+                        "formatted": existing_formatted,
+                        "raw": raw_data
+                    },
+                    "metadata": {
+                        "name": display_name,
+                        "namespace": namespace
+                    }
+                }
+            
+            owner = k8s_result.get("owner", "")
+            repo = k8s_result.get("repo", "")
+            deployment = k8s_result.get("deployment", "")
+            namespace = k8s_result.get("namespace", "default")
+            message = k8s_result.get("message", "")
+            status = k8s_result.get("status", "unknown")
+            
+            # owner/repo가 있으면 그 형식 사용, 없으면 deployment 이름 사용
+            if owner and repo:
+                display_name = f"{owner}/{repo}"
+                summary = f"{display_name}을(를) 재시작했습니다."
+                action_icon = "🔄"
+                if status == "success":
+                    summary = f"✅ {summary}"
+                elif status == "error":
+                    summary = f"❌ 재시작 실패: {message}"
+            elif deployment:
+                display_name = deployment
+                summary = f"{display_name}을(를) 재시작했습니다."
+                action_icon = "🔄"
+                if status == "success":
+                    summary = f"✅ {summary}"
+                elif status == "error":
+                    summary = f"❌ 재시작 실패: {message}"
+            else:
+                display_name = "앱"
+                summary = "재시작했습니다." if status == "success" else f"재시작 실패: {message}"
+                action_icon = "🔄"
+            
+            # 상세 정보 구성
+            formatted_data = {
+                "repository": display_name,
+                "deployment": deployment,
+                "owner": owner,
+                "repo": repo,
+                "namespace": namespace,
+                "status": status,
+                "message": message,
+                "action": action_icon,
+                "timestamp": k8s_result.get("timestamp", "")
+            }
             
             return {
                 "type": "restart",
-                "summary": f"{name}을(를) 재시작했습니다.",
+                "summary": summary,
                 "data": {
-                    "formatted": raw_data,
+                    "formatted": formatted_data,
                     "raw": raw_data
                 },
                 "metadata": {
-                    "name": name,
+                    "name": display_name,
                     "namespace": namespace
                 }
             }
