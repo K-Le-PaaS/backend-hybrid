@@ -20,6 +20,159 @@ async def prom_query(body: PromQuery) -> Dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
+@router.get("/monitoring/metrics/details", response_model=Dict[str, Any])
+async def get_monitoring_details(cluster: str = "nks-cluster") -> Dict[str, Any]:
+    """클러스터 노드별 상세 모니터링 지표 반환 (CPU/Memory/Disk/Network).
+
+    기본적으로 NKS 클러스터만 대상으로 합니다. 다른 클러스터가 필요하면 ?cluster= 파라미터로 지정하세요.
+    """
+    # PromQL 정의 (모든 쿼리에 cluster 필터 적용)
+    q_cpu_util = f'100 - (avg(rate(node_cpu_seconds_total{{cluster="{cluster}", mode="idle"}}[1m])) by (instance) * 100)'
+    q_cpu_load = f'node_load1{{cluster="{cluster}"}} / count(node_cpu_seconds_total{{cluster="{cluster}", mode="system"}}) by (instance)'
+    q_cpu_iowait = f'avg(rate(node_cpu_seconds_total{{cluster="{cluster}", mode="iowait"}}[1m])) by (instance) * 100'
+
+    q_mem_usage = f'(1 - (node_memory_MemAvailable_bytes{{cluster="{cluster}"}} / node_memory_MemTotal_bytes{{cluster="{cluster}"}})) * 100'
+    q_swap_used = f'node_memory_SwapTotal_bytes{{cluster="{cluster}"}} - node_memory_SwapFree_bytes{{cluster="{cluster}"}}'
+
+    q_disk_root_usage = f'(1 - (node_filesystem_free_bytes{{cluster="{cluster}", mountpoint="/", fstype!="rootfs"}} / node_filesystem_size_bytes{{cluster="{cluster}", mountpoint="/", fstype!="rootfs"}})) * 100'
+    q_disk_io_sat = f'rate(node_disk_io_time_seconds_total{{cluster="{cluster}"}}[1m])'
+    q_disk_readonly = f'node_filesystem_readonly{{cluster="{cluster}", mountpoint="/"}}'
+
+    q_net_rx_bps = f'rate(node_network_receive_bytes_total{{cluster="{cluster}", device="eth0"}}[1m])'
+    q_net_tx_bps = f'rate(node_network_transmit_bytes_total{{cluster="{cluster}", device="eth0"}}[1m])'
+    q_net_rx_errs = f'rate(node_network_receive_errs_total{{cluster="{cluster}"}}[1m])'
+    q_net_rx_drops = f'rate(node_network_receive_drop_total{{cluster="{cluster}"}}[1m])'
+
+    import asyncio
+
+    async def run_query(expr: str):
+        return await query_prometheus(PromQuery(query=expr))
+
+    # 병렬 실행
+    (cpu_util_res, cpu_load_res, cpu_iowait_res,
+     mem_usage_res, swap_used_res,
+     disk_root_res, disk_io_sat_res, disk_ro_res,
+     net_rx_res, net_tx_res, net_rx_errs_res, net_rx_drops_res) = await asyncio.gather(
+        run_query(q_cpu_util), run_query(q_cpu_load), run_query(q_cpu_iowait),
+        run_query(q_mem_usage), run_query(q_swap_used),
+        run_query(q_disk_root_usage), run_query(q_disk_io_sat), run_query(q_disk_readonly),
+        run_query(q_net_rx_bps), run_query(q_net_tx_bps), run_query(q_net_rx_errs), run_query(q_net_rx_drops),
+        return_exceptions=False
+    )
+
+    def results(data: Dict[str, Any]) -> list:
+        return (data or {}).get("data", {}).get("result", [])
+
+    merged: Dict[str, Dict[str, Any]] = {}
+
+    def merge(expr_result: list, field: str, cast=float):
+        for item in expr_result:
+            metric = item.get("metric", {})
+            instance = metric.get("instance")
+            if not instance:
+                continue
+            value = item.get("value")
+            v = None
+            if isinstance(value, list) and len(value) > 1:
+                try:
+                    v = cast(value[1])
+                except Exception:
+                    v = None
+            merged.setdefault(instance, {})[field] = v
+
+    merge(results(cpu_util_res), "cpu_utilization_pct")
+    merge(results(cpu_load_res), "cpu_load_avg_per_core")
+    merge(results(cpu_iowait_res), "cpu_iowait_pct")
+
+    merge(results(mem_usage_res), "memory_usage_pct")
+    merge(results(swap_used_res), "swap_used_bytes", cast=float)
+
+    # 디스크 루트 사용률
+    merge(results(disk_root_res), "disk_root_usage_pct")
+
+    # IO saturation: 같은 인스턴스에서 최대값 사용
+    for item in results(disk_io_sat_res):
+        metric = item.get("metric", {})
+        instance = metric.get("instance")
+        if not instance:
+            continue
+        value = item.get("value")
+        io_sat = float(value[1]) if isinstance(value, list) and len(value) > 1 else None
+        prev = merged.setdefault(instance, {}).get("disk_io_saturation")
+        if prev is None or (io_sat is not None and io_sat > prev):
+            merged[instance]["disk_io_saturation"] = io_sat
+
+    # Readonly
+    for item in results(disk_ro_res):
+        metric = item.get("metric", {})
+        instance = metric.get("instance")
+        if not instance:
+            continue
+        value = item.get("value")
+        readonly_flag = float(value[1]) if isinstance(value, list) and len(value) > 1 else 0.0
+        merged.setdefault(instance, {})["disk_readonly"] = bool(readonly_flag and readonly_flag > 0.0)
+
+    merge(results(net_rx_res), "net_rx_bps")
+    merge(results(net_tx_res), "net_tx_bps")
+    merge(results(net_rx_errs_res), "net_rx_errs_ps")
+    merge(results(net_rx_drops_res), "net_rx_drops_ps")
+
+    nodes: List[Dict[str, Any]] = []
+    for instance, vals in merged.items():
+        alerts: List[str] = []
+        if (vals.get("cpu_utilization_pct") or 0) > 80:
+            alerts.append("CPU > 80%")
+        if (vals.get("cpu_iowait_pct") or 0) > 5:
+            alerts.append("CPU I/O wait > 5%")
+        if (vals.get("memory_usage_pct") or 0) > 80:
+            alerts.append("Memory > 80%")
+        if (vals.get("disk_root_usage_pct") or 0) > 85:
+            alerts.append("Disk / > 85%")
+        if (vals.get("disk_io_saturation") or 0) > 0.8:
+            alerts.append("Disk I/O saturation high")
+        if vals.get("disk_readonly"):
+            alerts.append("Filesystem readonly")
+        if (vals.get("net_rx_errs_ps") or 0) > 0:
+            alerts.append("Network RX errors > 0")
+        if (vals.get("net_rx_drops_ps") or 0) > 0:
+            alerts.append("Network RX drops > 0")
+
+        severity = "info"
+        if any(a for a in alerts if "readonly" in a or "Disk / >" in a or "CPU > 80%" in a):
+            severity = "warning"
+        if vals.get("disk_readonly"):
+            severity = "critical"
+
+        nodes.append({
+            "instance": instance,
+            "cpu": {
+                "utilization_pct": vals.get("cpu_utilization_pct"),
+                "load_avg_per_core": vals.get("cpu_load_avg_per_core"),
+                "iowait_pct": vals.get("cpu_iowait_pct"),
+            },
+            "memory": {
+                "usage_pct": vals.get("memory_usage_pct"),
+                "swap_used_bytes": vals.get("swap_used_bytes"),
+            },
+            "disk": {
+                "root_usage_pct": vals.get("disk_root_usage_pct"),
+                "io_saturation": vals.get("disk_io_saturation"),
+                "readonly": vals.get("disk_readonly", False),
+            },
+            "network": {
+                "rx_bps": vals.get("net_rx_bps"),
+                "tx_bps": vals.get("net_tx_bps"),
+                "rx_errs_ps": vals.get("net_rx_errs_ps"),
+                "rx_drops_ps": vals.get("net_rx_drops_ps"),
+            },
+            "alerts": {
+                "severity": severity,
+                "reasons": alerts,
+            },
+        })
+
+    return {"cluster": cluster, "nodes": nodes}
+
 @router.get("/monitoring/alerts", response_model=List[Dict[str, Any]])
 async def get_alerts() -> List[Dict[str, Any]]:
     """활성 알림 목록 조회"""
