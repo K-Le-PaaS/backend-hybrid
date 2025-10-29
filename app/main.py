@@ -155,7 +155,6 @@ def create_app() -> FastAPI:
     app.include_router(mcp_external_router, tags=["mcp-external"])
     app.include_router(admin_db_router, prefix="/api/v1", tags=["admin-db"])
     app.include_router(user_url_router, prefix="/api/v1", tags=["user-url"])
-
     @app.get("/")
     async def root() -> Dict[str, Any]:
         return {
