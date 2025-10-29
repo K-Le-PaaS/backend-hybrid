@@ -33,7 +33,10 @@ class ResponseFormatter:
             # 명령어 매핑
             command_mapping = {
                 "k8s_list_pods": self.format_list_pods,
-                "k8s_get_status": self.format_status,
+                "k8s_get_status": self.format_status,  # 레거시 (단일 Pod용)
+                "k8s_get_pod_status": self.format_pod_status,  # Pod 상태 조회 (app 레이블 기반)
+                "k8s_get_service_status": self.format_service_status,  # Service 상태 조회
+                "k8s_get_deployment_status": self.format_deployment_status,  # Deployment 상태 조회
                 "k8s_get_logs": self.format_logs,
                 "k8s_get_endpoints": self.format_endpoint,
                 "k8s_list_deployments": self.format_list_deployments,
@@ -163,8 +166,7 @@ class ResponseFormatter:
                     "rollback_from_id": rollback.get("rollback_from_id")
                 })
             
-            # 실제 롤백 가능한 버전 수 (현재 버전 제외)
-            total_available = len(versions_formatted)
+            total_available = len(available_versions)
             total_rollbacks = len(rollback_history)
             
             return {
@@ -189,61 +191,8 @@ class ResponseFormatter:
             self.logger.error(f"Error formatting rollback_list: {str(e)}")
             return self.format_error("list_rollback", str(e))
     
-    def format_rollback(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """롤백 실행 결과를 포맷"""
-        try:
-            result = raw_data.get("k8s_result", {})
-            entities = raw_data.get("entities", {})
-            
-            owner = entities.get("github_owner", "")
-            repo = entities.get("github_repo", "")
-            target_commit = result.get("target_commit_short", "")
-            
-            # 롤백 상태 메시지 (이미지 재빌드 정보 제거)
-            status_msg = f"커밋 {target_commit}로 롤백했습니다."
-            
-            # 이전 배포 정보 (이전 커밋 해시만 표시)
-            previous_deployment = result.get("previous_deployment", {})
-            previous_commit = ""
-            if previous_deployment:
-                # github_commit_sha에서 직접 추출
-                github_commit_sha = previous_deployment.get("github_commit_sha", "")
-                if github_commit_sha:
-                    previous_commit = github_commit_sha[:7]
-                else:
-                    # 백업: 이미지 태그에서 커밋 해시 추출 시도
-                    prev_image = previous_deployment.get("image", "")
-                    if prev_image and ":" in prev_image:
-                        image_tag = prev_image.split(":")[-1]
-                        # 이미지 태그가 7자리 이상이면 커밋 해시로 간주
-                        if len(image_tag) >= 7:
-                            previous_commit = image_tag[:7]
-            
-            return {
-                "type": "rollback",
-                "summary": f"{owner}/{repo} {status_msg}",
-                "data": {
-                    "formatted": {
-                        "status": "success",
-                        "target_commit": target_commit,
-                        "previous_commit": previous_commit,
-                        "owner": owner,
-                        "repo": repo
-                    },
-                    "raw": result
-                },
-                "metadata": {
-                    "owner": owner,
-                    "repo": repo,
-                    "target_commit": target_commit
-                }
-            }
-        except Exception as e:
-            self.logger.error(f"Error formatting rollback: {str(e)}")
-            return self.format_error("rollback", str(e))
-    
     def format_status(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Pod 상태를 카드 형식으로 포맷"""
+        """Pod 상태를 카드 형식으로 포맷 (레거시 - 단일 Pod용)"""
         try:
             pod_name = raw_data.get("name", "")
             namespace = raw_data.get("namespace", "default")
@@ -276,6 +225,180 @@ class ResponseFormatter:
         except Exception as e:
             self.logger.error(f"Error formatting status: {str(e)}")
             return self.format_error("status", str(e))
+    
+    def format_pod_status(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Pod 상태를 포맷 (app 레이블 기반, 여러 Pod 지원)"""
+        try:
+            # 에러 상태 처리
+            if raw_data.get("status") == "error":
+                return {
+                    "type": "pod_status",
+                    "summary": raw_data.get("message", "Pod 상태 조회 실패"),
+                    "data": {
+                        "formatted": {
+                            "error": True,
+                            "message": raw_data.get("message", "")
+                        },
+                        "raw": raw_data
+                    },
+                    "metadata": {
+                        "status": "error"
+                    }
+                }
+            
+            namespace = raw_data.get("namespace", "default")
+            pods = raw_data.get("pods", [])
+            total_pods = raw_data.get("total_pods", len(pods))
+            label_selector = raw_data.get("label_selector", "")
+            
+            # 상태별 통계
+            running = sum(1 for pod in pods if pod.get("phase") == "Running")
+            pending = sum(1 for pod in pods if pod.get("phase") == "Pending")
+            failed = sum(1 for pod in pods if pod.get("phase") == "Failed")
+            
+            # Pod 목록 포맷
+            formatted_pods = []
+            for pod in pods:
+                formatted_pods.append({
+                    "name": pod.get("name", ""),
+                    "phase": pod.get("phase", "Unknown"),
+                    "ready": pod.get("ready", "0/0"),
+                    "restarts": pod.get("restarts", 0),
+                    "node": pod.get("node", ""),
+                    "labels": pod.get("labels", {}),
+                    "creation_timestamp": pod.get("creation_timestamp", ""),
+                    # 문제 사유 전달 (백엔드에서 세팅)
+                    "problem": pod.get("problem", False),
+                    "problem_reason": pod.get("problem_reason"),
+                    "problem_message": pod.get("problem_message"),
+                })
+            
+            return {
+                "type": "pod_status",
+                "summary": raw_data.get("message", f"라벨 '{label_selector}'로 {total_pods}개 Pod 조회 완료"),
+                "data": {
+                    "formatted": {
+                        "namespace": namespace,
+                        "label_selector": label_selector,
+                        "total_pods": total_pods,
+                        "running": running,
+                        "pending": pending,
+                        "failed": failed,
+                        "pods": formatted_pods,
+                        # 문제가 있는 파드 요약을 그대로 전달 (없으면 빈 배열)
+                        "problem_pods": raw_data.get("problem_pods", [p for p in formatted_pods if p.get("problem")])
+                    },
+                    "raw": raw_data
+                },
+                "metadata": {
+                    "namespace": namespace,
+                    "total_pods": total_pods,
+                    "running": running,
+                    "pending": pending,
+                    "failed": failed,
+                    "is_healthy": failed == 0 and pending == 0
+                }
+            }
+        except Exception as e:
+            self.logger.error(f"Error formatting pod_status: {str(e)}")
+            return self.format_error("pod_status", str(e))
+    
+    def format_service_status(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Service 상태를 포맷"""
+        try:
+            # 에러 상태 처리
+            if raw_data.get("status") == "error":
+                return {
+                    "type": "service_status",
+                    "summary": raw_data.get("message", "Service 상태 조회 실패"),
+                    "data": {
+                        "formatted": {
+                            "error": True,
+                            "message": raw_data.get("message", "")
+                        },
+                        "raw": raw_data
+                    },
+                    "metadata": {
+                        "status": "error"
+                    }
+                }
+            
+            service = raw_data.get("service", {})
+            namespace = raw_data.get("namespace", "default")
+            
+            return {
+                "type": "service_status",
+                "summary": raw_data.get("message", "Service 상태 조회 완료"),
+                "data": {
+                    "formatted": {
+                        "name": service.get("name", ""),
+                        "namespace": namespace,
+                        "type": service.get("type", ""),
+                        "cluster_ip": service.get("cluster_ip", ""),
+                        "ports": service.get("ports", []),
+                        "selector": service.get("selector", {}),
+                        "ready_endpoints": service.get("ready_endpoints", 0),
+                        "creation_timestamp": service.get("creation_timestamp", "")
+                    },
+                    "raw": raw_data
+                },
+                "metadata": {
+                    "namespace": namespace,
+                    "is_healthy": service.get("ready_endpoints", 0) > 0
+                }
+            }
+        except Exception as e:
+            self.logger.error(f"Error formatting service_status: {str(e)}")
+            return self.format_error("service_status", str(e))
+    
+    def format_deployment_status(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Deployment 상태를 포맷"""
+        try:
+            # 에러 상태 처리
+            if raw_data.get("status") == "error":
+                return {
+                    "type": "deployment_status",
+                    "summary": raw_data.get("message", "Deployment 상태 조회 실패"),
+                    "data": {
+                        "formatted": {
+                            "error": True,
+                            "message": raw_data.get("message", "")
+                        },
+                        "raw": raw_data
+                    },
+                    "metadata": {
+                        "status": "error"
+                    }
+                }
+            
+            deployment = raw_data.get("deployment", {})
+            namespace = raw_data.get("namespace", "default")
+            replicas = deployment.get("replicas", {})
+            
+            return {
+                "type": "deployment_status",
+                "summary": raw_data.get("message", "Deployment 상태 조회 완료"),
+                "data": {
+                    "formatted": {
+                        "name": deployment.get("name", ""),
+                        "namespace": namespace,
+                        "replicas": replicas,
+                        "conditions": deployment.get("conditions", []),
+                        "pods": deployment.get("pods", []),
+                        "creation_timestamp": deployment.get("creation_timestamp", "")
+                    },
+                    "raw": raw_data
+                },
+                "metadata": {
+                    "namespace": namespace,
+                    "desired": replicas.get("desired", 0),
+                    "ready": replicas.get("ready", 0),
+                    "is_healthy": replicas.get("ready", 0) == replicas.get("desired", 0)
+                }
+            }
+        except Exception as e:
+            self.logger.error(f"Error formatting deployment_status: {str(e)}")
+            return self.format_error("deployment_status", str(e))
     
     def format_logs(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """로그를 읽기 쉬운 형식으로 포맷"""
@@ -394,14 +517,35 @@ class ResponseFormatter:
         try:
             deployments = raw_data.get("deployments", [])
             total = len(deployments)
+            namespace = raw_data.get("namespace")
             
             formatted_deployments = []
             for deployment in deployments:
+                # replicas가 dict 형태( desired/current/ready/available )로 오는 경우를 처리
+                replicas_obj = deployment.get("replicas") or {}
+                if isinstance(replicas_obj, dict):
+                    desired = replicas_obj.get("desired") or 0
+                    ready = replicas_obj.get("ready") or 0
+                    current = replicas_obj.get("current") or 0
+                    available = replicas_obj.get("available") or 0
+                    ready_str = f"{ready}/{desired}" if desired is not None else f"{ready}/0"
+                    up_to_date_str = str(current)
+                    available_str = str(available)
+                    replicas_str = f"{current}/{desired}"
+                else:
+                    # 문자열이나 기타 타입인 경우 그대로 사용(하위호환)
+                    replicas_str = str(deployment.get("replicas", "0/0"))
+                    ready_str = str(deployment.get("ready", "0/0"))
+                    up_to_date_str = str(deployment.get("up_to_date", "-"))
+                    available_str = str(deployment.get("available", "-"))
+
                 formatted_deployments.append({
                     "name": deployment.get("name", ""),
                     "namespace": deployment.get("namespace", ""),
-                    "replicas": deployment.get("replicas", "0/0"),
-                    "ready": deployment.get("ready", "0/0"),
+                    "replicas": replicas_str,
+                    "ready": ready_str,
+                    "up_to_date": up_to_date_str,
+                    "available": available_str,
                     "age": self._format_age(deployment.get("age", "")),
                     "image": deployment.get("image", "")
                 })
@@ -414,7 +558,8 @@ class ResponseFormatter:
                     "raw": raw_data
                 },
                 "metadata": {
-                    "total": total
+                    "total": total,
+                    **({"namespace": namespace} if namespace else {})
                 }
             }
         except Exception as e:
@@ -957,64 +1102,19 @@ class ResponseFormatter:
     def format_restart(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """재시작 결과를 포맷"""
         try:
-            # k8s_result에서 재시작 결과 추출
-            k8s_result = raw_data.get("k8s_result", raw_data)
-            
-            owner = k8s_result.get("owner", "")
-            repo = k8s_result.get("repo", "")
-            deployment = k8s_result.get("deployment", "")
-            namespace = k8s_result.get("namespace", "default")
-            message = k8s_result.get("message", "")
-            status = k8s_result.get("status", "unknown")
-            
-            # owner/repo가 있으면 그 형식 사용, 없으면 deployment 이름 사용
-            if owner and repo:
-                display_name = f"{owner}/{repo}"
-                summary = f"{display_name}을(를) 재시작했습니다."
-                action_icon = "🔄"
-                if status == "success":
-                    summary = f"✅ {summary}"
-                elif status == "error":
-                    summary = f"❌ 재시작 실패: {message}"
-            elif deployment:
-                display_name = deployment
-                summary = f"{display_name}을(를) 재시작했습니다."
-                action_icon = "🔄"
-                if status == "success":
-                    summary = f"✅ {summary}"
-                elif status == "error":
-                    summary = f"❌ 재시작 실패: {message}"
-            else:
-                display_name = "앱"
-                summary = "재시작했습니다." if status == "success" else f"재시작 실패: {message}"
-                action_icon = "🔄"
-            
-            # 상세 정보 구성
-            formatted_data = {
-                "repository": display_name,
-                "deployment": deployment,
-                "owner": owner,
-                "repo": repo,
-                "namespace": namespace,
-                "status": status,
-                "message": message,
-                "action": action_icon,
-                "timestamp": k8s_result.get("timestamp", "")
-            }
+            name = raw_data.get("name", "")
+            namespace = raw_data.get("namespace", "default")
             
             return {
                 "type": "restart",
-                "summary": summary,
+                "summary": f"{name}을(를) 재시작했습니다.",
                 "data": {
-                    "formatted": formatted_data,
+                    "formatted": raw_data,
                     "raw": raw_data
                 },
                 "metadata": {
-                    "owner": owner,
-                    "repo": repo,
-                    "deployment": deployment,
-                    "namespace": namespace,
-                    "status": status
+                    "name": name,
+                    "namespace": namespace
                 }
             }
         except Exception as e:

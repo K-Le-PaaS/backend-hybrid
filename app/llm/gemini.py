@@ -30,21 +30,60 @@ class GeminiClient(LLMClient):
             # 명령어에 따른 entities 구성 (해당 명령에 필요한 필드만 포함)
             entities: Dict[str, Any] = {}
 
-            # 리소스 타입별 파라미터 처리
-            if command in ("status", "logs"):
-                # Pod 관련 명령어
+            # status 명령어 처리 (Pod/Service/Deployment 구분)
+            if command == "status":
+                resource_type = parameters.get("resource_type", "pod")
+                owner = parameters.get("owner", "")
+                repo = parameters.get("repo", "")
+
+                # owner/repo가 있으면 네이밍 규칙 적용
+                if owner and repo:
+                    # k-le-paas-test01 형식으로 변환
+                    base_name = f"{owner.lower()}-{repo.lower()}"
+
+                    if resource_type == "service":
+                        entities["service_name"] = f"{base_name}-svc"
+                        entities["resource_type"] = "service"
+                    elif resource_type == "deployment":
+                        entities["deployment_name"] = f"{base_name}-deploy"
+                        entities["resource_type"] = "deployment"
+                    else:  # pod (기본값)
+                        entities["pod_name"] = base_name
+                        entities["resource_type"] = "pod"
+                else:
+                    # 기존 로직: 명시된 이름 사용
+                    if resource_type == "service" and parameters.get("serviceName"):
+                        entities["service_name"] = parameters.get("serviceName")
+                        entities["resource_type"] = "service"
+                    elif resource_type == "deployment" and parameters.get("deploymentName"):
+                        entities["deployment_name"] = parameters.get("deploymentName")
+                        entities["resource_type"] = "deployment"
+                    elif parameters.get("podName"):
+                        entities["pod_name"] = parameters.get("podName")
+                        entities["resource_type"] = "pod"
+                    else:
+                        # resource_type만 있고 이름이 없으면 설정
+                        entities["resource_type"] = resource_type
+
+                # namespace 설정
+                entities["namespace"] = parameters.get("namespace", "default")
+
+            # 기타 Pod 관련 명령어 (logs)
+            elif command == "logs":
                 if parameters.get("podName") is not None:
                     entities["pod_name"] = parameters.get("podName")
+
+            # Deployment 관련 명령어
             elif command in ("scale", "deploy", "get_deployment"):
-                # Deployment 관련 명령어
                 if parameters.get("deploymentName") is not None:
                     entities["deployment_name"] = parameters.get("deploymentName")
+
+            # Service 관련 명령어
             elif command in ("endpoint", "get_service"):
-                # Service 관련 명령어
                 if parameters.get("serviceName") is not None:
                     entities["service_name"] = parameters.get("serviceName")
 
-            # restart 명령어 처리
+            # restart 명령어 처리 (owner/repo 필수 체크 유지)
             if command == "restart":
                 # GitHub 저장소 정보 (필수)
                 owner = parameters.get("owner", "")
@@ -258,14 +297,24 @@ class GeminiClient(LLMClient):
 명령어 및 반환 형식:
 
 1. 상태 확인 (command: "status")
-설명: 배포된 애플리케이션의 현재 상태를 확인하는 명령입니다.
-중요: "app", "앱"이라는 호칭은 Pod를 의미합니다.
-사용자 입력 예시: 
-- 기본 표현: "내 앱 상태 보여줘", "chat-app 상태 어때?", "서버 목록 확인"
-- 자연스러운 표현: "nginx-pod 상태 확인", "frontend 앱 상태는?", "백엔드 서버 상태 보여줘"
-- 다양한 뉘앙스: "nginx 잘 돌아가고 있어?", "frontend 앱 어떻게 되고 있어?", "서버들 다 정상인가?", "앱 현황 알려줘", "상황 파악해줘", "서버 상태 체크", "모든 게 잘 돌아가고 있나?", "앱이 정상 작동하고 있나?"
-- App 호칭 예시: "k-le-paas-test01 app 상태", "my-app 상태 확인", "앱 상태 보여줘"
-필수 JSON 형식: { "command": "status", "parameters": { "podName": "<추출된_파드이름_없으면_null>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
+설명: 배포된 리소스(Pod/Service/Deployment)의 현재 상태를 확인하는 명령입니다.
+
+리소스 타입 감지:
+- 기본값: Pod (키워드 없으면)
+- "서비스", "service" → Service
+- "디플로이먼트", "deployment", "배포" → Deployment
+
+owner/repo 형식 감지:
+- "K-Le-PaaS/test01 상태" → owner: "K-Le-PaaS", repo: "test01", resource_type: "pod" (기본값)
+- "K-Le-PaaS/test01 서비스 상태" → owner: "K-Le-PaaS", repo: "test01", resource_type: "service"
+- "K-Le-PaaS/test01 디플로이먼트 상태" → owner: "K-Le-PaaS", repo: "test01", resource_type: "deployment"
+
+사용자 입력 예시:
+- 기본 표현 (Pod): "내 앱 상태 보여줘", "chat-app 상태 어때?", "K-Le-PaaS/test01 잘 돌아감?"
+- Service: "K-Le-PaaS/test01 서비스 상태", "test01 서비스 잘 돌아감?"
+- Deployment: "K-Le-PaaS/test01 디플로이먼트 상태", "test01 배포 상태"
+
+필수 JSON 형식: { "command": "status", "parameters": { "podName": "<파드이름_또는_null>", "serviceName": "<서비스이름_또는_null>", "deploymentName": "<디플로이먼트이름_또는_null>", "owner": "<GitHub_owner_또는_빈_문자열>", "repo": "<GitHub_repo_또는_빈_문자열>", "resource_type": "pod|service|deployment", "namespace": "<네임스페이스_없으면_'default'>" } }
 
 2. 로그 조회 (command: "logs")
 설명: 배포된 애플리케이션의 로그를 조회하는 명령입니다.
@@ -298,7 +347,7 @@ class GeminiClient(LLMClient):
 4. 재시작 (command: "restart")
 설명: 애플리케이션을 재시작하는 명령입니다.
 기능: kubectl rollout restart deployment로 Pod 재시작
-중요: GitHub 저장소(owner/repo) 정보가 반드시 필요합니다.
+중요: "app", "앱"이라는 호칭은 Pod를 의미합니다.
 
 사용자 입력 예시:
 - **저장소 지정 패턴** (권장):
