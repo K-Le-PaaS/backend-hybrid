@@ -166,8 +166,7 @@ class ResponseFormatter:
                     "rollback_from_id": rollback.get("rollback_from_id")
                 })
             
-            # 실제 롤백 가능한 버전 수 (현재 버전 제외)
-            total_available = len(versions_formatted)
+            total_available = len(available_versions)
             total_rollbacks = len(rollback_history)
             
             return {
@@ -191,59 +190,6 @@ class ResponseFormatter:
         except Exception as e:
             self.logger.error(f"Error formatting rollback_list: {str(e)}")
             return self.format_error("list_rollback", str(e))
-    
-    def format_rollback(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """롤백 실행 결과를 포맷"""
-        try:
-            result = raw_data.get("k8s_result", {})
-            entities = raw_data.get("entities", {})
-            
-            owner = entities.get("github_owner", "")
-            repo = entities.get("github_repo", "")
-            target_commit = result.get("target_commit_short", "")
-            
-            # 롤백 상태 메시지 (이미지 재빌드 정보 제거)
-            status_msg = f"커밋 {target_commit}로 롤백했습니다."
-            
-            # 이전 배포 정보 (이전 커밋 해시만 표시)
-            previous_deployment = result.get("previous_deployment", {})
-            previous_commit = ""
-            if previous_deployment:
-                # github_commit_sha에서 직접 추출
-                github_commit_sha = previous_deployment.get("github_commit_sha", "")
-                if github_commit_sha:
-                    previous_commit = github_commit_sha[:7]
-                else:
-                    # 백업: 이미지 태그에서 커밋 해시 추출 시도
-                    prev_image = previous_deployment.get("image", "")
-                    if prev_image and ":" in prev_image:
-                        image_tag = prev_image.split(":")[-1]
-                        # 이미지 태그가 7자리 이상이면 커밋 해시로 간주
-                        if len(image_tag) >= 7:
-                            previous_commit = image_tag[:7]
-            
-            return {
-                "type": "rollback",
-                "summary": f"{owner}/{repo} {status_msg}",
-                "data": {
-                    "formatted": {
-                        "status": "success",
-                        "target_commit": target_commit,
-                        "previous_commit": previous_commit,
-                        "owner": owner,
-                        "repo": repo
-                    },
-                    "raw": result
-                },
-                "metadata": {
-                    "owner": owner,
-                    "repo": repo,
-                    "target_commit": target_commit
-                }
-            }
-        except Exception as e:
-            self.logger.error(f"Error formatting rollback: {str(e)}")
-            return self.format_error("rollback", str(e))
     
     def format_status(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """Pod 상태를 카드 형식으로 포맷 (레거시 - 단일 Pod용)"""
@@ -1156,64 +1102,19 @@ class ResponseFormatter:
     def format_restart(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """재시작 결과를 포맷"""
         try:
-            # k8s_result에서 재시작 결과 추출
-            k8s_result = raw_data.get("k8s_result", raw_data)
-            
-            owner = k8s_result.get("owner", "")
-            repo = k8s_result.get("repo", "")
-            deployment = k8s_result.get("deployment", "")
-            namespace = k8s_result.get("namespace", "default")
-            message = k8s_result.get("message", "")
-            status = k8s_result.get("status", "unknown")
-            
-            # owner/repo가 있으면 그 형식 사용, 없으면 deployment 이름 사용
-            if owner and repo:
-                display_name = f"{owner}/{repo}"
-                summary = f"{display_name}을(를) 재시작했습니다."
-                action_icon = "🔄"
-                if status == "success":
-                    summary = f"✅ {summary}"
-                elif status == "error":
-                    summary = f"❌ 재시작 실패: {message}"
-            elif deployment:
-                display_name = deployment
-                summary = f"{display_name}을(를) 재시작했습니다."
-                action_icon = "🔄"
-                if status == "success":
-                    summary = f"✅ {summary}"
-                elif status == "error":
-                    summary = f"❌ 재시작 실패: {message}"
-            else:
-                display_name = "앱"
-                summary = "재시작했습니다." if status == "success" else f"재시작 실패: {message}"
-                action_icon = "🔄"
-            
-            # 상세 정보 구성
-            formatted_data = {
-                "repository": display_name,
-                "deployment": deployment,
-                "owner": owner,
-                "repo": repo,
-                "namespace": namespace,
-                "status": status,
-                "message": message,
-                "action": action_icon,
-                "timestamp": k8s_result.get("timestamp", "")
-            }
+            name = raw_data.get("name", "")
+            namespace = raw_data.get("namespace", "default")
             
             return {
                 "type": "restart",
-                "summary": summary,
+                "summary": f"{name}을(를) 재시작했습니다.",
                 "data": {
-                    "formatted": formatted_data,
+                    "formatted": raw_data,
                     "raw": raw_data
                 },
                 "metadata": {
-                    "owner": owner,
-                    "repo": repo,
-                    "deployment": deployment,
-                    "namespace": namespace,
-                    "status": status
+                    "name": name,
+                    "namespace": namespace
                 }
             }
         except Exception as e:

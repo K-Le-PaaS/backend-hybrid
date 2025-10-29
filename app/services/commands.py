@@ -223,7 +223,7 @@ def plan_command(req: CommandRequest) -> CommandPlan:
         )
     
     elif command == "restart":
-        # GitHub 저장소 정보 기반 재시작
+        # GitHub 저장소 정보 기반 재시작 (main 로직 우선)
         if not req.github_owner or not req.github_repo:
             raise ValueError("재시작 명령어에는 GitHub 저장소 정보가 필요합니다. 예: 'K-Le-PaaS/test01 재시작해줘'")
         return CommandPlan(
@@ -284,13 +284,7 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             tool="k8s_list_namespaces",
             args={},
         )
-    
-    elif command == "list_apps":
-        return CommandPlan(
-            tool="k8s_list_deployments",
-            args={"namespace": ns},
-        )
-    
+
     elif command == "list_endpoints":
         return CommandPlan(
             tool="k8s_list_namespaced_endpoints",
@@ -541,8 +535,8 @@ async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
     # 원본 실행 결과를 가져옵니다
     raw_result = await _execute_raw_command(plan)
     
-    # 스케일링/재시작 명령의 경우 포맷팅하지 않고 원시 결과 반환 (nlp.py에서 별도 처리)
-    if plan.tool in ("scale", "k8s_restart_deployment"):
+    # 스케일링 명령의 경우 포맷팅하지 않고 원시 결과 반환
+    if plan.tool == "scale":
         return raw_result
     
     # 다른 명령어들은 ResponseFormatter를 사용하여 포맷팅
@@ -1029,7 +1023,7 @@ async def _execute_get_endpoints(args: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _execute_restart(args: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Deployment 재시작 (restart 명령어)
+    Deployment 재시작 (restart 명령어) - main 로직 우선
     예: "K-Le-PaaS/test01 재시작해줘"
 
     owner/repo를 받아서 deployment 이름으로 변환
@@ -1068,22 +1062,22 @@ async def _execute_restart(args: Dict[str, Any]) -> Dict[str, Any]:
                 }
             else:
                 raise
-        
+
         # kubectl rollout restart deployment 구현
         # Pod template에 재시작 annotation 추가하여 Pod 재생성 트리거
         if deployment.spec.template.metadata.annotations is None:
             deployment.spec.template.metadata.annotations = {}
-        
+
         # 현재 시간으로 재시작 annotation 설정
         deployment.spec.template.metadata.annotations["kubectl.kubernetes.io/restartedAt"] = datetime.now(timezone.utc).isoformat()
-        
+
         # Deployment 업데이트 (이것이 kubectl rollout restart와 동일한 효과)
         apps_v1.patch_namespaced_deployment(
             name=deployment_name,
             namespace=namespace,
             body=deployment
         )
-        
+
         return {
             "status": "success",
             "message": f"Deployment '{deployment_name}'이 재시작되었습니다. Pod들이 새로 생성됩니다.",
@@ -1117,8 +1111,6 @@ async def _execute_restart(args: Dict[str, Any]) -> Dict[str, Any]:
             "status": "error",
             "owner": owner,
             "repo": repo,
-            "deployment": deployment_name,
-            "namespace": namespace,
             "message": f"재시작 실패: {str(e)}"
         }
 
@@ -1840,8 +1832,8 @@ async def _execute_list_namespaces(args: Dict[str, Any]) -> Dict[str, Any]:
 
 async def _execute_list_deployments(args: Dict[str, Any]) -> Dict[str, Any]:
     """
-    네임스페이스의 모든 Deployment 목록 조회 (list_apps 명령어)
-    예: "test 네임스페이스 앱 목록 보여줘", "default 네임스페이스 모든 앱 확인"
+    네임스페이스의 모든 Deployment 목록 조회 (list_deployments 명령어)
+    예: "test 네임스페이스 deployment 목록 보여줘", "default 네임스페이스 모든 deployment 확인"
     """
     namespace = args.get("namespace", "default")
     

@@ -1,10 +1,7 @@
 import os
-import time
 import json
 import re
-from typing import Any, Dict, List, Optional
-
-import httpx
+from typing import Any, Dict
 
 from .interfaces import LLMClient
 from ..core.config import get_settings
@@ -35,12 +32,10 @@ class GeminiClient(LLMClient):
                 resource_type = parameters.get("resource_type", "pod")
                 owner = parameters.get("owner", "")
                 repo = parameters.get("repo", "")
-                
                 # owner/repo가 있으면 네이밍 규칙 적용
                 if owner and repo:
                     # k-le-paas-test01 형식으로 변환
                     base_name = f"{owner.lower()}-{repo.lower()}"
-                    
                     if resource_type == "service":
                         entities["service_name"] = f"{base_name}-svc"
                         entities["resource_type"] = "service"
@@ -64,21 +59,19 @@ class GeminiClient(LLMClient):
                     else:
                         # resource_type만 있고 이름이 없으면 설정
                         entities["resource_type"] = resource_type
-                
+
                 # namespace 설정
                 entities["namespace"] = parameters.get("namespace", "default")
-            
-            # 기타 Pod 관련 명령어 (logs, restart)
-            elif command in ("logs", "restart"):
+
+            # 기타 Pod 관련 명령어 (logs)
+            elif command == "logs":
                 if parameters.get("podName") is not None:
                     entities["pod_name"] = parameters.get("podName")
-                entities["namespace"] = parameters.get("namespace", "default")
-            
+
             # Deployment 관련 명령어
             elif command in ("scale", "deploy", "get_deployment"):
                 if parameters.get("deploymentName") is not None:
                     entities["deployment_name"] = parameters.get("deploymentName")
-            
             # Service 관련 명령어
             elif command in ("endpoint", "get_service"):
                 if parameters.get("serviceName") is not None:
@@ -103,26 +96,10 @@ class GeminiClient(LLMClient):
                 entities["github_owner"] = owner
                 entities["github_repo"] = repo
 
-            # restart 명령어 처리
-            if command == "restart":
-                # GitHub 저장소 정보 (필수)
-                owner = parameters.get("owner", "")
-                repo = parameters.get("repo", "")
-
-                # owner/repo가 비어있는 경우 에러 처리
-                if not owner or not repo:
-                    entities["error"] = "GitHub 저장소 정보가 필요합니다. 'K-Le-PaaS/test01 재시작해줘' 형식으로 입력해주세요."
-                    return {
-                        "intent": "error",
-                        "entities": entities,
-                        "message": entities["error"]
-                    }
-
-                entities["github_owner"] = owner
-                entities["github_repo"] = repo
+            
 
             # namespace 기본값 포함이 필요한 명령어들
-            if command in ("endpoint", "restart", "overview", "list_pods", "list_apps", "logs", "get_service", "get_deployment", "cost_analysis", "list_endpoints", "list_deployments", "list_services"):
+            if command in ("status", "endpoint", "restart", "overview", "list_pods", "logs", "get_service", "get_deployment", "cost_analysis", "list_endpoints", "list_deployments", "list_services"):
                 if "namespace" not in entities:
                     entities["namespace"] = parameters.get("namespace", "default")
 
@@ -263,8 +240,7 @@ class GeminiClient(LLMClient):
                 "endpoint": "엔드포인트 조회 명령을 해석했습니다.",
                 "restart": "재시작 명령을 해석했습니다.",
                 "list_pods": "파드 목록 조회 명령을 해석했습니다.",
-                "list_apps": "네임스페이스 앱 목록 조회 명령을 해석했습니다.",
-            "list_deployments": "Deployment 목록 조회 명령을 해석했습니다.",
+                "list_deployments": "Deployment 목록 조회 명령을 해석했습니다.",
                 "list_services": "전체 Service 조회 명령을 해석했습니다.",
                 "list_ingresses": "전체 Ingress/도메인 조회 명령을 해석했습니다.",
                 "list_namespaces": "네임스페이스 목록 조회 명령을 해석했습니다.",
@@ -336,7 +312,7 @@ owner/repo 형식 감지:
 - "K-Le-PaaS/test01 서비스 상태" → owner: "K-Le-PaaS", repo: "test01", resource_type: "service"
 - "K-Le-PaaS/test01 디플로이먼트 상태" → owner: "K-Le-PaaS", repo: "test01", resource_type: "deployment"
 
-사용자 입력 예시: 
+사용자 입력 예시:
 - 기본 표현 (Pod): "내 앱 상태 보여줘", "chat-app 상태 어때?", "K-Le-PaaS/test01 잘 돌아감?"
 - Service: "K-Le-PaaS/test01 서비스 상태", "test01 서비스 잘 돌아감?"
 - Deployment: "K-Le-PaaS/test01 디플로이먼트 상태", "test01 배포 상태"
@@ -374,7 +350,7 @@ owner/repo 형식 감지:
 4. 재시작 (command: "restart")
 설명: 애플리케이션을 재시작하는 명령입니다.
 기능: kubectl rollout restart deployment로 Pod 재시작
-중요: GitHub 저장소(owner/repo) 정보가 반드시 필요합니다.
+중요: "app", "앱"이라는 호칭은 Pod를 의미합니다.
 
 사용자 입력 예시:
 - **저장소 지정 패턴** (권장):
@@ -571,22 +547,26 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 
 9. 파드 목록 조회 (command: "list_pods")
 설명: 현재 실행 중인 모든 파드의 목록을 조회하는 명령입니다.
-사용자 입력 예시: "모든 파드 조회해줘", "파드 목록 보여줘", "실행 중인 파드들 확인"
+사용자 입력 예시: "모든 파드 조회해줘", "파드 목록 보여줘", "실행 중인 파드들 확인", "모든 pod 목록 보여줘", "모든 pod 목록 조회해줘","우리 팀 파드 목록 보여줘"
+다양한 사용 입력예시: "모든 파드 목록 보여줘", "모든 파드 조회해줘", "파드 목록 보여줘", "실행 중인 파드들 확인", "모든 pod 목록 보여줘", "모든 pod 목록 조회해줘","우리 팀 파드 목록 보여줘"
 필수 JSON 형식: { "command": "list_pods", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-        10. 전체/네임스페이스 Deployment 조회 (command: "list_deployments")
-        설명: 특정 네임스페이스의 Deployment 목록을 조회합니다. 네임스페이스가 명시되지 않으면 기본값 'default'를 사용합니다. "모든" 등의 표현이 있으면 전체 조회로 해석할 수 있으나 기본은 네임스페이스 기준입니다.
-        사용자 입력 예시: "deployment 목록 보여줘" (default), "test 네임스페이스 deployment 목록", "모든 Deployment 조회해줘"(전체)
-        필수 JSON 형식: { "command": "list_deployments", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
+10. 전체/네임스페이스 Deployment 조회 (command: "list_deployments")
+설명: 특정 네임스페이스의 Deployment 목록을 조회합니다. 네임스페이스가 명시되지 않으면 기본값 'default'를 사용합니다. "모든" 등의 표현이 있으면 전체 조회로 해석할 수 있으나 기본은 네임스페이스 기준입니다.
+사용자 입력 예시: "deployment 목록 보여줘" (default), "test 네임스페이스 deployment 목록", "모든 Deployment 조회해줘"(전체)
+필수 JSON 형식: { "command": "list_deployments", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-        11. 네임스페이스 Service 조회 (command: "list_services")
-        설명: 특정 네임스페이스의 Service 목록을 조회합니다. 네임스페이스가 없으면 'default'를 사용합니다. ("모든" 등의 표현이 있으면 전체 조회로 해석 가능하지만 기본은 네임스페이스 기준)
-        사용자 입력 예시: "service 목록 보여줘"(default), "test 네임스페이스 service 목록", "모든 Service 조회해줘"(전체)
-        필수 JSON 형식: { "command": "list_services", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
+11. 네임스페이스 Service 조회 (command: "list_services")
+설명: 특정 네임스페이스의 Service 목록을 조회합니다. 네임스페이스가 없으면 'default'를 사용합니다. ("모든" 등의 표현이 있으면 전체 조회로 해석 가능하지만 기본은 네임스페이스 기준)
+사용자 입력 예시: "service 목록 보여줘"(default), "test 네임스페이스 service 목록", "모든 Service 조회해줘"(전체)
+필수 JSON 형식: { "command": "list_services", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-12. 전체 Ingress/도메인 조회 (command: "list_ingresses")
-설명: 모든 네임스페이스의 Ingress와 도메인 목록을 조회하는 명령입니다.
-사용자 입력 예시: "모든 도메인 조회해줘", "전체 Ingress 목록 보여줘", "모든 접속 주소 확인"
+12. 전체 Ingress/외부 접속 URL 조회 (command: "list_ingresses")
+설명: 모든 네임스페이스의 Ingress를 조회하여 외부에서 접근 가능한 접속 URL(도메인/경로/프로토콜/TLS)을 확인하는 명령입니다. 즉, 공개/외부 트래픽을 위한 주소만 대상이며 내부 서비스 간 통신 주소는 포함되지 않습니다.
+사용자 입력 예시:
+- 기본 표현: "모든 외부 URL 조회해줘", "전체 Ingress 도메인 목록 보여줘", "외부 접속 주소(도메인) 확인"
+- 자연스러운 표현: "밖에서 접속하는 주소 뭐야?", "브라우저로 들어가는 링크", "HTTPS로 접속하는 주소", "노출된 URL들 보여줘", "외부로 공개된 주소"
+- 다양한 뉘앙스: "퍼블릭 주소", "공개 도메인/URL", "외부 노출 도메인", "로드밸런서 IP/도메인", "TLS 적용된 주소", "http/https 접속 경로", "사이트 주소", "외부 진입점", "내부 말고 외부 접속 주소", "와일드카드 도메인 확인"
 필수 JSON 형식: { "command": "list_ingresses", "parameters": {} }
 
 13. 네임스페이스 목록 조회 (command: "list_namespaces")
@@ -594,18 +574,15 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 사용자 입력 예시: "모든 네임스페이스 조회해줘", "네임스페이스 목록 보여줘", "전체 네임스페이스 확인"
 필수 JSON 형식: { "command": "list_namespaces", "parameters": {} }
 
-14. 네임스페이스 엔드포인트 목록 조회 (command: "list_endpoints")
-설명: 특정 네임스페이스의 모든 서비스 엔드포인트를 조회하는 명령입니다. Service와 연결된 Ingress 도메인을 포함하여 모든 접속 주소를 제공합니다.
+14. 네임스페이스 서비스 엔드포인트 목록 조회 (command: "list_endpoints")
+설명: 특정 네임스페이스의 Service 내부 엔드포인트(서비스 간 통신 주소)만 조회하는 명령입니다. ClusterIP/DNS 기반 주소 예: http://<service-name>.<namespace>.svc:<port> 또는 http://<service-name>:<port>. Ingress나 외부 접속 URL(도메인)은 포함하지 않습니다.
 사용자 입력 예시:
-- 기본 표현: "엔드포인트 목록 보여줘", "모든 접속 주소 확인", "서비스 주소 목록"
-- 자연스러운 표현: "default 네임스페이스 엔드포인트 보여줘", "test 네임스페이스 모든 서비스 URL"
-- 다양한 뉘앙스: "접속 가능한 주소들", "서비스 연결 주소 확인", "모든 앱 URL 조회", "외부 접속 주소 목록", "도메인 주소 확인"
+- 기본 표현: "엔드포인트 목록 보여줘", "서비스 간 통신 주소 목록", "내부 엔드포인트 확인"
+- 자연스러운 표현: "default 네임스페이스 내부 엔드포인트 보여줘", "test 네임스페이스 서비스 DNS 주소들"
+- 다양한 뉘앙스: "내부 통신 주소", "서비스 연결 내부 주소 확인", "클러스터 내부 URL", "svc 주소 확인"
 필수 JSON 형식: { "command": "list_endpoints", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-15. 네임스페이스 앱 목록 조회 (command: "list_apps")
-설명: 특정 네임스페이스의 모든 애플리케이션(Deployment) 목록을 조회하는 명령입니다.
-사용자 입력 예시: "test 네임스페이스 앱 목록 보여줘", "default 네임스페이스 모든 앱 확인", "특정 네임스페이스 앱 목록 조회"
-필수 JSON 형식: { "command": "list_apps", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
+
 
 16. Service 상세 정보 조회 (command: "get_service")
 설명: 특정 Service의 상세 정보를 조회하는 명령입니다.

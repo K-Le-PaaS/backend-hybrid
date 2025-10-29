@@ -28,7 +28,6 @@ class ActionClassifier:
         "status": ActionRiskLevel.LOW,
         "logs": ActionRiskLevel.LOW,
         "list_pods": ActionRiskLevel.LOW,
-        "list_apps": ActionRiskLevel.LOW,
         "list_deployments": ActionRiskLevel.LOW,
         "list_services": ActionRiskLevel.LOW,
         "list_ingresses": ActionRiskLevel.LOW,
@@ -218,11 +217,6 @@ class ActionClassifier:
                     formatted_message = f"{github_owner}/{github_repo}의 레플리카는 이미 {new_replicas}개입니다."
                 else:
                     formatted_message = f"{github_owner}/{github_repo}을(를) {old_replicas}개에서 {new_replicas}개로 조정하시겠습니까?"
-            # 재시작 명령의 경우 owner/repo 형식으로 표시
-            elif command == "restart":
-                github_owner = parameters.get("github_owner", "")
-                github_repo = parameters.get("github_repo", "")
-                formatted_message = f"{github_owner}/{github_repo}을(를) 재시작하시겠습니까?"
             else:
                 formatted_message = template_info["message_template"].format(**parameters)
             
