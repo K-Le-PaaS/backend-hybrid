@@ -258,14 +258,24 @@ class GeminiClient(LLMClient):
 명령어 및 반환 형식:
 
 1. 상태 확인 (command: "status")
-설명: 배포된 애플리케이션의 현재 상태를 확인하는 명령입니다.
-중요: "app", "앱"이라는 호칭은 Pod를 의미합니다.
+설명: 배포된 리소스(Pod/Service/Deployment)의 현재 상태를 확인하는 명령입니다.
+
+리소스 타입 감지:
+- 기본값: Pod (키워드 없으면)
+- "서비스", "service" → Service
+- "디플로이먼트", "deployment", "배포" → Deployment
+
+owner/repo 형식 감지:
+- "K-Le-PaaS/test01 상태" → owner: "K-Le-PaaS", repo: "test01", resource_type: "pod" (기본값)
+- "K-Le-PaaS/test01 서비스 상태" → owner: "K-Le-PaaS", repo: "test01", resource_type: "service"
+- "K-Le-PaaS/test01 디플로이먼트 상태" → owner: "K-Le-PaaS", repo: "test01", resource_type: "deployment"
+
 사용자 입력 예시: 
-- 기본 표현: "내 앱 상태 보여줘", "chat-app 상태 어때?", "서버 목록 확인"
-- 자연스러운 표현: "nginx-pod 상태 확인", "frontend 앱 상태는?", "백엔드 서버 상태 보여줘"
-- 다양한 뉘앙스: "nginx 잘 돌아가고 있어?", "frontend 앱 어떻게 되고 있어?", "서버들 다 정상인가?", "앱 현황 알려줘", "상황 파악해줘", "서버 상태 체크", "모든 게 잘 돌아가고 있나?", "앱이 정상 작동하고 있나?"
-- App 호칭 예시: "k-le-paas-test01 app 상태", "my-app 상태 확인", "앱 상태 보여줘"
-필수 JSON 형식: { "command": "status", "parameters": { "podName": "<추출된_파드이름_없으면_null>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
+- 기본 표현 (Pod): "내 앱 상태 보여줘", "chat-app 상태 어때?", "K-Le-PaaS/test01 잘 돌아감?"
+- Service: "K-Le-PaaS/test01 서비스 상태", "test01 서비스 잘 돌아감?"
+- Deployment: "K-Le-PaaS/test01 디플로이먼트 상태", "test01 배포 상태"
+
+필수 JSON 형식: { "command": "status", "parameters": { "podName": "<파드이름_또는_null>", "serviceName": "<서비스이름_또는_null>", "deploymentName": "<디플로이먼트이름_또는_null>", "owner": "<GitHub_owner_또는_빈_문자열>", "repo": "<GitHub_repo_또는_빈_문자열>", "resource_type": "pod|service|deployment", "namespace": "<네임스페이스_없으면_'default'>" } }
 
 2. 로그 조회 (command: "logs")
 설명: 배포된 애플리케이션의 로그를 조회하는 명령입니다.
@@ -298,37 +308,13 @@ class GeminiClient(LLMClient):
 4. 재시작 (command: "restart")
 설명: 애플리케이션을 재시작하는 명령입니다.
 기능: kubectl rollout restart deployment로 Pod 재시작
-중요: GitHub 저장소(owner/repo) 정보가 반드시 필요합니다.
-
+중요: "app", "앱"이라는 호칭은 Pod를 의미합니다.
 사용자 입력 예시:
-- **저장소 지정 패턴** (권장):
-  * "K-Le-PaaS/test01 재시작해줘"
-  * "K-Le-PaaS/test01을 재시작"
-  * "owner/repo 재시작"
-  * "myorg/myapp 재부팅해줘"
-  * "저장소 K-Le-PaaS/backend-hybrid 재시작"
-  * "test01 저장소 재시작"
-
-- **간단한 패턴** (저장소 정보 필수):
-  * "test01 재시작해줘" → owner는 컨텍스트에서 추론
-  * "backend 재시작" → owner는 컨텍스트에서 추론
-
-- **자연스러운 표현**:
-  * "앱 다시 켜줘", "서버 재부팅", "앱 껐다 켜줘"
-  * "K-Le-PaaS/test01 다시 시작", "myorg/myapp 리셋"
-  * "저장소 재시작", "앱 새로고침", "서비스 재가동"
-
-추출 규칙:
-1. **owner/repo 패턴 추출**: "K-Le-PaaS/test01", "owner/repo", "저장소명" 등에서 GitHub 저장소 정보 추출
-2. **간단한 repo 이름**: "test01 재시작" → repo="test01", owner는 컨텍스트 또는 빈 문자열
-3. **재시작 키워드**: "재시작", "restart", "재부팅", "리셋", "껐다 켜줘", "다시 시작", "리부트" 등
-
-필수 JSON 형식: { "command": "restart", "parameters": { "owner": "<추출된_GitHub_owner_없으면_빈_문자열>", "repo": "<추출된_GitHub_repo_없으면_빈_문자열>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
-
-예시 변환:
-- "K-Le-PaaS/test01 재시작해줘" → { "command": "restart", "parameters": { "owner": "K-Le-PaaS", "repo": "test01", "namespace": "default" } }
-- "test01 재시작" → { "command": "restart", "parameters": { "owner": "", "repo": "test01", "namespace": "default" } }
-- "myorg/backend 재부팅" → { "command": "restart", "parameters": { "owner": "myorg", "repo": "backend", "namespace": "default" } }
+- 기본 표현: "앱 재시작해줘", "chat-app 껐다 켜줘", "nginx-test 재시작", "서비스 재시작해줘"
+- 자연스러운 표현: "앱 다시 켜줘", "서버 재부팅", "앱 껐다 켜줘"
+- 다양한 뉘앙스: "앱 다시 시작해줘", "서비스 재시작", "앱 리셋해줘", "서버 껐다 켜줘", "앱 새로고침", "서비스 재가동", "앱 재시작 필요", "서버 재시작해줘", "앱 다시 로드", "서비스 리부트"
+- App 호칭 예시: "k-le-paas-test01 app 재시작", "my-app 재시작해줘", "앱 재시작"
+필수 JSON 형식: { "command": "restart", "parameters": { "podName": "<추출된_파드이름_없으면_null>", "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
 5. 스케일링 (command: "scale")
 설명: NCP SourceCommit 매니페스트 기반으로 배포의 replicas를 조절하는 명령입니다.
@@ -385,9 +371,6 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
   * "myorg/myapp을 abc1234 커밋으로 되돌려"
   * "K-Le-PaaS/backend-hybrid 커밋 a1b2c3d로 복구"
   * "저장소 owner/repo 커밋 해시 abc1234로 롤백"
-  * **"abc1234로 롤백해줘" (owner/repo 없음, 컨텍스트에서 추론)**
-  * **"dd62455로 롤백" (owner/repo 없음, 컨텍스트에서 추론)**
-  * **"커밋 해시 abc1234로 되돌려" (owner/repo 없음, 컨텍스트에서 추론)**
 
 - **N번째 전 패턴**:
   * "owner/repo를 3번 전으로 롤백해줘"
@@ -430,8 +413,6 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 - "K-Le-PaaS/backend 이전 배포로" → { "command": "rollback", "parameters": { "owner": "K-Le-PaaS", "repo": "backend", "commitSha": null, "stepsBack": 1 } }
 - **"5번 전으로 롤백해줘" → { "command": "rollback", "parameters": { "owner": "", "repo": "", "commitSha": null, "stepsBack": 5 } }**
 - **"이전 버전으로 되돌려" → { "command": "rollback", "parameters": { "owner": "", "repo": "", "commitSha": null, "stepsBack": 1 } }**
-- **"dd62455로 롤백해줘" → { "command": "rollback", "parameters": { "owner": "", "repo": "", "commitSha": "dd62455", "stepsBack": null } }**
-- **"abc1234로 롤백" → { "command": "rollback", "parameters": { "owner": "", "repo": "", "commitSha": "abc1234", "stepsBack": null } }**
 
 6-1. 롤백 목록 조회 (command: "list_rollback")
 설명: 프로젝트의 현재 배포 상태, 롤백 가능한 버전 목록, 최근 롤백 히스토리를 조회하는 명령입니다.
@@ -495,22 +476,26 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 
 9. 파드 목록 조회 (command: "list_pods")
 설명: 현재 실행 중인 모든 파드의 목록을 조회하는 명령입니다.
-사용자 입력 예시: "모든 파드 조회해줘", "파드 목록 보여줘", "실행 중인 파드들 확인"
+사용자 입력 예시: "모든 파드 조회해줘", "파드 목록 보여줘", "실행 중인 파드들 확인", "모든 pod 목록 보여줘", "모든 pod 목록 조회해줘","우리 팀 파드 목록 보여줘"
+다양한 사용 입력예시: "모든 파드 목록 보여줘", "모든 파드 조회해줘", "파드 목록 보여줘", "실행 중인 파드들 확인", "모든 pod 목록 보여줘", "모든 pod 목록 조회해줘","우리 팀 파드 목록 보여줘"
 필수 JSON 형식: { "command": "list_pods", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-10. 전체 Deployment 조회 (command: "list_deployments")
-설명: 모든 네임스페이스의 Deployment 목록을 조회하는 명령입니다.
-사용자 입력 예시: "모든 Deployment 조회해줘", "전체 앱 목록 보여줘", "모든 배포 확인"
-필수 JSON 형식: { "command": "list_deployments", "parameters": {} }
+10. 전체/네임스페이스 Deployment 조회 (command: "list_deployments")
+설명: 특정 네임스페이스의 Deployment 목록을 조회합니다. 네임스페이스가 명시되지 않으면 기본값 'default'를 사용합니다. "모든" 등의 표현이 있으면 전체 조회로 해석할 수 있으나 기본은 네임스페이스 기준입니다.
+사용자 입력 예시: "deployment 목록 보여줘" (default), "test 네임스페이스 deployment 목록", "모든 Deployment 조회해줘"(전체)
+필수 JSON 형식: { "command": "list_deployments", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-11. 전체 Service 조회 (command: "list_services")
-설명: 모든 네임스페이스의 Service 목록을 조회하는 명령입니다.
-사용자 입력 예시: "모든 Service 조회해줘", "전체 서비스 목록 보여줘", "모든 서비스 확인"
-필수 JSON 형식: { "command": "list_services", "parameters": {} }
+11. 네임스페이스 Service 조회 (command: "list_services")
+설명: 특정 네임스페이스의 Service 목록을 조회합니다. 네임스페이스가 없으면 'default'를 사용합니다. ("모든" 등의 표현이 있으면 전체 조회로 해석 가능하지만 기본은 네임스페이스 기준)
+사용자 입력 예시: "service 목록 보여줘"(default), "test 네임스페이스 service 목록", "모든 Service 조회해줘"(전체)
+필수 JSON 형식: { "command": "list_services", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-12. 전체 Ingress/도메인 조회 (command: "list_ingresses")
-설명: 모든 네임스페이스의 Ingress와 도메인 목록을 조회하는 명령입니다.
-사용자 입력 예시: "모든 도메인 조회해줘", "전체 Ingress 목록 보여줘", "모든 접속 주소 확인"
+12. 전체 Ingress/외부 접속 URL 조회 (command: "list_ingresses")
+설명: 모든 네임스페이스의 Ingress를 조회하여 외부에서 접근 가능한 접속 URL(도메인/경로/프로토콜/TLS)을 확인하는 명령입니다. 즉, 공개/외부 트래픽을 위한 주소만 대상이며 내부 서비스 간 통신 주소는 포함되지 않습니다.
+사용자 입력 예시:
+- 기본 표현: "모든 외부 URL 조회해줘", "전체 Ingress 도메인 목록 보여줘", "외부 접속 주소(도메인) 확인"
+- 자연스러운 표현: "밖에서 접속하는 주소 뭐야?", "브라우저로 들어가는 링크", "HTTPS로 접속하는 주소", "노출된 URL들 보여줘", "외부로 공개된 주소"
+- 다양한 뉘앙스: "퍼블릭 주소", "공개 도메인/URL", "외부 노출 도메인", "로드밸런서 IP/도메인", "TLS 적용된 주소", "http/https 접속 경로", "사이트 주소", "외부 진입점", "내부 말고 외부 접속 주소", "와일드카드 도메인 확인"
 필수 JSON 형식: { "command": "list_ingresses", "parameters": {} }
 
 13. 네임스페이스 목록 조회 (command: "list_namespaces")
@@ -518,18 +503,15 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 사용자 입력 예시: "모든 네임스페이스 조회해줘", "네임스페이스 목록 보여줘", "전체 네임스페이스 확인"
 필수 JSON 형식: { "command": "list_namespaces", "parameters": {} }
 
-14. 네임스페이스 엔드포인트 목록 조회 (command: "list_endpoints")
-설명: 특정 네임스페이스의 모든 서비스 엔드포인트를 조회하는 명령입니다. Service와 연결된 Ingress 도메인을 포함하여 모든 접속 주소를 제공합니다.
+14. 네임스페이스 서비스 엔드포인트 목록 조회 (command: "list_endpoints")
+설명: 특정 네임스페이스의 Service 내부 엔드포인트(서비스 간 통신 주소)만 조회하는 명령입니다. ClusterIP/DNS 기반 주소 예: http://<service-name>.<namespace>.svc:<port> 또는 http://<service-name>:<port>. Ingress나 외부 접속 URL(도메인)은 포함하지 않습니다.
 사용자 입력 예시:
-- 기본 표현: "엔드포인트 목록 보여줘", "모든 접속 주소 확인", "서비스 주소 목록"
-- 자연스러운 표현: "default 네임스페이스 엔드포인트 보여줘", "test 네임스페이스 모든 서비스 URL"
-- 다양한 뉘앙스: "접속 가능한 주소들", "서비스 연결 주소 확인", "모든 앱 URL 조회", "외부 접속 주소 목록", "도메인 주소 확인"
+- 기본 표현: "엔드포인트 목록 보여줘", "서비스 간 통신 주소 목록", "내부 엔드포인트 확인"
+- 자연스러운 표현: "default 네임스페이스 내부 엔드포인트 보여줘", "test 네임스페이스 서비스 DNS 주소들"
+- 다양한 뉘앙스: "내부 통신 주소", "서비스 연결 내부 주소 확인", "클러스터 내부 URL", "svc 주소 확인"
 필수 JSON 형식: { "command": "list_endpoints", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
 
-15. 네임스페이스 앱 목록 조회 (command: "list_apps")
-설명: 특정 네임스페이스의 모든 애플리케이션(Deployment) 목록을 조회하는 명령입니다.
-사용자 입력 예시: "test 네임스페이스 앱 목록 보여줘", "default 네임스페이스 모든 앱 확인", "특정 네임스페이스 앱 목록 조회"
-필수 JSON 형식: { "command": "list_apps", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>" } }
+
 
 16. Service 상세 정보 조회 (command: "get_service")
 설명: 특정 Service의 상세 정보를 조회하는 명령입니다.
