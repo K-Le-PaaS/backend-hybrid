@@ -74,6 +74,7 @@ def init_database():
     from .models.audit_log import AuditLogModel
     from .models.deployment_history import DeploymentHistory
     from .models.user_slack_config import UserSlackConfig
+    from .models.notification import Notification, NotificationReport
     
     logger = structlog.get_logger(__name__)
     

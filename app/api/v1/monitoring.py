@@ -2,8 +2,11 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import text
+from pydantic import BaseModel, Field
+import structlog
 from ...database import get_db
 from ...services.monitoring import PromQuery, query_prometheus
+from ...services.notification_service import NotificationService
 
 router = APIRouter()
 
@@ -174,38 +177,60 @@ async def get_monitoring_details(cluster: str = "nks-cluster") -> Dict[str, Any]
     return {"cluster": cluster, "nodes": nodes}
 
 @router.get("/monitoring/alerts", response_model=List[Dict[str, Any]])
-async def get_alerts() -> List[Dict[str, Any]]:
-    """활성 알림 목록 조회"""
-    # TODO: 실제 알림 시스템과 연동
-    return [
-        {
-            "id": "alert-001",
-            "title": "높은 CPU 사용률",
-            "description": "api-service pod가 90% CPU 사용",
-            "severity": "warning",
-            "status": "firing",
-            "timestamp": "2024-01-15T10:30:00Z",
-            "source": "Prometheus"
-        },
-        {
-            "id": "alert-002", 
-            "title": "메모리 부족",
-            "description": "시스템 메모리 사용률이 85%를 초과했습니다",
-            "severity": "error",
-            "status": "firing",
-            "timestamp": "2024-01-15T10:25:00Z",
-            "source": "Node Exporter"
-        },
-        {
-            "id": "alert-003",
-            "title": "배포 완료",
-            "description": "my-app v1.2.3이 성공적으로 배포되었습니다",
-            "severity": "info",
-            "status": "resolved",
-            "timestamp": "2024-01-15T09:45:00Z",
-            "source": "K-Le-PaaS"
-        }
-    ]
+async def get_alerts(
+    cluster: str = "nks-cluster",
+    db: Session = Depends(get_db)
+) -> List[Dict[str, Any]]:
+    """활성 알림 목록 조회 (Prometheus + DB)"""
+    service = NotificationService(db)
+    return await service.list_active_alerts(cluster=cluster)
+
+
+class ResolveAlertRequest(BaseModel):
+    """알림 해결 요청"""
+    reason: str | None = None
+
+
+@router.post("/monitoring/alerts/{alert_id}/resolve", response_model=Dict[str, Any])
+async def resolve_alert(
+    alert_id: str,
+    body: ResolveAlertRequest | None = None,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """알림을 해결 상태로 변경 (DB 알림만 영구 반영)."""
+    service = NotificationService(db)
+    ok = service.resolve_alert(alert_id)
+    if not ok:
+        return {"status": "noop", "message": "Alert not persisted; treated as resolved on client"}
+    return {"status": "success", "message": "Alert resolved"}
+
+
+@router.post("/monitoring/alerts/seed-examples", response_model=Dict[str, Any])
+async def seed_example_alerts(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """예시 알림 4개를 생성 (또는 갱신) 합니다."""
+    service = NotificationService(db)
+    created = service.seed_example_alerts()
+    # 반환은 현재 firing/ resolved 상태 포함하여 DB에서 다시 읽어 제공
+    alerts = await service.list_active_alerts()
+    return {
+        "status": "success",
+        "created": created,
+        "alerts": alerts,
+    }
+
+
+@router.post("/monitoring/alerts/seed-from-current", response_model=Dict[str, Any])
+async def seed_from_current_metrics(
+    cluster: str = "nks-cluster",
+    per_rule: int = 1,
+    max_total: int = 8,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """현재 Prometheus 데이터 기반으로 각 규칙 유형의 데모 알림을 생성합니다."""
+    service = NotificationService(db)
+    created = await service.seed_examples_from_current_metrics(cluster=cluster, per_rule=per_rule, max_total=max_total)
+    alerts = await service.list_active_alerts(cluster=cluster)
+    return {"status": "success", "created": created, "alerts": alerts}
 
 @router.get("/monitoring/metrics/cpu", response_model=Dict[str, Any])
 async def get_cpu_metrics() -> Dict[str, Any]:
@@ -547,6 +572,90 @@ async def get_nks_overview() -> Dict[str, Any]:
             "status": "error",
             "message": f"NKS overview query failed: {str(e)}"
         }
+
+@router.post("/monitoring/alerts/{alert_id}/snapshot", response_model=Dict[str, Any])
+async def create_alert_snapshot(
+    alert_id: str,
+    cluster: str = "nks-cluster",
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """알림 스냅샷 보고서 생성"""
+    try:
+        service = NotificationService(db)
+        
+        # 알림 정보 조회
+        alerts = service.list_active_alerts(cluster=cluster)
+        alert = next((a for a in alerts if a.get("id") == alert_id), None)
+        
+        if not alert:
+            raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+        
+        # 스냅샷 보고서 생성
+        report = await service.generate_report_from_current_state(
+            notification=alert,
+            cluster=cluster
+        )
+        
+        return {
+            "status": "success",
+            "data": report,
+            "message": "Snapshot report created successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger = structlog.get_logger(__name__)
+        logger.error("failed_to_create_snapshot", error=str(e), alert_id=alert_id)
+        raise HTTPException(status_code=500, detail=f"Failed to create snapshot: {str(e)}")
+
+
+@router.get("/monitoring/alert-reports/{report_id}", response_model=Dict[str, Any])
+async def get_alert_report(
+    report_id: str,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """보고서 조회"""
+    try:
+        service = NotificationService(db)
+        report = service.get_report(report_id)
+        
+        if not report:
+            raise HTTPException(status_code=404, detail=f"Report {report_id} not found")
+        
+        return {
+            "status": "success",
+            "data": report,
+            "message": "Report retrieved successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get report: {str(e)}")
+
+
+@router.get("/monitoring/alerts/{alert_id}/reports", response_model=Dict[str, Any])
+async def get_alert_reports(
+    alert_id: str,
+    limit: int = 20,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """알림의 보고서 목록 조회"""
+    try:
+        service = NotificationService(db)
+        reports = service.list_reports(alert_id, limit=limit)
+        
+        return {
+            "status": "success",
+            "data": {
+                "alert_id": alert_id,
+                "reports": reports,
+                "total": len(reports)
+            },
+            "message": "Reports retrieved successfully"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get reports: {str(e)}")
+
 
 @router.get("/monitoring/nks/pod-info")
 async def get_nks_pod_info() -> Dict[str, Any]:

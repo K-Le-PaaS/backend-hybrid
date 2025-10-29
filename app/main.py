@@ -44,6 +44,7 @@ from .models.command_history import CommandHistory
 from .models.deployment_history import DeploymentHistory
 from .models.audit_log import AuditLogModel
 from .models.deployment_url import DeploymentUrl
+from .models.notification import Notification, NotificationReport
 import structlog
 
 
