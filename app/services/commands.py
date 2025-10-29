@@ -284,7 +284,9 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             tool="k8s_list_namespaces",
             args={},
         )
-
+    
+    
+    
     elif command == "list_endpoints":
         return CommandPlan(
             tool="k8s_list_namespaced_endpoints",
@@ -2187,6 +2189,11 @@ async def _execute_get_deployment(args: Dict[str, Any]) -> Dict[str, Any]:
         # Deployment 정보 조회
         deployment = apps_v1.read_namespaced_deployment(name=name, namespace=namespace)
         
+        # Selector 정보
+        selector_match_labels = {}
+        if deployment.spec.selector and deployment.spec.selector.match_labels:
+            selector_match_labels = dict(deployment.spec.selector.match_labels)
+        
         # Deployment 상세 정보 구성
         deployment_info = {
             "name": deployment.metadata.name,
@@ -2194,25 +2201,32 @@ async def _execute_get_deployment(args: Dict[str, Any]) -> Dict[str, Any]:
             "labels": deployment.metadata.labels or {},
             "annotations": deployment.metadata.annotations or {},
             "creation_timestamp": deployment.metadata.creation_timestamp.isoformat() if deployment.metadata.creation_timestamp else None,
+            "selector": selector_match_labels,
             "replicas": {
                 "desired": deployment.spec.replicas,
                 "current": deployment.status.replicas or 0,
                 "ready": deployment.status.ready_replicas or 0,
                 "available": deployment.status.available_replicas or 0,
-                "unavailable": deployment.status.unavailable_replicas or 0
+                "unavailable": deployment.status.unavailable_replicas or 0,
+                "updated": deployment.status.updated_replicas or 0
             },
             "strategy": {
                 "type": deployment.spec.strategy.type,
                 "rolling_update": {
-                    "max_unavailable": str(deployment.spec.strategy.rolling_update.max_unavailable) if deployment.spec.strategy.rolling_update.max_unavailable else None,
-                    "max_surge": str(deployment.spec.strategy.rolling_update.max_surge) if deployment.spec.strategy.rolling_update.max_surge else None
+                    "max_unavailable": str(deployment.spec.strategy.rolling_update.max_unavailable) if deployment.spec.strategy.rolling_update and deployment.spec.strategy.rolling_update.max_unavailable else None,
+                    "max_surge": str(deployment.spec.strategy.rolling_update.max_surge) if deployment.spec.strategy.rolling_update and deployment.spec.strategy.rolling_update.max_surge else None
                 } if deployment.spec.strategy.rolling_update else None
             },
+            "min_ready_seconds": deployment.spec.min_ready_seconds or 0,
             "conditions": [],
             "pod_template": {
+                "labels": deployment.spec.template.metadata.labels or {},
+                "annotations": deployment.spec.template.metadata.annotations or {},
                 "containers": [],
                 "restart_policy": deployment.spec.template.spec.restart_policy,
-                "node_selector": deployment.spec.template.spec.node_selector or {}
+                "node_selector": deployment.spec.template.spec.node_selector or {},
+                "volumes": [],
+                "tolerations": []
             }
         }
         
@@ -2227,6 +2241,41 @@ async def _execute_get_deployment(args: Dict[str, Any]) -> Dict[str, Any]:
                     "message": condition.message
                 })
         
+        # Volumes 정보
+        if deployment.spec.template.spec.volumes:
+            for volume in deployment.spec.template.spec.volumes:
+                volume_info = {
+                    "name": volume.name,
+                    "type": "Unknown"
+                }
+                if volume.config_map:
+                    volume_info["type"] = "ConfigMap"
+                    volume_info["config_map"] = volume.config_map.name
+                elif volume.secret:
+                    volume_info["type"] = "Secret"
+                    volume_info["secret"] = volume.secret.secret_name
+                elif volume.empty_dir:
+                    volume_info["type"] = "EmptyDir"
+                elif volume.persistent_volume_claim:
+                    volume_info["type"] = "PersistentVolumeClaim"
+                    volume_info["pvc"] = volume.persistent_volume_claim.claim_name
+                elif volume.host_path:
+                    volume_info["type"] = "HostPath"
+                    volume_info["path"] = volume.host_path.path
+                deployment_info["pod_template"]["volumes"].append(volume_info)
+        
+        # Tolerations 정보
+        if deployment.spec.template.spec.tolerations:
+            for tol in deployment.spec.template.spec.tolerations:
+                tol_info = {
+                    "key": tol.key,
+                    "operator": tol.operator,
+                    "value": tol.value,
+                    "effect": tol.effect,
+                    "toleration_seconds": tol.toleration_seconds
+                }
+                deployment_info["pod_template"]["tolerations"].append(tol_info)
+        
         # Pod 템플릿 컨테이너 정보
         if deployment.spec.template.spec.containers:
             for container in deployment.spec.template.spec.containers:
@@ -2234,9 +2283,10 @@ async def _execute_get_deployment(args: Dict[str, Any]) -> Dict[str, Any]:
                     "name": container.name,
                     "image": container.image,
                     "ports": [],
+                    "volume_mounts": [],
                     "resources": {
-                        "requests": container.resources.requests if container.resources and container.resources.requests else {},
-                        "limits": container.resources.limits if container.resources and container.resources.limits else {}
+                        "requests": dict(container.resources.requests) if container.resources and container.resources.requests else {},
+                        "limits": dict(container.resources.limits) if container.resources and container.resources.limits else {}
                     },
                     "env": []
                 }
@@ -2247,9 +2297,21 @@ async def _execute_get_deployment(args: Dict[str, Any]) -> Dict[str, Any]:
                         port_info = {
                             "name": port.name,
                             "container_port": port.container_port,
+                            "host_port": port.host_port,
                             "protocol": port.protocol or "TCP"
                         }
                         container_info["ports"].append(port_info)
+                
+                # Volume Mounts 정보
+                if container.volume_mounts:
+                    for vm in container.volume_mounts:
+                        vm_info = {
+                            "name": vm.name,
+                            "mount_path": vm.mount_path,
+                            "read_only": vm.read_only,
+                            "sub_path": vm.sub_path
+                        }
+                        container_info["volume_mounts"].append(vm_info)
                 
                 # 환경 변수 정보
                 if container.env:
@@ -2265,6 +2327,75 @@ async def _execute_get_deployment(args: Dict[str, Any]) -> Dict[str, Any]:
                         container_info["env"].append(env_info)
                 
                 deployment_info["pod_template"]["containers"].append(container_info)
+        
+        # ReplicaSets 정보 조회
+        replicasets = apps_v1.list_namespaced_replica_set(namespace=namespace)
+        old_replica_sets = []
+        new_replica_set = None
+        owned_replicasets = []
+        
+        for rs in replicasets.items:
+            # 이 Deployment에 속한 ReplicaSet 찾기
+            owner_refs = rs.metadata.owner_references or []
+            is_owned = False
+            for owner_ref in owner_refs:
+                if owner_ref.kind == "Deployment" and owner_ref.name == name:
+                    is_owned = True
+                    break
+            
+            if is_owned:
+                rs_info = {
+                    "name": rs.metadata.name,
+                    "replicas": f"{rs.status.ready_replicas or 0}/{rs.spec.replicas or 0} replicas created",
+                    "creation_timestamp": rs.metadata.creation_timestamp.isoformat() if rs.metadata.creation_timestamp else None
+                }
+                owned_replicasets.append(rs_info)
+        
+        # NewReplicaSet 찾기: status.new_replica_set이 있으면 그것을 사용, 없으면 가장 최근 것
+        new_replica_set_name = deployment.status.new_replica_set if hasattr(deployment.status, 'new_replica_set') and deployment.status.new_replica_set else None
+        
+        if new_replica_set_name:
+            # status에서 지정된 ReplicaSet 찾기
+            for rs_info in owned_replicasets:
+                if rs_info["name"] == new_replica_set_name:
+                    new_replica_set = rs_info
+                    break
+        
+        # NewReplicaSet이 없으면 가장 최근 것을 찾기
+        if not new_replica_set and owned_replicasets:
+            owned_replicasets.sort(key=lambda x: x["creation_timestamp"] or "", reverse=True)
+            new_replica_set = owned_replicasets[0]
+            old_replica_sets = owned_replicasets[1:]
+        else:
+            # NewReplicaSet이 있으면 나머지는 Old
+            for rs_info in owned_replicasets:
+                if new_replica_set and rs_info["name"] != new_replica_set["name"]:
+                    old_replica_sets.append(rs_info)
+        
+        deployment_info["replica_sets"] = {
+            "new": new_replica_set,
+            "old": old_replica_sets
+        }
+        
+        # Events 정보 조회
+        try:
+            events = core_v1.list_namespaced_event(
+                namespace=namespace,
+                field_selector=f"involvedObject.kind=Deployment,involvedObject.name={name}"
+            )
+            events_list = []
+            for event in events.items[:20]:  # 최근 20개만
+                events_list.append({
+                    "type": event.type,
+                    "reason": event.reason,
+                    "message": event.message,
+                    "count": event.count,
+                    "first_timestamp": event.first_timestamp.isoformat() if event.first_timestamp else None,
+                    "last_timestamp": event.last_timestamp.isoformat() if event.last_timestamp else None
+                })
+            deployment_info["events"] = events_list
+        except Exception as e:
+            deployment_info["events"] = []
         
         # 연결된 Pod 정보 조회
         label_selector = f"app={name}"
