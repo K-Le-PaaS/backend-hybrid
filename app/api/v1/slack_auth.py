@@ -120,8 +120,9 @@ async def handle_slack_callback(
                 pass
 
         # 성공 시 프론트로 리다이렉트 (?slack=connected)
-        settings = get_settings()
-        frontend = settings.frontend_url or "http://localhost:3000/console"
+        # NOTE: Slack 연동 완료 리다이렉트는 다른 프론트엔드 설정에 영향 주지 않도록
+        # 고정 도메인으로 처리합니다.
+        frontend = "https://klepaas.com/console"
         # Build URL safely and append slack=connected regardless of path
         try:
             from urllib.parse import urlparse, urlunparse, urlencode, parse_qsl
