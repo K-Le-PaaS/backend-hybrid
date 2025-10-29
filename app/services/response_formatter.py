@@ -58,6 +58,7 @@ class ResponseFormatter:
                 "deploy_github_repository": self.format_deploy,  # GitHub 레포지토리 배포
                 "k8s_restart_deployment": self.format_restart,
                 "cost_analysis": self.format_cost_analysis,
+                "list_commands": self.format_list_commands,  # 명령어 목록 조회
             }
             
             formatter = command_mapping.get(command)
@@ -1413,3 +1414,190 @@ class ResponseFormatter:
             return kst.strftime("%Y-%m-%d %H:%M")
         except:
             return datetime_str
+
+    def format_list_commands(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """명령어 목록을 카테고리별로 포맷팅합니다."""
+        
+        # 하드코딩된 명령어 목록 (사용자 제공 목록 기반)
+        commands_data = [
+            {
+                "category": "배포 관리",
+                "icon": "📦",
+                "commands": [
+                    {
+                        "name": "deploy",
+                        "name_ko": "배포",
+                        "desc": "GitHub 저장소를 NCP에 배포합니다",
+                        "example": "K-Le-PaaS/test01 배포해줘"
+                    },
+                    {
+                        "name": "scaling",
+                        "name_ko": "스케일링",
+                        "desc": "애플리케이션의 replica 수를 조정합니다",
+                        "example": "K-Le-PaaS/test01 3개로 늘려줘"
+                    },
+                    {
+                        "name": "restart",
+                        "name_ko": "재시작",
+                        "desc": "Pod를 재시작합니다",
+                        "example": "K-Le-PaaS/test01 재시작해줘"
+                    },
+                    {
+                        "name": "rollback",
+                        "name_ko": "롤백",
+                        "desc": "이전 버전으로 되돌립니다",
+                        "example": "K-Le-PaaS/test01 3번 전으로 롤백"
+                    },
+                    {
+                        "name": "list_rollback",
+                        "name_ko": "롤백 목록 조회",
+                        "desc": "롤백 가능한 버전 목록을 보여줍니다",
+                        "example": "K-Le-PaaS/test01 롤백 목록"
+                    }
+                ]
+            },
+            {
+                "category": "리소스 목록 조회",
+                "icon": "📊",
+                "commands": [
+                    {
+                        "name": "list_pods",
+                        "name_ko": "파드 목록 조회",
+                        "desc": "모든 Pod 목록을 보여줍니다",
+                        "example": "default 네임스페이스 pod 목록"
+                    },
+                    {
+                        "name": "list_services",
+                        "name_ko": "서비스 목록 조회",
+                        "desc": "모든 Service 목록을 보여줍니다",
+                        "example": "service 목록 보여줘"
+                    },
+                    {
+                        "name": "list_deployments",
+                        "name_ko": "디플로이 목록 조회",
+                        "desc": "모든 Deployment 목록을 보여줍니다",
+                        "example": "deployment 목록 확인해줘"
+                    },
+                    {
+                        "name": "list_namespaces",
+                        "name_ko": "네임스페이스 목록 조회",
+                        "desc": "모든 Namespace를 보여줍니다",
+                        "example": "네임스페이스 목록"
+                    },
+                    {
+                        "name": "list_endpoints",
+                        "name_ko": "엔드포인트 목록 조회",
+                        "desc": "서비스 엔드포인트 목록을 보여줍니다",
+                        "example": "엔드포인트 목록"
+                    },
+                    {
+                        "name": "list_ingresses",
+                        "name_ko": "인그리스(접속주소) 목록 조회",
+                        "desc": "Ingress 목록을 보여줍니다",
+                        "example": "ingress 목록"
+                    }
+                ]
+            },
+            {
+                "category": "리소스 상태 확인",
+                "icon": "🔍",
+                "commands": [
+                    {
+                        "name": "status (pod)",
+                        "name_ko": "Pod 상태 확인",
+                        "desc": "특정 Pod의 상태를 확인합니다",
+                        "example": "nginx pod 상태 확인"
+                    },
+                    {
+                        "name": "status (service)",
+                        "name_ko": "Service 상태 확인",
+                        "desc": "특정 Service의 상태를 확인합니다",
+                        "example": "api service 상태"
+                    },
+                    {
+                        "name": "status (deployment)",
+                        "name_ko": "Deployment 상태 확인",
+                        "desc": "특정 Deployment의 상태를 확인합니다",
+                        "example": "frontend deployment 상태"
+                    },
+                    {
+                        "name": "overview",
+                        "name_ko": "클러스터 현황",
+                        "desc": "클러스터 전체 상태를 요약해서 보여줍니다",
+                        "example": "클러스터 현황 보여줘"
+                    }
+                ]
+            },
+            {
+                "category": "로그 & 엔드포인트",
+                "icon": "📝",
+                "commands": [
+                    {
+                        "name": "log",
+                        "name_ko": "로그 조회",
+                        "desc": "Pod의 로그를 조회합니다 (최대 100줄)",
+                        "example": "nginx pod 로그 50줄"
+                    },
+                    {
+                        "name": "endpoint",
+                        "name_ko": "엔드포인트 조회",
+                        "desc": "서비스의 접속 주소를 확인합니다",
+                        "example": "api-service endpoint 확인"
+                    }
+                ]
+            },
+            {
+                "category": "상세 정보",
+                "icon": "🔬",
+                "commands": [
+                    {
+                        "name": "get_service",
+                        "name_ko": "Service 상세 정보",
+                        "desc": "Service의 상세 정보를 조회합니다",
+                        "example": "nginx service 상세정보"
+                    },
+                    {
+                        "name": "get_deployment",
+                        "name_ko": "Deployment 상세 정보",
+                        "desc": "Deployment의 상세 정보를 조회합니다",
+                        "example": "frontend deployment 상세정보"
+                    }
+                ]
+            },
+            {
+                "category": "비용 관리",
+                "icon": "💰",
+                "commands": [
+                    {
+                        "name": "cost_analysis",
+                        "name_ko": "비용 분석 및 최적화",
+                        "desc": "리소스 사용량과 비용을 분석합니다",
+                        "example": "비용 분석해줘"
+                    }
+                ]
+            }
+        ]
+        
+        # 총 명령어 개수 계산
+        total_commands = sum(len(cat["commands"]) for cat in commands_data)
+        
+        return {
+            "type": "list_commands",
+            "summary": f"총 {total_commands}개의 명령어를 확인했습니다",
+            "data": {
+                "formatted": {
+                    "categories": commands_data,
+                    "total_commands": total_commands,
+                    "help_text": [
+                        "명령어 이름이나 예시처럼 자연스럽게 입력하세요",
+                        "한국어와 영어 모두 지원합니다",
+                        "궁금한 명령어를 직접 실행해보세요!"
+                    ]
+                },
+                "raw": commands_data
+            },
+            "metadata": {
+                "total_commands": total_commands,
+                "category_count": len(commands_data)
+            }
+        }

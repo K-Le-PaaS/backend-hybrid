@@ -611,8 +611,18 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 - 다양한 뉘앙스: "비용 얼마나 드나?", "클러스터 운영 비용", "요금 확인", "비용 체크", "지출 현황", "예산 확인", "리소스 비용", "인프라 비용", "운영 비용 분석"
 필수 JSON 형식: { "command": "cost_analysis", "parameters": { "namespace": "<추출된_네임스페이스_없으면_'default'>", "analysis_type": "<optimization|usage|forecast>" } }
 
+19. 명령어 목록 조회 (command: "list_commands")
+설명: K-Le-PaaS에서 사용 가능한 모든 명령어 목록을 카테고리별로 보여주는 명령입니다.
+사용자 입력 예시:
+- 기본 표현: "명령어 목록", "명령어 리스트", "명령 목록"
+- 도움말 요청: "도움말", "help", "commands", "command list"
+- 가능한 작업 문의: "사용 가능한 명령", "뭘 할 수 있어", "뭐 할 수 있어", "어떤 명령어 있어"
+- 기능 문의: "기능 목록", "기능 보여줘", "사용법", "사용 방법"
+- 다양한 뉘앙스: "명령어 전체 목록", "모든 명령어", "available commands", "show commands", "list all commands"
+필수 JSON 형식: { "command": "list_commands", "parameters": {} }
+
 일반 규칙:
-- 사용자의 의도가 불분명하거나 위 17가지 명령어 중 어느 것과도 일치하지 않으면: { "command": "unknown", "parameters": { "query": "<사용자_원본_입력>" } }
+- 사용자의 의도가 불분명하거나 위 19가지 명령어 중 어느 것과도 일치하지 않으면: { "command": "unknown", "parameters": { "query": "<사용자_원본_입력>" } }
 - 리소스 이름이 명시되지 않은 경우, 컨텍스트상 기본 리소스가 있다면 그 이름을 사용하거나 null을 반환합니다.
 - 리소스 타입별 파라미터 사용: podName(파드), deploymentName(배포), serviceName(서비스)
 - **중요한 리소스 타입 구분 규칙:**

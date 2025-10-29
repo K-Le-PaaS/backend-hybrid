@@ -330,6 +330,13 @@ def plan_command(req: CommandRequest) -> CommandPlan:
             },
         )
 
+    elif command == "list_commands":
+        # 명령어 목록 조회
+        return CommandPlan(
+            tool="list_commands",
+            args={},
+        )
+
     raise ValueError("해석할 수 없는 명령입니다.")
 
 
@@ -400,6 +407,20 @@ async def _execute_cost_analysis(args: Dict[str, Any]) -> Dict[str, Any]:
                 "storage_gb": 150
             }
         }
+
+
+async def _execute_list_commands(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    명령어 목록 조회 실행
+    
+    사용 가능한 모든 명령어 목록을 반환합니다.
+    실제 데이터는 response_formatter.py의 format_list_commands에서 생성됩니다.
+    """
+    # 빈 딕셔너리 반환 - 포맷터에서 실제 데이터 생성
+    return {
+        "status": "success",
+        "message": "명령어 목록을 조회했습니다."
+    }
 
 
 async def _execute_deploy_github_repository(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -620,6 +641,9 @@ async def _execute_raw_command(plan: CommandPlan) -> Dict[str, Any]:
 
     if plan.tool == "cost_analysis":
         return await _execute_cost_analysis(plan.args)
+
+    if plan.tool == "list_commands":
+        return await _execute_list_commands(plan.args)
 
     raise ValueError("지원하지 않는 실행 계획입니다.")
 
