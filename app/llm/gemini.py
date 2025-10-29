@@ -1,10 +1,7 @@
 import os
-import time
 import json
 import re
-from typing import Any, Dict, List, Optional
-
-import httpx
+from typing import Any, Dict
 
 from .interfaces import LLMClient
 from ..core.config import get_settings
@@ -35,12 +32,10 @@ class GeminiClient(LLMClient):
                 resource_type = parameters.get("resource_type", "pod")
                 owner = parameters.get("owner", "")
                 repo = parameters.get("repo", "")
-
                 # owner/repo가 있으면 네이밍 규칙 적용
                 if owner and repo:
                     # k-le-paas-test01 형식으로 변환
                     base_name = f"{owner.lower()}-{repo.lower()}"
-
                     if resource_type == "service":
                         entities["service_name"] = f"{base_name}-svc"
                         entities["resource_type"] = "service"
@@ -77,13 +72,13 @@ class GeminiClient(LLMClient):
             elif command in ("scale", "deploy", "get_deployment"):
                 if parameters.get("deploymentName") is not None:
                     entities["deployment_name"] = parameters.get("deploymentName")
-
             # Service 관련 명령어
             elif command in ("endpoint", "get_service"):
                 if parameters.get("serviceName") is not None:
                     entities["service_name"] = parameters.get("serviceName")
+                entities["namespace"] = parameters.get("namespace", "default")
 
-            # restart 명령어 처리 (owner/repo 필수 체크 유지)
+            # restart 명령어 처리
             if command == "restart":
                 # GitHub 저장소 정보 (필수)
                 owner = parameters.get("owner", "")
@@ -100,6 +95,8 @@ class GeminiClient(LLMClient):
 
                 entities["github_owner"] = owner
                 entities["github_repo"] = repo
+
+            
 
             # namespace 기본값 포함이 필요한 명령어들
             if command in ("status", "endpoint", "restart", "overview", "list_pods", "logs", "get_service", "get_deployment", "cost_analysis", "list_endpoints", "list_deployments", "list_services"):
@@ -224,7 +221,13 @@ class GeminiClient(LLMClient):
                 else:
                     entities["previous"] = False
 
-            # list_deployments / list_services / list_ingresses / list_namespaces 는 파라미터 없음
+            # list_ingresses / list_namespaces 는 파라미터 없음
+            # list_deployments는 namespace를 사용할 수 있음 (기본값: default)
+            if command == "list_deployments":
+                entities["namespace"] = parameters.get("namespace", "default")
+            # list_services는 namespace를 사용할 수 있음 (기본값: default)
+            if command == "list_services":
+                entities["namespace"] = parameters.get("namespace", "default")
             
             # 명령어에 따른 기본 메시지 생성
             messages = {

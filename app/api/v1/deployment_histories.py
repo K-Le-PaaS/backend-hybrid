@@ -364,14 +364,9 @@ async def get_repositories_latest_deployments(
                     "auto_deploy_enabled": integration.auto_deploy_enabled
                 })
 
-        return JSONResponse(
-            content={"repositories": repositories},
-            headers={
-                "Cache-Control": "no-store, no-cache, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0",
-            }
-        )
+        # FastAPI가 자동 직렬화하도록 dict를 직접 반환합니다.
+        # 캐싱 방지 헤더는 필요 시 미들웨어에서 일괄 적용하세요.
+        return {"repositories": repositories}
 
     except Exception as e:
         raise HTTPException(
