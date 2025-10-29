@@ -39,6 +39,7 @@ class ActionClassifier:
         "endpoint": ActionRiskLevel.LOW,
         "overview": ActionRiskLevel.LOW,
         "cost_analysis": ActionRiskLevel.LOW,  # 비용 분석 (조회만)
+        "list_commands": ActionRiskLevel.LOW,  # 명령어 목록 조회 (조회만)
         "unknown": ActionRiskLevel.LOW,  # unknown 명령어는 확인 불필요
 
         # 중간 위험 (비용 추정 + 확인, MEDIUM 위험)
