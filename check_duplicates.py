@@ -20,7 +20,7 @@ print("\n[STATUS] Status breakdown:")
 for status, count in status_counts:
     print(f"  {status}: {count}")
 
-# 3. 같은 커밋에 대한 중복 기록 확인
+# 3. 같은 커밋에 대한 중복 기록 확인 
 print("\n" + "=" * 80)
 print("[DUPLICATES] Same commit SHA duplicates")
 print("=" * 80)
