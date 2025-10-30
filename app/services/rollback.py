@@ -245,7 +245,8 @@ async def rollback_to_commit(
         owner=owner,
         repo=repo,
         tag=target_commit_sha,  # Pass specific commit SHA as tag for rollback
-        is_rollback=True  # Mark this as a rollback deployment
+        is_rollback=True,  # Mark this as a rollback deployment
+        skip_mirror=True  # Skip mirror to prevent SourceCommit push (avoids pipeline webhook trigger)
     )
 
     # 7. Rollback history is automatically recorded by run_sourcedeploy() with is_rollback=True
@@ -717,61 +718,25 @@ async def scale_deployment(
     current_image_tag = current_deployment.github_commit_sha
     logger.info(f"Current deployment image tag: {current_image_tag[:7]}")
 
-    # 3. Update manifest using deployment logic (mirror + update)
-    settings = get_settings()
-    from .ncp_pipeline import mirror_and_update_manifest, run_sourcedeploy, _generate_ncr_image_name
-
-    # Get GitHub token for mirror operation
-    from .github_app import github_app_auth
-    github_token, _ = await github_app_auth.get_installation_token_for_repo(owner, repo, db)
-    github_repo_url = f"https://github.com/{owner}/{repo}.git"
-
-    # Generate image repo URL
-    image_name = _generate_ncr_image_name(owner, repo)
-    image_repo = f"{settings.ncp_container_registry_url}/{image_name}"
-    actual_sc_repo_name = integ.sc_repo_name or repo
-
-    logger.info(
-        f"Scaling: Updating manifest with replicas={replicas}, "
-        f"image_tag={current_image_tag[:7]}, sc_repo={actual_sc_repo_name}"
-    )
-
-    # Mirror GitHub to SourceCommit and update manifest (image + replicas)
-    mirror_result = mirror_and_update_manifest(
-        github_repo_url=github_repo_url,
-        installation_or_access_token=github_token,
-        sc_project_id=integ.sc_project_id,
-        sc_repo_name=actual_sc_repo_name,
-        image_repo=image_repo,
-        image_tag=current_image_tag,  # Keep same image
-        sc_endpoint=settings.ncp_sourcecommit_endpoint,
-        sc_username=settings.ncp_sourcecommit_username,  # Add SourceCommit auth
-        sc_password=settings.ncp_sourcecommit_password,  # Add SourceCommit auth
-        replicas=replicas  # Update replicas
-    )
-
-    # 실제 매니페스트에서 읽은 old_replicas와 DB에서 읽은 값이 다를 수 있으므로
-    # DB에서 읽은 값을 우선 사용 (확인 메시지와 일치시키기 위해)
-    manifest_old_replicas = mirror_result.get("old_replicas", 1)
-    
-    # DB에서 현재 레플리카 개수 가져오기
+    # 3. Save desired replica count to DB BEFORE deployment
+    # This allows run_sourcedeploy() to use it during manifest update
     from .deployment_config import DeploymentConfigService
     config_service = DeploymentConfigService()
-    db_old_replicas = config_service.get_replica_count(db, owner, repo)
-    
-    # DB 값이 있으면 DB 값을 사용, 없으면 매니페스트 값 사용
-    old_replicas = db_old_replicas if db_old_replicas > 0 else manifest_old_replicas
-    
+    old_replicas = config_service.get_replica_count(db, owner, repo)
+    config_service.set_replica_count(db, owner, repo, replicas, user_id)
+
     logger.info(
-        f"Scaling replicas - DB: {db_old_replicas}, Manifest: {manifest_old_replicas}, Using: {old_replicas}"
+        f"Scaling replicas from {old_replicas} to {replicas}, image_tag={current_image_tag[:7]}"
     )
 
     # Commit DB transaction before triggering deploy
     db.commit()
-    logger.info("Database transaction committed, ready for deployment")
+    logger.info("Database transaction committed with new replica count, ready for deployment")
 
-    # 4. Trigger SourceDeploy with same image tag
-    # Skip mirror since we already updated the manifest above
+    # 4. Trigger SourceDeploy with skip_mirror=True to prevent pipeline webhook trigger
+    # The manifest will use the replica count from DB during deployment
+    settings = get_settings()
+    from .ncp_pipeline import run_sourcedeploy
 
     deploy_result = await run_sourcedeploy(
         deploy_project_id=integ.deploy_project_id,
@@ -784,13 +749,8 @@ async def scale_deployment(
         repo=repo,
         tag=current_image_tag,  # Use same image, just update replicas
         is_rollback=False,  # This is scaling, not rollback
-        skip_mirror=True  # Skip mirror since manifest was already updated above
+        skip_mirror=True  # Skip mirror to prevent SourceCommit push (avoids pipeline webhook trigger)
     )
-
-    # Save replica count to DB for persistence across deployments/rollbacks
-    from .deployment_config import DeploymentConfigService
-    config_service = DeploymentConfigService()
-    config_service.set_replica_count(db, owner, repo, replicas, user_id)
 
     logger.info(
         "scaling_deployment_completed",
