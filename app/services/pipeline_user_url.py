@@ -229,6 +229,86 @@ def get_all_deployment_urls_for_user(
         return []
 
 
+def is_domain_available(
+    db: Session,
+    domain: str,
+    exclude_owner: str = None,
+    exclude_repo: str = None
+) -> bool:
+    """
+    도메인이 사용 가능한지 확인합니다 (중복 체크).
+
+    Args:
+        db: 데이터베이스 세션
+        domain: 확인할 도메인 (예: "myapp.klepaas.app" 또는 "https://myapp.klepaas.app")
+        exclude_owner: 제외할 GitHub owner (자기 자신 제외용)
+        exclude_repo: 제외할 GitHub repo (자기 자신 제외용)
+
+    Returns:
+        True: 사용 가능, False: 이미 사용중
+    """
+    try:
+        # URL 정규화 (https:// 제거)
+        normalized_domain = domain.replace("https://", "").replace("http://", "")
+        
+        # 전체 URL로 검색
+        search_url = f"https://{normalized_domain}"
+        
+        # 기존 사용 중인지 조회
+        query = db.query(DeploymentUrl).filter(
+            DeploymentUrl.url == search_url
+        )
+        
+        # 자기 자신은 제외 (도메인 변경 시)
+        if exclude_owner and exclude_repo:
+            query = query.filter(
+                ~((DeploymentUrl.github_owner == exclude_owner) & 
+                  (DeploymentUrl.github_repo == exclude_repo))
+            )
+        
+        existing = query.first()
+        
+        if existing:
+            logger.warning(
+                f"Domain {normalized_domain} is already in use by "
+                f"{existing.github_owner}/{existing.github_repo}"
+            )
+            return False
+        
+        logger.info(f"Domain {normalized_domain} is available")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to check domain availability: {e}")
+        return False
+
+
+def get_all_domains_in_use(db: Session) -> list[str]:
+    """
+    현재 사용 중인 모든 도메인 목록을 반환합니다.
+
+    Args:
+        db: 데이터베이스 세션
+
+    Returns:
+        사용 중인 도메인 목록 (예: ["myapp.klepaas.app", "test01.klepaas.app"])
+    """
+    try:
+        deployment_urls = db.query(DeploymentUrl).all()
+        
+        domains = []
+        for deployment_url in deployment_urls:
+            # URL에서 도메인만 추출 (https:// 제거)
+            domain = deployment_url.url.replace("https://", "").replace("http://", "")
+            domains.append(domain)
+        
+        return domains
+        
+    except Exception as e:
+        logger.error(f"Failed to get all domains in use: {e}")
+        return []
+
+
 def update_deployment_url_from_manifest(
     db: Session,
     user_id: str,

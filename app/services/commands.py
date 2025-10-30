@@ -148,7 +148,26 @@ def plan_command(req: CommandRequest) -> CommandPlan:
                 "replicas": req.replicas
             },
         )
-    
+
+    elif command == "change_domain":
+        # 도메인 변경 (NCP SourceCommit ingress 수정)
+        if not req.github_owner or not req.github_repo:
+            raise ValueError("도메인 변경 명령어에는 GitHub 저장소 정보가 필요합니다. 예: 'K-Le-PaaS/test01 도메인을 myapp으로 변경'")
+        # new_domain은 version 필드 재사용 또는 별도 필드
+        new_domain = getattr(req, "new_domain", "") or req.version or ""
+        if not new_domain:
+            raise ValueError("변경할 도메인을 입력해주세요. 예: 'K-Le-PaaS/test01 도메인을 myapp으로 변경'")
+        return CommandPlan(
+            tool="change_domain",
+            args={
+                "owner": req.github_owner,
+                "repo": req.github_repo,
+                "github_owner": req.github_owner,
+                "github_repo": req.github_repo,
+                "new_domain": new_domain
+            },
+        )
+
     elif command == "status":
         resource_type = req.resource_type or "pod"
         # 입력 이름 접미사로 리소스 타입 자동 판별 (-deploy, -svc)
@@ -536,15 +555,15 @@ async def execute_command(plan: CommandPlan) -> Dict[str, Any]:
     """
     # 원본 실행 결과를 가져옵니다
     raw_result = await _execute_raw_command(plan)
-    
-    # 스케일링 명령의 경우 포맷팅하지 않고 원시 결과 반환
-    if plan.tool == "scale":
+
+    # 스케일링 및 도메인 변경 명령의 경우 포맷팅하지 않고 원시 결과 반환
+    if plan.tool in ("scale", "change_domain"):
         return raw_result
-    
+
     # 다른 명령어들은 ResponseFormatter를 사용하여 포맷팅
     formatter = ResponseFormatter()
     formatted_result = formatter.format_by_command(plan.tool, raw_result)
-    
+
     return formatted_result
 
 
@@ -561,6 +580,9 @@ async def _execute_raw_command(plan: CommandPlan) -> Dict[str, Any]:
 
     if plan.tool == "scale":
         return await _execute_scale(plan.args)
+
+    if plan.tool == "change_domain":
+        return await _execute_change_domain(plan.args)
 
     if plan.tool == "k8s_get_pod_status":
         return await _execute_get_pod_status(plan.args)
@@ -1171,6 +1193,69 @@ async def _execute_scale(args: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "status": "error",
             "message": f"스케일링 실패: {str(e)}"
+        }
+
+
+async def _execute_change_domain(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    도메인 변경 (change_domain 명령어)
+    NCP SourceCommit ingress 매니페스트 기반 도메인 변경
+    예: "K-Le-PaaS/test01 도메인을 myapp으로 변경", "test01 도메인 변경 my-custom"
+    """
+    from .domain_changer import change_domain
+    from ..database import get_db
+
+    owner = args.get("owner") or args.get("github_owner", "")
+    repo = args.get("repo") or args.get("github_repo", "")
+    new_domain = args.get("new_domain", "")
+    user_id = args.get("user_id", "nlp_user")
+
+    # Validation
+    if not owner or not repo:
+        return {
+            "status": "error",
+            "message": "GitHub 저장소 정보가 필요합니다 (예: K-Le-PaaS/test01 도메인을 myapp으로 변경)"
+        }
+
+    if not new_domain:
+        return {
+            "status": "error",
+            "message": "변경할 도메인을 입력해주세요 (예: K-Le-PaaS/test01 도메인을 myapp으로 변경)"
+        }
+
+    try:
+        # 데이터베이스 세션 생성
+        db = next(get_db())
+
+        try:
+            # change_domain 호출
+            result = await change_domain(
+                owner=owner,
+                repo=repo,
+                new_domain=new_domain,
+                db=db,
+                user_id=user_id
+            )
+
+            return {
+                "status": "success",
+                "message": f"{owner}/{repo}의 도메인을 {result['old_domain']}에서 {result['new_domain']}으로 변경했습니다.",
+                "data": result
+            }
+
+        finally:
+            db.close()
+
+    except HTTPException as e:
+        return {
+            "status": "error",
+            "message": e.detail
+        }
+    except Exception as e:
+        logger.error(f"Domain change failed: {str(e)}", exc_info=True)
+        return {
+            "status": "error",
+            "message": f"도메인 변경 실패: {str(e)}"
         }
 
 

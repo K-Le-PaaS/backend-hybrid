@@ -149,7 +149,7 @@ async def process_command(
                     # 기타 파라미터들
                     replicas=entities.get("replicas", 1),
                     lines=entities.get("lines", 30),
-                    version=entities.get("version") or "",
+                    version=entities.get("new_domain") or entities.get("version") or "",
                     namespace=entities.get("namespace") or "default",
                     previous=bool(entities.get("previous", False)),
                     # NCP 롤백 관련 필드

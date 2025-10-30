@@ -137,6 +137,36 @@ class GeminiClient(LLMClient):
                     coerced_replicas = 100
                 entities["replicas"] = coerced_replicas
 
+            # 도메인 변경 파라미터
+            if command == "change_domain":
+                # GitHub 저장소 정보 (필수)
+                owner = parameters.get("owner", "")
+                repo = parameters.get("repo", "")
+
+                # owner/repo가 비어있는 경우 에러 처리
+                if not owner or not repo:
+                    entities["error"] = "GitHub 저장소 정보가 필요합니다. 'K-Le-PaaS/test01 도메인을 myapp으로 변경' 형식으로 입력해주세요."
+                    return {
+                        "intent": "error",
+                        "entities": entities,
+                        "message": entities["error"]
+                    }
+
+                entities["github_owner"] = owner
+                entities["github_repo"] = repo
+
+                # 새 도메인 (필수)
+                new_domain = parameters.get("newDomain", "")
+                if not new_domain:
+                    entities["error"] = "변경할 도메인을 입력해주세요. 예: 'K-Le-PaaS/test01 도메인을 myapp으로 변경'"
+                    return {
+                        "intent": "error",
+                        "entities": entities,
+                        "message": entities["error"]
+                    }
+
+                entities["new_domain"] = new_domain
+
             # NCP 롤백 파라미터
             if command == "rollback":
                 # GitHub 저장소 정보 (필수)
@@ -235,6 +265,7 @@ class GeminiClient(LLMClient):
                 "rollback": "롤백 명령을 해석했습니다.",
                 "list_rollback": "롤백 목록 조회 명령을 해석했습니다.",
                 "scale": "스케일링 명령을 해석했습니다.",
+                "change_domain": "도메인 변경 명령을 해석했습니다.",
                 "status": "상태 확인 명령을 해석했습니다.",
                 "logs": "로그 조회 명령을 해석했습니다.",
                 "endpoint": "엔드포인트 조회 명령을 해석했습니다.",
@@ -498,7 +529,46 @@ B) N번째 전으로 롤백: 숫자를 지정하여 N번째 이전 성공 배포
 - "K-Le-PaaS/test01 롤백 목록" → { "command": "list_rollback", "parameters": { "owner": "K-Le-PaaS", "repo": "test01" } }
 - "myorg/myapp 배포 이력" → { "command": "list_rollback", "parameters": { "owner": "myorg", "repo": "myapp" } }
 
-7. 배포 (command: "deploy")
+7. 도메인 변경 (command: "change_domain")
+설명: NCP SourceCommit ingress 매니페스트를 수정하여 배포된 애플리케이션의 접속 도메인을 변경하는 명령입니다.
+중요: GitHub 저장소(owner/repo) 정보와 새 도메인이 반드시 필요합니다.
+
+사용자 입력 예시:
+- **저장소 지정 패턴** (권장):
+  * "K-Le-PaaS/test01 도메인을 myapp으로 변경"
+  * "K-Le-PaaS/test01 도메인 myapp으로 바꿔줘"
+  * "owner/repo 도메인 변경 my-custom"
+  * "myorg/myapp 도메인을 new-domain으로 변경해줘"
+  * "저장소 K-Le-PaaS/backend-hybrid 도메인 my-backend로 바꿔줘"
+  * "test01 저장소 도메인 변경 custom-name"
+
+- **간단한 패턴** (저장소 정보 필수):
+  * "test01 도메인을 myapp으로 변경" → owner는 컨텍스트에서 추론
+  * "backend 도메인 my-backend로 바꿔" → owner는 컨텍스트에서 추론
+
+- **도메인 형식**:
+  * "myapp" → myapp.klepaas.app로 자동 확장
+  * "my-custom" → my-custom.klepaas.app로 자동 확장
+  * "test-domain.klepaas.app" → 그대로 사용
+
+- **자연스러운 표현**:
+  * "앱 도메인 바꿔줘", "접속 주소 변경", "URL 변경해줘"
+  * "K-Le-PaaS/test01 주소를 myapp으로 변경"
+  * "도메인 새로 설정", "접속 도메인 바꿔줘"
+
+추출 규칙:
+1. **도메인 변경 키워드 감지**: "도메인 변경", "도메인 바꿔", "URL 변경", "주소 변경", "접속 주소 바꿔" 등이 있으면 change_domain 명령으로 인식
+2. **owner/repo 패턴 추출**: "K-Le-PaaS/test01", "owner/repo", "저장소명" 등에서 GitHub 저장소 정보 추출
+3. **새 도메인 추출**: "~으로 변경", "~로 바꿔" 등의 표현 뒤에 오는 도메인명 추출 (예: "myapp", "my-custom", "test-domain")
+
+필수 JSON 형식: { "command": "change_domain", "parameters": { "owner": "<GitHub_저장소_소유자>", "repo": "<GitHub_저장소_이름>", "newDomain": "<새_도메인>" } }
+
+예시 변환:
+- "K-Le-PaaS/test01 도메인을 myapp으로 변경" → { "command": "change_domain", "parameters": { "owner": "K-Le-PaaS", "repo": "test01", "newDomain": "myapp" } }
+- "test01 도메인 my-custom으로 바꿔줘" → { "command": "change_domain", "parameters": { "owner": "", "repo": "test01", "newDomain": "my-custom" } }
+- "myorg/backend 주소를 new-backend로 변경" → { "command": "change_domain", "parameters": { "owner": "myorg", "repo": "backend", "newDomain": "new-backend" } }
+
+8. 배포 (command: "deploy")
 설명: GitHub 저장소의 최신 main 브랜치 커밋을 빌드하고 클러스터에 배포합니다.
 중요: GitHub 저장소(owner/repo) 정보가 반드시 필요합니다.
 

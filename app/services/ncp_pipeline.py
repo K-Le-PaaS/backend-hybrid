@@ -2493,8 +2493,16 @@ async def run_sourcedeploy(
 
     stage_id, scenario_id = await _get_stage_scenario_ids()
 
-    # Create minimal stage/scenario if missing
+    # Create minimal stage/scenario if missing (but not when skip_mirror=True)
     if stage_id is None:
+        if skip_mirror:
+            # When skipping mirror (e.g., domain change), we expect stage to already exist
+            raise HTTPException(
+                status_code=400,
+                detail=f"Stage '{stage_name}' not found for deploy project {deploy_project_id}. "
+                       f"When using skip_mirror=True for operations like domain change, "
+                       f"the stage and scenario must already exist from a previous deployment."
+            )
         _dbg("SD-STAGE-CREATE", project_id=deploy_project_id, name=stage_name, nks_cluster_id=nks_cluster_id)
         # Official NCP API schema for Kubernetes stage with cluster
         body = {
@@ -2547,6 +2555,15 @@ async def run_sourcedeploy(
     # 여기서는 기존 scenario를 찾기만 합니다
 
     if scenario_id is None:
+        if skip_mirror:
+            # When skipping mirror (e.g., domain change), we expect scenario to already exist
+            raise HTTPException(
+                status_code=400,
+                detail=f"Scenario '{scenario_name}' not found in stage '{stage_name}' for deploy project {deploy_project_id}. "
+                       f"When using skip_mirror=True for operations like domain change, "
+                       f"the stage and scenario must already exist from a previous deployment."
+            )
+
         if stage_id is None:
             stage_id, _ = await _get_stage_scenario_ids()
             if not stage_id:
