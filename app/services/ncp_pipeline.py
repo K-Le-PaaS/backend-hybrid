@@ -3337,19 +3337,6 @@ async def create_sourcepipeline_project_rest(
         "description": f"Automated CI/CD pipeline for {owner}/{repo}",
         "tasks": [
             {
-                "name": "build-docker-image",
-                "type": "SourceBuild",
-                "config": {
-                    "projectId": int(build_project_id),
-                    "target": {
-                        "info": {
-                            "branch": branch
-                        }
-                    }
-                },
-                "linkedTasks": []
-            },
-            {
                 "name": "deploy-to-nks",
                 "type": "SourceDeploy",
                 "config": {
@@ -3357,7 +3344,7 @@ async def create_sourcepipeline_project_rest(
                     "stageId": deploy_stage_id,
                     "scenarioId": deploy_scenario_id
                 },
-                "linkedTasks": ["build-docker-image"]
+                "linkedTasks": []
             }
         ],
         "trigger": {
