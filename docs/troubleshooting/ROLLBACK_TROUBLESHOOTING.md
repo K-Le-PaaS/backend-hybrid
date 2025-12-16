@@ -4,9 +4,9 @@
 
 K-Le-PaaS의 롤백 기능이 제대로 작동하려면 다음 세 가지 요소가 필요합니다:
 
-1. **프로젝트 통합(Integration) 설정**: `build_project_id`, `deploy_project_id`
-2. **배포 히스토리(Deployment History)**: 성공적인 배포 기록
-3. **NCR 이미지(Container Image)**: 롤백하려는 커밋의 컨테이너 이미지
+1. **프로젝트 통합(Integration) 설정**: `build_project_id`, `deploy_project_id`  
+2. **배포 히스토리(Deployment History)**: 성공적인 배포 기록  
+3. **NCR 이미지(Container Image)**: 롤백하려는 커밋의 컨테이너 이미지  
 
 ## 자주 발생하는 에러
 
@@ -56,7 +56,7 @@ K-Le-PaaS의 롤백 기능이 제대로 작동하려면 다음 세 가지 요소
 ```
 
 **원인:**
-- 프로젝트 통합은 있지만 `build_project_id`가 설정되지 않음
+- 프로젝트 통합은 있지만 `build_project_id` 가 설정되지 않음
 
 **해결 방법:**
 
@@ -114,8 +114,8 @@ K-Le-PaaS의 롤백 기능이 제대로 작동하려면 다음 세 가지 요소
 ```
 
 **원인:**
-- 특정 커밋의 성공적인 배포 기록이 없음
-- `rollback_to_previous`를 통해 자동으로 선택된 커밋이지만 실제로는 배포된 적이 없음
+- 특정 커밋의 성공적인 배포 기록이 없음  
+- `rollback_to_previous` 를 통해 자동으로 선택된 커밋이지만 실제로는 배포된 적이 없음
 
 **해결 방법:**
 
@@ -142,12 +142,12 @@ Latest deployment image not found in NCR (HTTP 404). Rollback will trigger rebui
 ```
 
 **원인:**
-- NCR(NCP Container Registry)에 해당 커밋 SHA를 태그로 가진 이미지가 없음
+- NCR(NCP Container Registry)에 해당 커밋 SHA를 태그로 가진 이미지가 없음  
 - 이미지가 삭제되었거나 빌드가 실패했을 수 있음
 
 **해결 방법:**
 
-1. **롤백은 여전히 가능** - 자동으로 이미지를 다시 빌드합니다
+1. **롤백은 여전히 가능** - 자동으로 이미지를 다시 빌드합니다.  
 2. **수동으로 이미지 확인:**
    ```bash
    # NCR 이미지 목록 조회
@@ -209,10 +209,10 @@ WHERE github_owner = 'K-Le-PaaS' AND github_repo = 'test01';
 ```
 
 **필수 필드:**
-- `build_project_id` (NOT NULL)
-- `deploy_project_id` (NOT NULL)
-- `sc_project_id` (NOT NULL)
-- `sc_repo_name` (NOT NULL)
+- `build_project_id` (NOT NULL)  
+- `deploy_project_id` (NOT NULL)  
+- `sc_project_id` (NOT NULL)  
+- `sc_repo_name` (NOT NULL)  
 
 ### 2단계: 배포 히스토리 확인
 
@@ -227,8 +227,8 @@ LIMIT 10;
 ```
 
 **필수 조건:**
-- 최소 1개 이상의 성공적인 배포 기록
-- 롤백하려는 커밋의 배포 기록이 있어야 함
+- 최소 1개 이상의 성공적인 배포 기록  
+- 롤백하려는 커밋의 배포 기록이 있어야 함  
 
 ### 3단계: NCR 이미지 확인
 
@@ -332,7 +332,9 @@ async def test_ncr_image():
 
 롤백 기능 관련 문제가 계속되면:
 
-1. **진단 API 결과 첨부**: `/api/v1/rollback/diagnose/OWNER/REPO`
-2. **로그 파일 제공**: 전체 서버 로그 (특히 ERROR/WARNING 레벨)
-3. **데이터베이스 상태**: 위 SQL 쿼리 결과
-4. **에러 메시지**: 정확한 에러 메시지와 HTTP 상태 코드
+1. **진단 API 결과 첨부**: `/api/v1/rollback/diagnose/OWNER/REPO`  
+2. **로그 파일 제공**: 전체 서버 로그 (특히 ERROR/WARNING 레벨)  
+3. **데이터베이스 상태**: 위 SQL 쿼리 결과  
+4. **에러 메시지**: 정확한 에러 메시지와 HTTP 상태 코드  
+
+

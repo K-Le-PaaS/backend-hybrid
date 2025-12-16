@@ -11,7 +11,7 @@
 ### 분석
 
 #### 1. 실제 에러 원인
-`rollback_to_commit` 함수에서 프로젝트 통합(integration) 조회 시 `build_project_id`가 없어서 발생한 에러입니다.
+`rollback_to_commit` 함수에서 프로젝트 통합(integration) 조회 시 `build_project_id` 가 없어서 발생한 에러입니다.
 
 **에러 발생 위치:** `app/services/rollback.py:73-77` (개선 전)
 
@@ -25,7 +25,7 @@ if not integ or not integ.build_project_id:
 ```
 
 #### 2. 혼란스러운 에러 메시지
-- **NCR 404**: NCR에서 이미지를 찾지 못한 것은 맞지만, 이건 예상된 상황이며 자동으로 리빌드됨
+- **NCR 404**: NCR에서 이미지를 찾지 못한 것은 맞지만, 이건 예상된 상황이며 자동으로 리빌드됨  
 - **실제 문제**: "No build project found" - 프로젝트 통합 설정이 없음
 
 #### 3. 근본 원인 체인
@@ -127,15 +127,15 @@ async def diagnose_rollback_readiness(
 롤백 실행 순서 최적화:
 
 **개선 전:**
-1. 배포 히스토리 조회
-2. NCR 이미지 검증
-3. 프로젝트 통합 조회 ← 여기서 실패
+1. 배포 히스토리 조회  
+2. NCR 이미지 검증  
+3. 프로젝트 통합 조회 ← 여기서 실패  
 
 **개선 후:**
-1. 프로젝트 통합 조회 ← 먼저 검증
-2. 배포 히스토리 조회
-3. NCR 이미지 검증
-4. 롤백 실행
+1. 프로젝트 통합 조회 ← 먼저 검증  
+2. 배포 히스토리 조회  
+3. NCR 이미지 검증  
+4. 롤백 실행  
 
 ## 해결 방법
 
@@ -190,9 +190,9 @@ LIMIT 10;
 ### 시나리오 1: 정상 롤백
 
 **전제 조건:**
-- ✅ 프로젝트 통합 설정 완료
-- ✅ 성공적인 배포 기록 2개 이상
-- ✅ NCR 이미지 존재
+- ✅ 프로젝트 통합 설정 완료  
+- ✅ 성공적인 배포 기록 2개 이상  
+- ✅ NCR 이미지 존재  
 
 **명령어:**
 ```
@@ -223,8 +223,8 @@ K-Le-PaaS/new-project 롤백 해줘
 ### 시나리오 3: 배포 히스토리 없음
 
 **전제 조건:**
-- ✅ 프로젝트 통합 설정 완료
-- ❌ 배포 기록 없음
+- ✅ 프로젝트 통합 설정 완료  
+- ❌ 배포 기록 없음  
 
 **명령어:**
 ```
@@ -240,9 +240,9 @@ K-Le-PaaS/undeployed-project 롤백 해줘
 ### 시나리오 4: 이미지 없음 (자동 리빌드)
 
 **전제 조건:**
-- ✅ 프로젝트 통합 설정 완료
-- ✅ 배포 기록 존재
-- ❌ NCR 이미지 없음
+- ✅ 프로젝트 통합 설정 완료  
+- ✅ 배포 기록 존재  
+- ❌ NCR 이미지 없음  
 
 **명령어:**
 ```
@@ -257,7 +257,8 @@ K-Le-PaaS/test01 abc1234 커밋으로 롤백
 
 ## 참고 자료
 
-- [롤백 문제 해결 가이드](./ROLLBACK_TROUBLESHOOTING.md)
-- [롤백 서비스 코드](../app/services/rollback.py)
-- [롤백 API 문서](../app/api/v1/rollback.py)
-- [NLP 명령 처리](../app/services/commands.py)
+- [롤백 문제 해결 가이드](./ROLLBACK_TROUBLESHOOTING.md)  
+- [롤백 서비스 코드](../../app/services/rollback.py)  
+- [롤백 API 문서](../../app/api/v1/rollback.py)  
+- [NLP 명령 처리](../../app/services/commands.py)  
+

@@ -575,10 +575,10 @@ spec:
 
 ## 참고 문서
 
-- [01-github-to-ncp-pipeline.md](./code-analysis/01-github-to-ncp-pipeline.md) - GitHub → NCP 전체 파이프라인
-- [02-nlp-deploy-rollback.md](./code-analysis/02-nlp-deploy-rollback.md) - NLP 배포 및 롤백
-- [ADVANCED_NLP.md](./ADVANCED_NLP.md) - Advanced NLP 시스템
-- [CLAUDE.md](../CLAUDE.md) - 프로젝트 전체 개요
+- [GitHub → NCP 전체 파이프라인](./GITHUB_TO_NCP_PIPELINE.md) - GitHub → NCP 전체 파이프라인
+- [NLP 배포 및 롤백](../nlp/DEPLOY_ROLLBACK.md) - NLP 배포 및 롤백
+- [NCP 아키텍처 개요](./README.md) - NCP 아키텍처 개요
+- [프로젝트 전체 개요](../../../CLAUDE.md) - 프로젝트 전체 개요
 
 ---
 

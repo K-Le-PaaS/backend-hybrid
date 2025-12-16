@@ -248,10 +248,10 @@ Gemini는 자연어 명령을 구조화된 데이터로 변환:
 
 ### 새로운 롤백 타입 추가
 
-1. `CommandRequest`에 필드 추가
-2. `plan_command()`에 새로운 command 케이스 추가
-3. `execute_command()`에 새로운 tool 핸들러 추가
-4. 새로운 `_execute_*` 함수 구현
+1. `CommandRequest`에 필드 추가  
+2. `plan_command()`에 새로운 command 케이스 추가  
+3. `execute_command()`에 새로운 tool 핸들러 추가  
+4. 새로운 `_execute_*` 함수 구현  
 
 ### 다른 클라우드 프로바이더 지원
 
@@ -269,9 +269,9 @@ elif command == "gcp_rollback":
 
 ### 유효성 검사
 
-1. **nlp.py**: 명령어 길이, 위험한 키워드 체크
-2. **plan_command()**: 필수 필드 존재 여부 검사
-3. **_execute_ncp_rollback()**: 비즈니스 로직 오류 처리
+1. **nlp.py**: 명령어 길이, 위험한 키워드 체크  
+2. **plan_command()**: 필수 필드 존재 여부 검사  
+3. **_execute_ncp_rollback()**: 비즈니스 로직 오류 처리  
 
 ### 에러 응답 형식
 
@@ -289,15 +289,15 @@ elif command == "gcp_rollback":
 
 ### 권한 관리
 
-- REST API는 OAuth2/JWT 토큰으로 인증
-- NLP 엔드포인트는 `db: Session = Depends(get_db)` 통해 세션 관리
-- 롤백 작업은 audit_log에 기록
+- REST API는 OAuth2/JWT 토큰으로 인증  
+- NLP 엔드포인트는 `db: Session = Depends(get_db)` 통해 세션 관리  
+- 롤백 작업은 audit_log에 기록  
 
 ### 입력 검증
 
-- 커밋 SHA 형식 검증 (7-40자 hex)
-- steps_back 범위 제한 (0-10)
-- 저장소 이름 패턴 검증
+- 커밋 SHA 형식 검증 (7-40자 hex)  
+- steps_back 범위 제한 (0-10)  
+- 저장소 이름 패턴 검증  
 
 ## 테스트 전략
 
@@ -339,16 +339,16 @@ async def test_nlp_rollback_command():
 
 ### 캐싱
 
-- 롤백 후보 목록은 Redis에 캐싱 가능
-- TTL: 5분
+- 롤백 후보 목록은 Redis에 캐싱 가능  
+- TTL: 5분  
 
 ## 모니터링
 
 ### 메트릭
 
-- `ncp_rollback_total`: 롤백 요청 총 횟수
-- `ncp_rollback_success`: 성공한 롤백 횟수
-- `ncp_rollback_duration_seconds`: 롤백 소요 시간
+- `ncp_rollback_total`: 롤백 요청 총 횟수  
+- `ncp_rollback_success`: 성공한 롤백 횟수  
+- `ncp_rollback_duration_seconds`: 롤백 소요 시간  
 
 ### 로깅
 
@@ -364,7 +364,9 @@ logger.info(
 
 ## 참고 자료
 
-- [ROLLBACK_FEATURE_IMPLEMENTATION.md](./ROLLBACK_FEATURE_IMPLEMENTATION.md): 구현 상세 내역
-- [app/services/commands.py](../app/services/commands.py): 명령 처리 로직
-- [app/services/rollback.py](../app/services/rollback.py): 롤백 비즈니스 로직
-- [app/api/v1/nlp.py](../app/api/v1/nlp.py): NLP 엔드포인트
+- [ROLLBACK_FEATURE_IMPLEMENTATION.md](./ROLLBACK_FEATURE_IMPLEMENTATION.md): 구현 상세 내역  
+- [app/services/commands.py](../../app/services/commands.py): 명령 처리 로직  
+- [app/services/rollback.py](../../app/services/rollback.py): 롤백 비즈니스 로직  
+- [app/api/v1/nlp.py](../../app/api/v1/nlp.py): NLP 엔드포인트  
+
+

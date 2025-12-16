@@ -1149,5 +1149,6 @@ CREATE INDEX idx_deployment_history_owner_repo
 6. **모든 배포/롤백은 is_rollback 플래그로 구분**됩니다.
 
 ### 관련 문서
-- [01-github-to-ncp-pipeline.md](./01-github-to-ncp-pipeline.md) - GitHub → NCP 파이프라인
-- [03-troubleshooting.md](./03-troubleshooting.md) - 트러블슈팅 가이드
+- [GitHub → NCP 파이프라인](../ncp/GITHUB_TO_NCP_PIPELINE.md) - GitHub → NCP 파이프라인
+- [롤백 트러블슈팅](../../troubleshooting/ROLLBACK_ERROR_ANALYSIS.md) - 롤백 에러 분석
+- [롤백 문제 해결](../../troubleshooting/ROLLBACK_TROUBLESHOOTING.md) - 롤백 장애 처리 및 해결
