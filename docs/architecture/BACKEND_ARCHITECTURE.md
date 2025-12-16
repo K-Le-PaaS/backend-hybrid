@@ -1138,6 +1138,7 @@ Half-Open (테스트)
 
 ### 외부 통합
 - [Slack 설정 가이드](./integrations/SLACK_SETUP.md) - Slack OAuth 및 알림
+- [GitHub App 설정 가이드](./integrations/GITHUB_APP_SETUP.md) - GitHub App 및 웹훅 설정
 - [NCP 시나리오 가이드](../troubleshooting/ncp/NCP_SCENARIO_MANUAL_CREATION.md) - NCP SourceDeploy
 
 ### 프로젝트 문서
