@@ -24,7 +24,8 @@ docs/
 │   │   ├── GITHUB_TO_NCP_PIPELINE.md # GitHub → NCP 파이프라인 전체 흐름
 │   │   └── MANIFEST_AUTO_GENERATION.md # Manifest 자동 생성 기능
 │   └── integrations/                 # 외부 서비스 연동 아키텍처
-│       └── SLACK_SETUP.md            # Slack 앱 설정 가이드
+│       ├── SLACK_SETUP.md            # Slack 앱 설정 가이드
+│       └── GITHUB_APP_SETUP.md       # GitHub App 설정 가이드
 └── troubleshooting/                   # 문제 해결 및 장애 대응 정리
     ├── ROLLBACK_ERROR_ANALYSIS.md    # 롤백 에러 분석
     ├── ROLLBACK_TROUBLESHOOTING.md   # 롤백 장애 처리 및 해결
@@ -70,9 +71,9 @@ docs/
    - [NLP 명령어 구현 가이드](architecture/nlp/implementation.md) ⭐ 개발자 가이드
    - [NLP 배포 및 롤백 기능](architecture/nlp/DEPLOY_ROLLBACK.md) ⭐ NLP 배포/롤백 상세 분석
 
-4. **Slack 연동**: [architecture/integrations/SLACK_SETUP.md](./architecture/integrations/SLACK_SETUP.md)
-   - Slack 앱 생성 및 OAuth 설정
-   - 배포 알림 설정
+4. **외부 서비스 연동**:
+   - [Slack 연동](architecture/integrations/SLACK_SETUP.md) - Slack 앱 생성 및 OAuth 설정
+   - [GitHub App 설정](architecture/integrations/GITHUB_APP_SETUP.md) - GitHub App 생성 및 웹훅 설정
 
 ---
 
@@ -163,6 +164,15 @@ docs/
 - 배포 알림 및 이벤트 구독
 - 슬래시 명령어 설정
 
+#### GITHUB_APP_SETUP.md
+**GitHub App 설정 가이드**
+
+- 위치: [architecture/integrations/GITHUB_APP_SETUP.md](./architecture/integrations/GITHUB_APP_SETUP.md)
+- GitHub App 생성 및 설정
+- 환경 변수 설정
+- 웹훅 자동 설정
+- 문제 해결 가이드
+
 ---
 
 ## 🎯 문서 작성 원칙
@@ -210,8 +220,9 @@ docs/
 - [troubleshooting/ncp/NCP_SCENARIO_DEBUG.md](./troubleshooting/ncp/NCP_SCENARIO_DEBUG.md) - SourceDeploy 시나리오 자동 생성 시 에러 330900 "unknown" 분석
 - [troubleshooting/ncp/NCP_SCENARIO_MANUAL_CREATION.md](./troubleshooting/ncp/NCP_SCENARIO_MANUAL_CREATION.md) - NCP Console에서 수동으로 시나리오 생성 및 API 페이로드 캡처 절차
 
-### Slack 연동
-→ [architecture/integrations/SLACK_SETUP.md](./architecture/integrations/SLACK_SETUP.md)
+### 외부 서비스 연동
+→ [architecture/integrations/SLACK_SETUP.md](./architecture/integrations/SLACK_SETUP.md) - Slack 앱 설정
+→ [architecture/integrations/GITHUB_APP_SETUP.md](./architecture/integrations/GITHUB_APP_SETUP.md) - GitHub App 설정
 
 ### 튜토리얼 구현
 → [architecture/tutorial/implementation.md](./architecture/tutorial/implementation.md)
