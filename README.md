@@ -1,213 +1,299 @@
-# K-Le-PaaS Backend Hybrid
+## K-Le-PaaS Backend Hybrid
 
-FastAPI + MCP hybrid backend service. This app exposes REST endpoints under `/api/v1` and mounts an MCP server or a stub at `/mcp`.
+FastAPI 기반의 **클라우드 운영 자동화 백엔드**입니다. `/api/v1` 아래에 REST API를 제공하고, Kubernetes·GitHub·Slack·NCP와 연동하여 **배포·롤백·모니터링·자연어 명령 실행**을 하나의 시스템으로 묶어줍니다.
 
-## 🧠 고급 자연어 처리 시스템 (Advanced NLP)
+---
 
-K-Le-PaaS v6의 핵심 기능인 고급 자연어 처리 시스템이 통합되어 있습니다.
+## 이 프로젝트가 해결하려는 문제
 
-### 주요 기능
-- **다중 AI 모델 통합**: Claude, GPT-4, Gemini 동시 활용
-- **컨텍스트 인식 처리**: 대화 히스토리 및 프로젝트 상태 추적
-- **지능적 명령 해석**: 모호함 감지 및 자동 개선 제안
-- **학습 기반 개선**: 사용자 피드백을 통한 지속적 성능 향상
+- **문제 1 – 파편화된 운영 도구**
+  - GitHub Actions, NCP 콘솔, kubectl, Slack 알림이 제각각이라 한 번의 배포/롤백 작업에 여러 툴을 오가야 합니다.
+- **문제 2 – 사람이 직접 기억하는 배포/롤백 절차**
+  - “어느 브랜치에서 어떤 이미지를 빌드해서, 어느 클러스터에 몇 개로 배포했는지”를 사람이 기억하고 수동으로 조작해야 합니다.
+- **문제 3 – 운영 진입 장벽**
+  - kubectl·YAML·CI 파이프라인을 모두 이해해야 배포/롤백을 할 수 있어, 신규 팀원이나 비(非)플랫폼 엔지니어에게 진입장벽이 높습니다.
 
-### 빠른 시작
-```python
-from app.llm.advanced_nlp_service import AdvancedNLPService
+K-Le-PaaS Backend Hybrid는 이 문제들을 다음 방식으로 풀고자 합니다.
 
-# 서비스 초기화
-service = AdvancedNLPService()
-await service.initialize()
+- **하나의 백엔드로 운영 흐름 통합**: GitHub Webhook, Kubernetes API, NCP, Slack을 단일 FastAPI 백엔드로 묶어, “HTTP API + 자연어 명령”만 알면 운영이 가능하게 만듭니다.
+- **자연어 기반 안전 실행**: 사용자는 한국어로 “staging에 3개로 스케일링해줘”, “이전 버전으로 롤백해줘”와 같이 말하고, 백엔드는 Gemini 기반 NLP + 명령 플래너를 통해 실제 K8s/NCP 작업을 안전하게 실행합니다.
+- **이력·헬스·알림 일원화**: 배포/롤백·명령·헬스 상태와 Slack 알림을 한 곳에서 관리해, “언제 무엇이 어떻게 배포되었는지”를 추적 가능하게 합니다.
 
-# 자연어 명령 처리
-result = await service.process_command(
-    user_id="user123",
-    project_name="my-project",
-    command="web-app을 staging에 3개 복제본으로 배포해줘"
-)
-```
+---
 
-### 테스트 실행
+## 프로젝트의 의도와 지향점
+
+- **운영 팀을 위한 “하나의 관문(Gateway)”**
+  - 운영자가 이 백엔드만 바라보고 **배포 → 모니터링 → 롤백 → 알림**까지 한 흐름으로 볼 수 있게 만드는 것이 1차 목표입니다.
+- **“명령어 중심”이 아닌 “문맥 중심” 운영**
+  - 단순 명령어 매핑이 아니라, NLP·대화형 인터랙션을 통해 사용자의 문맥(현재 보고 있는 GitHub 리포지토리, 직전 명령 등)을 이해하고 안전장치(확인, 비용 추정)를 둡니다.
+- **플랫폼·DevOps 팀의 반복 작업을 줄이는 도구**
+  - 새로운 서비스/리포지토리가 늘어나도, 동일한 API와 자연어 인터페이스만 제공하면 운영 패턴을 재사용할 수 있도록 설계되어 있습니다.
+
+이 백엔드는 **“클라우드 운영 자동화 레이어”** 로서, 프론트엔드·AI 에이전트·챗봇이 위에 올라타 사용할 수 있는 안정적인 기반을 제공합니다.
+
+---
+
+## 구조 개요
+
+- **엔트리포인트**: `app/main.py`
+  - `create_app()` 에서 FastAPI 인스턴스 생성
+  - 모든 v1 라우터(`app/api/v1/*.py`) 등록
+  - 데이터베이스 초기화(`init_database()`), 서비스 초기화(`init_services()`)
+  - Prometheus 메트릭 엔드포인트 `/metrics` 제공
+- **REST API 계층**: `app/api/v1/`
+  - `system.py`: `/api/v1/health`, `/api/v1/healthz`, `/api/v1/version` 등 시스템 상태 및 헬스체크
+  - `cicd.py`: `/api/v1/cicd/webhook`, `/api/v1/cicd/staging-webhook`, GitHub App 설치/토큰 조회
+  - `nlp.py`: 자연어 명령 처리, 대화형 NLP, 명령/대화 히스토리 관리
+  - `deployments.py`, `deployment_histories.py`, `rollback.py`: 배포 및 롤백 관련 API
+  - `k8s.py`: Kubernetes 리소스 조회/조작 API
+  - `projects.py`, `user_url.py`, `admin_db.py`: 프로젝트/URL/관리자 DB 관련 API
+  - `oauth2.py`, `github_oauth.py`, `slack_auth.py`, `auth_verify.py`: OAuth2, GitHub/Slack 인증, 토큰 검증
+  - `tutorial.py`, `websocket.py`, `monitoring.py`, `ncp_pipeline_api.py`, `dashboard.py`, `metrics.py`: 튜토리얼·웹소켓·모니터링·NCP 파이프라인 등 도메인별 API
+- **서비스 계층**: `app/services/`
+  - 실제 비즈니스 로직, 외부 시스템 연동, 이력 관리, 감시(watcher), 보안/알림을 담당하는 모듈들
+- **LLM/NLP 계층**: `app/llm/`
+  - `gemini.py`: Google Gemini 기반 자연어 해석 클라이언트
+  - `interfaces.py`: LLM 관련 공통 인터페이스/타입 정의
+- **데이터베이스/모델**:
+  - `app/database.py`: SQLAlchemy 세션 및 초기화, 서비스 초기화
+  - `app/models/*.py`: 배포 이력, 커맨드 히스토리, 사용자/리포지토리/알림 관련 ORM 모델
+
+---
+
+## 동작 원리 (실제 흐름 기준)
+
+### 1. FastAPI 앱 생성과 라우터 등록 (`app/main.py`)
+
+1. `create_app()` 호출 시:
+   - 로깅 설정: `app.core.logging_config.setup_logging()`
+   - OpenAPI 스펙 버전(3.1.0)을 명시적으로 설정하고, JWT Bearer 인증 스키마를 전역에 추가
+   - `app.state.started_at`에 기동 시각 저장 (헬스/메트릭에서 활용)
+   - 에러 핸들러 등록: `app.core.error_handler.setup_error_handlers(app)`
+   - CORS: 개발 편의를 위해 `allow_origins=["*"]` 로 설정 (운영에서는 축소 필요)
+2. REST 라우터 등록:
+   - `system`, `dashboard`, `deployments`, `nlp`, `cicd`, `k8s`, `monitoring`, `tutorial`, `websocket`, `slack_auth`, `oauth2`, `github_oauth`, `projects`, `deployment_histories`, `rollback`, `auth_verify`, `github_workflows`, `ncp_pipeline_api`, `admin_db`, `user_url` 등 모든 v1 라우터를 `/api/v1` 혹은 세부 prefix로 등록
+3. 데이터베이스 및 서비스 초기화:
+   - `init_database()` 호출 후, `get_db()`로 세션을 받아 `init_services(db_session)` 호출
+4. 종료 시 처리:
+   - `@app.on_event("shutdown")` 에서 `services.kubernetes_watcher.get_kubernetes_watcher()`를 통해 모든 K8s watch를 정리 (`stop_all_watches()` 호출)
+
+### 2. 시스템 헬스 및 메트릭 (`app/api/v1/system.py`)
+
+- `/api/v1/health`  
+  - 단순 liveness/readiness 용 엔드포인트  
+  - `app.state.started_at` 기준으로 `uptime_seconds` 계산
+- `/api/v1/healthz`  
+  - Prometheus 메트릭 및 외부 컴포넌트 헬스까지 포함한 **종합 헬스체크**  
+  - 설정값(`get_settings()`) 기반으로 다음 컴포넌트들을 비동기 체크:
+    - RabbitMQ Bridge Agent (`settings.rabbitmq_bridge_url`)
+    - Prometheus (`settings.prometheus_base_url`)
+    - Database (`/api/v1/health/db`)
+  - 결과를 바탕으로 Prometheus `Counter`, `Gauge`, `Histogram`, `Enum` 에 메트릭 기록
+  - `services.alerting.send_health_alert()` 를 통해 컴포넌트 상태 변화 시 Slack 등으로 알림
+  - 전체 상태가 degraded일 경우 HTTP 503 반환
+- `/api/v1/health/db`  
+  - DB 연결 상태 확인용 (현재는 단순 OK 응답, 실제 환경에서는 DB 핸드셰이크 구현 예상)
+- `/api/v1/version`  
+  - 앱 이름 및 버전 정보 반환 (`APP_NAME`, `APP_VERSION`)
+
+### 3. 자연어 명령 및 대화형 NLP (`app/api/v1/nlp.py`)
+
+#### 3.1 단일 자연어 명령 처리 (`POST /api/v1/nlp/process`)
+
+- 입력: `NaturalLanguageCommand`  
+  - `command`: 한국어 자연어 명령 문자열  
+  - `timestamp`, `context`: 선택적 메타데이터 (예: `project_name`)
+- 흐름:
+  1. JWT 토큰이 있으면 `services.security.get_current_user_id` 를 통해 사용자 식별, 없으면 `"api_user"` 사용
+  2. 명령 유효성 검증 (길이, 위험한 키워드, 로그 라인 수 제한 등)
+  3. `app.llm.gemini.GeminiClient` 의 `interpret()` 호출로 intent·entities 해석
+  4. `services.command_history.save_command_history()` 로 명령 히스토리 DB 저장
+  5. `services.commands.CommandRequest` 생성 후 `plan_command()` → `execute_command()` 호출
+  6. Kubernetes/NCP 작업 결과를 Gemini 해석 결과와 조합하여 응답 (`CommandResponse`)
+  7. 성공/실패 결과를 `services.command_history.update_command_status()` 로 DB에 반영
+
+#### 3.2 대화형 인터랙션 (`POST /api/v1/nlp/conversation` 등)
+
+- Redis를 사용한 세션 기반 멀티턴 대화:
+  - `services.conversation_manager.ConversationManager`
+  - `ConversationState` (INTERPRETING, ESTIMATING, WAITING_CONFIRMATION, EXECUTING, COMPLETED 등)
+- 주요 컴포넌트:
+  - `services.action_classifier.ActionClassifier`: intent별 위험도 분류 및 확인 여부 판단
+  - `services.cost_estimator.CostEstimator`: NCP 기반 배포 비용 추정
+  - `services.response_formatter.ResponseFormatter`: 스케일링/재시작/롤백 결과 메시지 포맷
+  - `services.nlp_rollback.RollbackCommandParser`: 롤백 명령어 폴백 파서
+- 엔드포인트:
+  - `POST /api/v1/nlp/conversation`  
+    - 사용자 메시지 수신 → Gemini 기반 해석 → 위험도/비용 산정 → 필요 시 사용자 확인 요청  
+    - 확인이 필요 없는 작업은 즉시 `plan_command`/`execute_command` 실행
+  - `POST /api/v1/nlp/confirm`  
+    - 대기 중인 고위험 작업(배포/스케일링/롤백/재시작 등)에 대한 사용자 승인/거부 처리
+  - `GET /api/v1/nlp/history`, `/api/v1/nlp/conversation-history`, `/api/v1/nlp/conversations`  
+    - DB 및 Redis에 저장된 명령/대화 히스토리 조회
+  - `DELETE /api/v1/nlp/conversation/{session_id}`  
+    - 특정 대화 세션 삭제
+  - `GET /api/v1/nlp/suggestions`  
+    - 자주 사용하는 Kubernetes/NCP 명령 예시를 반환
+
+> 이 NLP 계층은 실제 코드 상에서 **Gemini 단일 모델**을 사용하며, README에서는 존재하지 않는 `AdvancedNLPService` 나 별도 파일을 가정하지 않습니다.
+
+### 4. CI/CD 및 GitHub 연동 (`app/api/v1/cicd.py`, `app/services/cicd.py`, `app/services/github_app.py`)
+
+- `/api/v1/cicd/webhook`  
+  - GitHub Webhook 엔드포인트  
+  - `X-Hub-Signature-256` 검증 (`services.cicd.verify_github_signature`)  
+  - `push` 이벤트 → `handle_push_event()`  
+  - `release` 이벤트 → `handle_release_event()`  
+  - 배포 히스토리 기록 및 (환경에 따라) K8s 배포, Slack 알림 등 수행
+- `/api/v1/cicd/staging-webhook`  
+  - 별도 HMAC 서명(`X-Signature`, `X-Signature-Timestamp`) 기반의 스테이징용 웹훅
+- GitHub App 연동:
+  - `/api/v1/cicd/github/app/installations`  
+    - `services.github_app.github_app_auth.get_app_installations()` 를 호출하여 설치 목록 조회
+  - `/api/v1/cicd/github/app/installations/{installation_id}/token`  
+    - 지정 installation에 대한 설치 토큰 발급
+
+### 5. 배포/이력/감사 로깅 및 기타 서비스 (`app/services/*`, `app/models/*`)
+
+코드 상에서 실제로 import·사용되는 주요 서비스/모델들:
+
+- 배포/이력:
+  - `services.deployment.py`, `services.deployments.py`, `services.deployment_history.py`, `services.deployment_config.py`
+  - `models.deployment_history.DeploymentHistory`
+  - `models.deployment_url.DeploymentUrl`
+- 명령/대화 이력:
+  - `services.command_history` (NLP 및 대화형 인터랙션에서 사용)
+  - `models.command_history.CommandHistory`
+- 알림 및 Slack 연동:
+  - `services.notification_service`, `services.slack_notification_service`, `services.slack_template_builder`, `services.slack_oauth`, `services.slack_client`, `services.alerting`
+  - `models.notification.Notification`, `NotificationReport`
+- GitHub 및 CI/CD:
+  - `services.cicd`, `services.github_workflow`, `services.github_app`
+  - `models.user_project_integration`, `models.user_repository`
+- Kubernetes/NCP 연동:
+  - `services.k8s_client`, `services.k8s_logs`, `services.kubernetes_watcher`, `services.cluster`
+  - `services.ncp_pipeline`, `services.ncp_deployment_status_poller`, `services.nlp_rollback`
+- 보안/감사/모니터링:
+  - `services.security` (스코프, 인증 관련)
+  - `services.audit_logger`, `services.audit`
+  - `services.monitoring`
+- 기타:
+  - `services.history`, `services.tutorial`, `services.tutorial_script`, `services.domain_changer`, `services.pipeline_user_url`, `services.user_slack_config_service`
+  - `models.audit_log.AuditLogModel`, `models.oauth_token.OAuthToken`, `models.user_slack_config`, `models.slack_events.SlackEventModel`
+
+> 위 목록은 실제 import·테스트에서 사용되는 모듈만 포함하며, 코드에 존재하지 않는 파일명 또는 더 이상 사용되지 않는 레거시 파일은 나열하지 않습니다.
+
+---
+
+## 로컬 실행
+
+이 프로젝트는 Python 가상환경(venv)을 전제로 합니다.
+
 ```bash
-# 통합 테스트
-python -m pytest tests/test_advanced_nlp_integration.py -v
+cd backend-hybrid
 
-# 개발용 테스트 스크립트
-python scripts/test_advanced_nlp.py
-```
+# venv 생성
+python -m venv venv
 
-자세한 내용은 [고급 NLP 문서](docs/ADVANCED_NLP.md)를 참조하세요.
+# (macOS / Linux)
+source venv/bin/activate
 
-### External MCP Connectors (Architecture)
+# (Windows PowerShell)
+# .\venv\Scripts\Activate.ps1
 
-외부 MCP 서버(GitHub, Claude, OpenAI) 연동을 위한 공통 추상화를 추가했습니다.
-
-- 공통 인터페이스: `app/mcp/external/interfaces.py`
-  - `ExternalMCPClient`: `connect()`, `list_tools()`, `call_tool()`, `health()`, `close()`
-- 표준 에러 스키마: `app/mcp/external/errors.py`
-  - `MCPExternalError(code, message, retry_after_seconds, details)`
-  - 코드: `unauthorized|forbidden|not_found|rate_limited|timeout|unavailable|bad_request|conflict|internal`
-- 재시도 정책: `app/mcp/external/retry.py`
-  - 지수 백오프 + 지터, 서버 `retry_after` 존중
-- 메트릭: `app/mcp/external/metrics.py`
-  - `mcp_external_requests_total{provider,operation,result}`
-  - `mcp_external_request_latency_seconds{provider,operation}` (buckets: p95 관측 용)
-
-다음 단계로 GitHub/Claude/OpenAI 커넥터를 이 추상화에 맞춰 추가합니다.
-
-### GitHub MCP 커넥터 사용 예제
-
-```python
-from app.mcp.external.providers.github import GitHubMCPClient
-
-# GitHub App 인증으로 초기화
-client = GitHubMCPClient(
-    base_url="https://github-mcp.example.com",
-    app_id="123456",
-    private_key="-----BEGIN PRIVATE KEY-----\n...",
-    installation_id="789012"
-)
-
-# 또는 토큰 제공자로 초기화
-client = GitHubMCPClient(
-    base_url="https://github-mcp.example.com",
-    token_provider=lambda: "your_access_token"
-)
-
-# 사용
-await client.connect()
-tools = await client.list_tools()
-result = await client.call_tool("gh.clone", {"repo": "owner/repo"})
-health = await client.health()
-await client.close()
-```
-
-### MCP 메시지 변환 및 핸들러
-
-외부 MCP 서버와의 통신을 위한 메시지 변환 및 핸들러 시스템을 구현했습니다.
-
-```python
-from app.mcp.external.registry import mcp_registry, MCPProviderConfig
-
-# GitHub MCP 프로바이더 설정
-config = MCPProviderConfig(
-    name="github",
-    provider_type="github",
-    base_url="https://github-mcp.example.com",
-    config={
-        "app_id": "123456",
-        "private_key": "-----BEGIN PRIVATE KEY-----\n...",
-        "installation_id": "789012"
-    }
-)
-
-# 프로바이더 등록 및 초기화
-mcp_registry.add_provider_config(config)
-await mcp_registry.initialize_provider("github")
-
-# 도구 호출
-result = await mcp_registry.call_tool("github", "gh.clone", {"repo": "owner/repo"})
-
-# 도구 목록 조회
-tools = await mcp_registry.list_tools("github")
-
-# 헬스 체크
-health = await mcp_registry.health_check("github")
-```
-
-**API 엔드포인트:**
-- `POST /mcp/external/providers` - 프로바이더 설정 추가
-- `GET /mcp/external/providers` - 프로바이더 목록 조회
-- `POST /mcp/external/tools/call` - 도구 호출
-- `GET /mcp/external/tools/{provider}` - 도구 목록 조회
-- `GET /mcp/external/health/{provider}` - 헬스 체크
-
-## Local Run
-
-```bash
-# from backend-hybrid/
-python -m venv .venv && . .venv/Scripts/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
+# 의존성 설치
 pip install -r requirements.txt
+
+# 개발 서버 실행
 uvicorn app.main:app --reload --port 8080
 ```
 
 - Health: `GET http://localhost:8080/api/v1/health`
 - Version: `GET http://localhost:8080/api/v1/version`
-- MCP stub: `GET http://localhost:8080/mcp/info`
 
-## Docker
+---
+
+## Docker 실행
 
 ```bash
-# from backend-hybrid/
+cd backend-hybrid
+
 docker build -t klepaas-backend:dev .
 docker run --rm -p 8080:8080 klepaas-backend:dev
 ```
 
-## Notes
-- MCP mount falls back to a stub if `fastapi_mcp` is not available.
-- Tighten CORS in production.
+---
 
-## Ops Guide
+## 환경 변수 (실제 코드에서 사용되는 주요 항목)
 
-### Environment Variables (Backend)
+대부분 `app/core/config.py` 및 서비스 레이어에서 `KLEPAAS_` 접두사 또는 관련 키로 사용됩니다. 아래는 코드·테스트에서 실제로 참조되는 범주입니다.
 
-| Key | Description | Example |
-|-----|-------------|---------|
-| KLEPAAS_SLACK_WEBHOOK_URL | Slack Webhook URL | https://hooks.slack.com/services/... |
-| KLEPAAS_SLACK_ALERT_CHANNEL_DEFAULT | 기본 알림 채널 | #ops-alerts |
-| KLEPAAS_SLACK_ALERT_CHANNEL_RATE_LIMITED | rate_limited 전용 채널 | #ops-throttle |
-| KLEPAAS_SLACK_ALERT_CHANNEL_UNAUTHORIZED | unauthorized 전용 채널 | #ops-security |
-| KLEPAAS_SLACK_ALERT_TEMPLATE_ERROR | 에러 템플릿(Jinja2) | "[MCP][ERROR] {{operation}} code={{code}} msg={{message}}" |
-| KLEPAAS_SLACK_ALERT_TEMPLATE_HEALTH_DOWN | 헬스다운 템플릿 | "[MCP][HEALTH][DOWN] code={{code}} msg={{message}}" |
+- **Slack/알림 관련**
+  - `KLEPAAS_SLACK_WEBHOOK_URL`
+  - `KLEPAAS_SLACK_ALERT_CHANNEL_DEFAULT`
+  - `KLEPAAS_SLACK_ALERT_CHANNEL_RATE_LIMITED`
+  - `KLEPAAS_SLACK_ALERT_CHANNEL_UNAUTHORIZED`
+  - `KLEPAAS_SLACK_ALERT_TEMPLATE_ERROR`
+  - `KLEPAAS_SLACK_ALERT_TEMPLATE_HEALTH_DOWN`
+- **CI/CD 및 GitHub**
+  - `KLEPAAS_WEBHOOK_URL`, `KLEPAAS_WEBHOOK_SECRET`
+  - GitHub App/OAuth 관련 키 (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_WEBHOOK_SECRET`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` 등)
+- **데이터베이스/캐시/모니터링**
+  - `DATABASE_URL`
+  - `REDIS_URL` (또는 설정 객체 내 `redis_url`)
+  - `PROMETHEUS_BASE_URL`, `ALERTMANAGER_URL`, `ALERTMANAGER_WEBHOOK_URL`
+- **Kubernetes/NCP**
+  - `ENABLE_K8S_DEPLOY`
+  - `K8S_STAGING_NAMESPACE`
+  - `K8S_IMAGE_PULL_SECRET`
+  - NCP 관련 키 (NKS 클러스터, SourceDeploy/SourceCommit 엔드포인트 등)
+- **LLM/Gemini**
+  - `GEMINI_API_KEY` 및 GCP/Gemini 설정 (프로젝트/리전/모델 이름 등)
 
-### Security (Scopes)
-- 엔드포인트에 필요한 스코프를 `require_scopes(["mcp:execute"])` 형태로 선언
-- 테스트 환경은 `X-Scopes` 헤더 사용, 운영은 JWT/OAuth 토큰에서 스코프 파싱 권장
+> 실제 사용되는 환경 변수 세부 목록은 `app/core/config.py` 와 관련 서비스 모듈을 기준으로 확인하는 것을 권장합니다.
 
-### Audit Logging
-- 위치: `app/services/audit.py`
-- 포맷: JSON 구조(시간/사용자/IP/액션/리소스/상태/상세)
-- 중앙화: Splunk/Sentry/ELK 핸들러 추가 권장
+---
 
-### Circuit Breaker
-- 위치: `app/mcp/external/handlers.py`
-- 설정: `breaker_failure_threshold`, `breaker_reset_timeout_sec`
-- 상태: closed → (실패 누적) → open → (타임아웃) → half-open → 성공 시 closed 복귀
+## 보안 · 감사 (요약)
 
-## Troubleshooting
-- Slack 알림 미수신: Webhook URL/채널 권한 확인, 템플릿 렌더링 에러 로그 확인
-- 403 insufficient_scope: 요청 토큰의 스코프 확인(`mcp:*`), 매핑 테이블 점검
-- MCP 연동 지연/장애: 서킷 브레이커 상태(open) 여부, 외부 MCP 헬스 확인
+- **보안/스코프**:  
+  - `app/services/security.py` 에서 스코프 기반 접근 제어를 구현  
+  - 테스트 환경에서는 `X-Scopes` 헤더를 사용, 운영 환경에서는 JWT/OAuth 토큰 클레임으로 스코프 파싱
+- **감사 로깅**:  
+  - `app/services/audit_logger.py`, `app/services/audit.py`  
+  - 시간/사용자/IP/액션/리소스/상태/상세 를 JSON 구조로 기록 (중앙 로그 시스템 연계 전제)
 
-## Branch protection & required checks (Guide)
-- Protect `main`: require PR reviews (>=1), block direct pushes, require status checks to pass
-- Required checks: `PR CI` (ruff + build), optional `Dependency Review`
-- Releases/production: use GitHub Environments with Required reviewers for `production`
+---
 
-## CI/CD Secrets & Variables
-- Required Secrets (Repo → Settings → Secrets and variables → Actions)
-  - `KLEPAAS_WEBHOOK_URL`: Backend CICD webhook endpoint (`/api/v1/cicd/webhook`)
-  - `KLEPAAS_WEBHOOK_SECRET`: HMAC secret for `X-Hub-Signature-256`
-  - (Optional) `SLACK_WEBHOOK_URL`: Slack 알림용 Webhook URL
-- GitHub App Secrets (Recommended for enhanced security)
-  - `KLEPAAS_GITHUB_APP_ID`: GitHub App ID
-  - `KLEPAAS_GITHUB_APP_PRIVATE_KEY`: GitHub App private key (PEM format)
-  - `KLEPAAS_GITHUB_APP_WEBHOOK_SECRET`: GitHub App webhook secret
-- Recommended Permissions in workflows
-  - `permissions: { contents: read, packages: write, id-token: write }` (GHCR 및 OIDC 대응)
-- Image naming
-  - Staging: `ghcr.io/<owner>/<repo>-backend:latest-staging` + `sha`
-  - Production: `ghcr.io/<owner>/<repo>-backend:latest-prod` + SemVer tags (`vX.Y.Z`, `vX.Y`, `vX`)
+## 테스트
 
-## Image Tagging Policy
-- PR: ephemeral build only (no push) or `pr-<number>` when needed
-- Main: `latest-staging`, branch ref tag (e.g., `main`), and commit `sha`
-- Release: `latest-prod`, plus SemVer fan-out: `vX.Y.Z`, `vX.Y`, `vX`
+```bash
+source venv/bin/activate  # venv 활성화
 
-## E2E (workflow_dispatch)
-- Workflow: `E2E CI/CD Webhook Verification`
-- 전제: `KLEPAAS_WEBHOOK_SECRET` 시크릿 설정 필요
-- 수행: GitHub Actions에서 수동 실행 → 백엔드 기동 → `/health`·`/version` 체크 → 서명된 `push`/`release` 웹훅을 `/api/v1/cicd/webhook`에 전송하여 파이프라인 엔드포인트 동작 검증
+python -m pytest tests/ -v
+```
 
+- 주요 테스트 파일 (실제 존재 및 사용 기준):
+  - `tests/test_advanced_nlp_integration.py`, `tests/test_nlp_system.py` : NLP/명령 흐름 검증
+  - `tests/test_k8s_api.py`, `tests/test_ncp_manifest_update.py` : Kubernetes/NCP 관련 기능
+  - `tests/test_cicd_mcp_trigger.py`, `tests/test_system.py`, `tests/test_healthz.py` 등 시스템/헬스/보안 테스트
+  - Slack/알림/템플릿 관련: `tests/test_slack_*`, `tests/test_slack_notification_service.py`, `tests/test_slack_templates.py`
 
+테스트는 실제 코드 경로와 일치하는 모듈만을 대상으로 하며, 존재하지 않는 서비스/파일에 대한 언급은 포함하지 않습니다.
+
+---
+
+## 운영 가이드 (요약)
+
+- MCP:
+  - FastMCP 설치 여부에 따라 실제 MCP 서버 또는 stub 모드로 동작
+  - `/mcp/info`, `/mcp/tools`, `/mcp/stream` 경로를 통해 상태 및 도구 목록 확인
+- CORS:
+  - 개발 편의상 `allow_origins=["*"]` 로 설정되어 있으므로, 운영 환경에서는 도메인 화이트리스트를 반드시 적용해야 합니다.
+- 데이터베이스:
+  - 기본 SQLite를 사용하지만, `DATABASE_URL` 설정을 통해 PostgreSQL 등으로 전환 가능
+- 헬스·알림:
+  - `/api/v1/healthz` 결과를 기준으로 Prometheus/Alertmanager/Slack 연동을 구성
+
+이 README는 **현재 코드와 테스트에 실제로 존재하고 사용되는 파일·폴더** 만을 기준으로 작성되었습니다. 코드 구조 변경 시에는 `app/main.py`, `app/api/v1/*`, `app/services/*`, `app/mcp/*`, `app/models/*`, `tests/*` 를 기준으로 이 문서를 함께 업데이트하는 것을 권장합니다.

@@ -121,6 +121,7 @@ def init_database():
 
 def init_services(db_session: Session):
     """서비스들을 초기화합니다."""
+    import structlog
     from .services.audit_logger import init_audit_logger
     from .services.deployment_history import init_deployment_history_service
     from .services.kubernetes_watcher import (
@@ -129,6 +130,9 @@ def init_services(db_session: Session):
         update_deployment_history_on_success
     )
     from .websocket.deployment_monitor import init_deployment_monitor_manager
+    from .services.pipeline_user_url import sync_all_deployment_urls
+
+    logger = structlog.get_logger(__name__)
 
     # 서비스 초기화
     init_audit_logger(db_session)
@@ -143,6 +147,14 @@ def init_services(db_session: Session):
     except RuntimeError:
         # Watcher 초기화 실패 시 (kubeconfig 없는 경우 등)
         pass
+
+    # 인그레스에서 도메인 정보 동기화
+    try:
+        logger.info("Syncing deployment URLs from ingress manifests")
+        sync_all_deployment_urls(db_session)
+        logger.info("All services initialized successfully")
+    except Exception as e:
+        logger.warning(f"Failed to sync deployment URLs: {e}")
 
 
 def _ensure_user_slack_config_columns() -> None:
