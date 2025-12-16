@@ -34,6 +34,100 @@ K-Le-PaaS Backend Hybrid는 이 문제들을 다음 방식으로 풀고자 합�
 
 ---
 
+## 시스템 아키텍처 개요
+
+> 아래 다이어그램은 전체 플랫폼 관점의 아키텍처입니다.  
+> (예: `screenshots/architecture-overview.png` 로 저장 후 README와 같은 리포지토리에 두는 것을 권장합니다.)
+
+```text
+사용자 / 개발자
+   ↓
+웹 프론트엔드 (TypeScript) · Slack · GitHub
+   ↓
+Cloudflare → Nginx → WireGuard
+   ↓
+FastAPI 백엔드 (K-Le-PaaS Backend Hybrid)
+   ├─ PostgreSQL (상태·이력 데이터)
+   ├─ Redis (세션·대화 상태)
+   ├─ Gemini (자연어 해석)
+   ├─ Prometheus (메트릭 수집)
+   └─ Kubernetes / NCP SourcePipeline (배포·롤백)
+```
+
+아키텍처는 크게 세 레이어로 나뉩니다.
+
+- **사용자·프론트 레이어**
+  - 사용자는 브라우저(React/TypeScript 프론트엔드), Slack, GitHub UI를 통해 시스템과 상호작용합니다.
+  - 인증은 Google/GitHub OAuth를 활용하고, Slack 앱을 통해 배포/알림 채널과 연결합니다.
+- **애플리케이션 백엔드 레이어 (이 리포지토리)**
+  - FastAPI 앱이 모든 REST API와 WebSocket 엔드포인트를 제공합니다.
+  - Redis는 대화형 NLP 세션과 단기 상태를, PostgreSQL은 배포·명령·감사 로그 등 영속 데이터를 저장합니다.
+  - Gemini는 자연어 명령을 구조화된 의도/엔티티로 해석하고, `services.*` 계층이 이를 실제 Kubernetes/NCP 작업으로 변환합니다.
+  - Prometheus는 FastAPI 및 인프라 헬스 정보를 수집하고, Grafana(별도 구성)에서 시각화합니다.
+- **인프라·배포 레이어**
+  - Kubernetes 클러스터와 NCP SourcePipeline(SourceCommit → SourceBuild → Container Registry → SourceDeploy → Ncloud Kubernetes Service)이 애플리케이션 이미지를 빌드·배포합니다.
+  - GitHub push/relase 이벤트는 `/api/v1/cicd/webhook` 으로 전달되어, 이미지 태그 관리·배포 히스토리 기록·Slack 알림을 트리거합니다.
+
+이 아키텍처 위에서 K-Le-PaaS Backend Hybrid는 **“프론트/Slack/CI ↔ 인프라(K8s·NCP)”** 사이를 중개하는 중심 허브 역할을 합니다.
+
+### 주요 시나리오별 흐름
+
+- **1) 개발자 → GitHub → NCP/Kubernetes 배포**
+  - 개발자가 GitHub에 코드를 푸시하면 CI(예: GitHub Actions)가 이미지를 빌드해 컨테이너 레지스트리에 푸시합니다.
+  - 동시에 서명된 Webhook 이 `/api/v1/cicd/webhook` 으로 전달됩니다.
+  - FastAPI 백엔드는 이벤트 타입(push/release)을 해석해:
+    - NCP SourcePipeline(SourceCommit → SourceBuild → SourceDeploy → Ncloud Kubernetes Service)을 호출하거나,
+    - Helm 값/매니페스트를 업데이트하여 Kubernetes 클러스터로 배포를 트리거합니다.
+  - 배포 결과는 PostgreSQL `deployment_history` 에 기록되고, Slack 알림으로 요약이 전달됩니다.
+
+- **2) 사용자/운영자 → 웹 UI·Slack → 자연어 명령 기반 운영**
+  - 사용자는 웹 대시보드(프론트엔드 TypeScript) 또는 Slack 에서 한국어 명령을 보냅니다.
+  - 요청은 FastAPI의 `/api/v1/nlp/*` 엔드포인트로 들어오고, Redis에 세션/대화 상태를 저장합니다.
+  - `GeminiClient` 가 명령을 intent·entities 로 해석하고 → `services.commands` 가 이를
+    - Kubernetes 리소스 조회/스케일/롤백,
+    - NCP 롤백/배포
+    로 변환하여 실제 클러스터에 적용합니다.
+  - 결과와 대화 내역은 PostgreSQL `command_history` 및 Redis에 저장되고, 요약 메시지는 다시 웹 UI/Slack 으로 반환됩니다.
+
+- **3) 모니터링 & 헬스체크**
+  - FastAPI는 `/api/v1/health`, `/api/v1/healthz`, `/metrics` 를 통해 상태와 메트릭을 노출합니다.
+  - Prometheus가 이 엔드포인트와 Kubernetes/인프라 메트릭을 스크랩하고, Grafana(별도 구성)에서 시각화합니다.
+  - `app/api/v1/monitoring.py` 와 `services.alerting` 이 장애 징후를 감지하면 Slack 채널로 경고를 전송합니다.
+
+> 정리하면, 이 백엔드는  
+> - **GitHub·NCP·Kubernetes·Slack·모니터링 인프라** 사이를 이어 주는 중앙 허브이자,  
+> - **자연어 명령으로 인프라를 제어하는 인터페이스** 역할을 합니다.
+
+---
+
+## 프로젝트 디렉토리 구조 (요약)
+
+> 실제 코드 기준, 이 백엔드에서 핵심이 되는 디렉토리만 정리했습니다.
+
+```text
+backend-hybrid/
+├── app/
+│   ├── main.py                # FastAPI 엔트리포인트
+│   ├── api/
+│   │   └── v1/                # REST API 라우터 (system, nlp, cicd, k8s, monitoring 등)
+│   ├── services/              # 비즈니스 로직, 외부 연동(K8s, NCP, Slack, GitHub, CI/CD 등)
+│   ├── models/                # SQLAlchemy ORM 모델 (배포 이력, 명령 이력, 사용자/리포지토리 등)
+│   ├── core/                  # 설정(config), 로깅, 에러 핸들러
+│   ├── llm/                   # Gemini 기반 NLP 클라이언트 및 인터페이스
+│   ├── auth/, security/       # 인증/인가, JWT/OAuth, 권한/스코프
+│   └── monitoring/, websocket # 모니터링 API, WebSocket 엔드포인트
+├── tests/                     # pytest 기반 테스트 (NLP, K8s, CI/CD, Slack, 시스템 테스트 등)
+├── docs/                      # 아키텍처/환경설정/NCP/Slack 연동 문서
+├── screenshots/               # 아키텍처 다이어그램 등 이미지 (예: architecture-overview.png)
+├── requirements.txt           # Python 의존성 정의
+├── Dockerfile                 # 컨테이너 이미지 빌드 정의
+└── README.md                  # 현재 문서
+```
+
+상세한 아키텍처/환경 설정은 `docs/` 디렉토리(특히 `docs/ENVIRONMENT_AND_CONFIG.md`, `docs/architecture/*`)를 함께 참고하면 됩니다.
+
+---
+
 ## 구조 개요
 
 - **엔트리포인트**: `app/main.py`
