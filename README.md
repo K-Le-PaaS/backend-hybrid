@@ -37,22 +37,8 @@ K-Le-PaaS Backend Hybrid는 이 문제들을 다음 방식으로 풀고자 합�
 ## 시스템 아키텍처 개요
 
 > 아래 다이어그램은 전체 플랫폼 관점의 아키텍처입니다.
-> 'screenshots/architecture-overview.png'
 
-```text
-사용자 / 개발자
-   ↓
-웹 프론트엔드 (TypeScript) · Slack · GitHub
-   ↓
-Cloudflare → Nginx → WireGuard
-   ↓
-FastAPI 백엔드 (K-Le-PaaS Backend Hybrid)
-   ├─ PostgreSQL (상태·이력 데이터)
-   ├─ Redis (세션·대화 상태)
-   ├─ Gemini (자연어 해석)
-   ├─ Prometheus (메트릭 수집)
-   └─ Kubernetes / NCP SourcePipeline (배포·롤백)
-```
+![K-Le-PaaS Architecture](./screenshots/architecture-overview.png)
 
 아키텍처는 크게 세 레이어로 나뉩니다.
 
