@@ -37,7 +37,7 @@ K-Le-PaaS Backend Hybrid는 이 문제들을 다음 방식으로 풀고자 합�
 ## 시스템 아키텍처 개요
 
 > 아래 다이어그램은 전체 플랫폼 관점의 아키텍처입니다.  
-> (예: `screenshots/architecture-overview.png` 로 저장 후 README와 같은 리포지토리에 두는 것을 권장합니다.)
+> screenshots/architecture-overview.png
 
 ```text
 사용자 / 개발자
