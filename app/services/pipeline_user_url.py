@@ -350,3 +350,121 @@ def update_deployment_url_from_manifest(
     except Exception as e:
         logger.error(f"Failed to update deployment URL from manifest: {e}")
         return None
+
+
+def sync_all_deployment_urls(db: Session) -> int:
+    """
+    모든 프로젝트의 deployment URLs를 동기화합니다.
+    K8s 클러스터의 Ingress 리소스를 조회하여 실제 배포된 도메인 정보로 DB를 갱신합니다.
+
+    Args:
+        db: 데이터베이스 세션
+
+    Returns:
+        동기화된 프로젝트 수
+    """
+    from ..models.user_project_integration import UserProjectIntegration
+
+    synced_count = 0
+
+    try:
+        from ..k8s.client import get_networking_v1_api
+
+        # K8s API 클라이언트 가져오기
+        try:
+            networking_v1 = get_networking_v1_api()
+        except Exception as e:
+            logger.warning(f"K8s API not available, skipping URL sync: {e}")
+            return 0
+
+        # 모든 네임스페이스의 Ingress 조회
+        ingresses = networking_v1.list_ingress_for_all_namespaces()
+
+        logger.info(f"Found {len(ingresses.items)} Ingress resources in K8s cluster")
+
+        # Ingress 이름 → (owner, repo) 매핑 생성
+        # 예: k-le-paas-test05 → (K-Le-PaaS, test05)
+        integrations = db.query(UserProjectIntegration).all()
+        repo_map = {}  # sc_repo_name → (user_id, owner, repo)
+        for integ in integrations:
+            if integ.sc_repo_name:
+                repo_map[integ.sc_repo_name.lower()] = (
+                    integ.user_id,
+                    integ.github_owner,
+                    integ.github_repo
+                )
+
+        # 각 Ingress에서 도메인 추출 및 DB 업데이트
+        for ingress in ingresses.items:
+            try:
+                ingress_name = ingress.metadata.name
+
+                # Ingress 이름에서 프로젝트 매칭 (예: k-le-paas-test05)
+                matched_key = None
+                for repo_name in repo_map.keys():
+                    # 정규화된 이름으로 비교
+                    normalized_ingress = ingress_name.lower().replace("_", "-")
+                    if repo_name in normalized_ingress or normalized_ingress in repo_name:
+                        matched_key = repo_name
+                        break
+
+                if not matched_key:
+                    logger.debug(f"No matching project for Ingress: {ingress_name}")
+                    continue
+
+                user_id, owner, repo = repo_map[matched_key]
+
+                # Ingress에서 호스트(도메인) 추출
+                hosts = []
+                if ingress.spec.rules:
+                    for rule in ingress.spec.rules:
+                        if rule.host:
+                            hosts.append(rule.host)
+
+                if not hosts:
+                    logger.debug(f"No hosts found in Ingress: {ingress_name}")
+                    continue
+
+                # 첫 번째 호스트를 URL로 사용
+                domain = hosts[0]
+                url = f"https://{domain}"
+
+                # DB 업데이트
+                existing = db.query(DeploymentUrl).filter(
+                    DeploymentUrl.user_id == user_id,
+                    DeploymentUrl.github_owner == owner,
+                    DeploymentUrl.github_repo == repo
+                ).first()
+
+                if existing:
+                    if existing.url != url:
+                        logger.info(
+                            f"Updating URL for {owner}/{repo}: {existing.url} → {url}"
+                        )
+                        existing.url = url
+                        existing.updated_at = datetime.now(timezone.utc)
+                        synced_count += 1
+                else:
+                    logger.info(f"Creating URL for {owner}/{repo}: {url}")
+                    new_record = DeploymentUrl(
+                        user_id=user_id,
+                        github_owner=owner,
+                        github_repo=repo,
+                        url=url,
+                        is_user_modified=False
+                    )
+                    db.add(new_record)
+                    synced_count += 1
+
+            except Exception as e:
+                logger.warning(f"Failed to sync Ingress {ingress.metadata.name}: {e}")
+                continue
+
+        db.commit()
+        logger.info(f"Successfully synced {synced_count} deployment URLs from Ingress resources")
+        return synced_count
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to sync all deployment URLs: {e}")
+        return synced_count
