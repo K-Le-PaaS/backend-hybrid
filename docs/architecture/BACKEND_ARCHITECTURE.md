@@ -1134,11 +1134,11 @@ Half-Open (테스트)
 - [튜토리얼 구현](./tutorial/implementation.md) - 인터랙티브 튜토리얼
 
 ### 설정 및 배포
-- [환경 설정 가이드](../ENVIRONMENT_AND_CONFIG.md) - 환경변수 및 K8s 배포
+- [환경 설정 가이드](./ENVIRONMENT_AND_CONFIG.md) - 환경변수 및 K8s 배포
 
 ### 외부 통합
-- [Slack 설정 가이드](../integrations/SLACK_SETUP.md) - Slack OAuth 및 알림
-- [NCP 시나리오 가이드](../ncp/NCP_SCENARIO_MANUAL_CREATION.md) - NCP SourceDeploy
+- [Slack 설정 가이드](./integrations/SLACK_SETUP.md) - Slack OAuth 및 알림
+- [NCP 시나리오 가이드](../troubleshooting/ncp/NCP_SCENARIO_MANUAL_CREATION.md) - NCP SourceDeploy
 
 ### 프로젝트 문서
 - [프로젝트 README](../../README.md) - 프로젝트 소개

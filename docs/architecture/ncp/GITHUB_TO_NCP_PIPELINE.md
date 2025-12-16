@@ -298,7 +298,7 @@ def _generate_ncr_image_name(owner: str, repo: str) -> str:
     - 소문자만 사용
     - 하이픈(-) 허용
 
-    Examples:
+    예시:
         "K-Le-PaaS/test-01" → "k-le-paas-test-01"
         "myorg/myrepo" → "myorg-myrepo"
     """
@@ -1442,5 +1442,6 @@ async def _call_ncp_rest_api(
 5. **모든 배포는 DeploymentHistory에 기록**됩니다.
 
 ### 관련 문서
-- [02-nlp-deploy-rollback.md](./02-nlp-deploy-rollback.md) - NLP 배포 및 롤백 기능
-- [03-troubleshooting.md](./03-troubleshooting.md) - 트러블슈팅 가이드
+- [NLP 배포 및 롤백 기능](../nlp/DEPLOY_ROLLBACK.md) - NLP 배포 및 롤백 기능
+- [롤백 트러블슈팅](../../troubleshooting/ROLLBACK_ERROR_ANALYSIS.md) - 롤백 에러 분석
+- [NCP 트러블슈팅](../../troubleshooting/ncp/NCP_IMAGE_NAME_FIX.md) - NCP 이미지 이름 문제 해결

@@ -103,7 +103,7 @@ history_record = DeploymentHistory(
 | `/api/v1/rollback/candidates` | POST | 롤백 가능한 배포 목록 조회 |
 | `/api/v1/rollback/candidates/{owner}/{repo}` | GET | 롤백 후보 조회 (GET 버전) |
 
-**5.2. Request/Response Models**
+**5.2. 요청/응답 모델**
 - `RollbackToCommitRequest`: 커밋 SHA 롤백 요청
 - `RollbackToPreviousRequest`: N번 전 롤백 요청
 - `RollbackCandidatesRequest`: 후보 목록 조회 요청
@@ -163,7 +163,7 @@ POST /api/v1/nlp/process
 2. 명령어 또는 context에서 owner/repo 정보 추출
 3. CommandRequest 생성 (command="ncp_rollback", github_owner, github_repo, steps_back/target_commit_sha)
 4. commands.py의 plan_command → execute_command 경로로 실행
-5. _execute_ncp_rollback이 rollback.py 함수 호출
+5. `_execute_ncp_rollback` 이 `rollback.py` 함수 호출
 
 ### 2. REST API 직접 호출
 
@@ -398,13 +398,15 @@ Swagger UI에서 롤백 API 문서 확인:
 
 ## 🔜 향후 개선 사항
 
-1. **UI 통합**: 프론트엔드에서 롤백 버튼 및 히스토리 표시
-2. **알림**: 롤백 성공/실패 시 Slack 알림
-3. **권한 관리**: 롤백 권한 체크 (특정 사용자만 롤백 가능)
-4. **롤백 승인**: 프로덕션 롤백 시 승인 워크플로우
-5. **자동 롤백**: 배포 실패 시 자동 롤백 옵션
-6. **롤백 통계**: 롤백 빈도, 성공률 등 대시보드
+1. **UI 통합**: 프론트엔드에서 롤백 버튼 및 히스토리 표시  
+2. **알림**: 롤백 성공/실패 시 Slack 알림  
+3. **권한 관리**: 롤백 권한 체크 (특정 사용자만 롤백 가능)  
+4. **롤백 승인**: 프로덕션 롤백 시 승인 워크플로우  
+5. **자동 롤백**: 배포 실패 시 자동 롤백 옵션  
+6. **롤백 통계**: 롤백 빈도, 성공률 등 대시보드  
 
 ## 📞 문의
 
 구현 관련 질문이나 버그 리포트는 GitHub Issues를 통해 제출해주세요.
+
+
